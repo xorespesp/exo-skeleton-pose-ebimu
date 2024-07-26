@@ -1,0 +1,61 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg/master/scripts/vcpkg.schema.json",
+  "name": "exo-skeleton-pose-ebimu",
+  "version": "0.0.1",
+  "dependencies": [
+    {
+      "name": "boost-pool"
+    },
+    {
+      "name": "boost-circular-buffer"
+    },
+    {
+      "name": "boost-program-options"
+    },
+    {
+      "name": "boost-asio"
+    },
+    {
+      "name": "eigen3"
+    },
+    {
+      "name": "spdlog"
+    },
+    {
+      "name": "magic-enum"
+    }
+  ],
+  "overrides": [
+    {
+      "name": "boost-pool",
+      "version": "1.82.0",
+      "port-version": 0
+    },
+    {
+      "name": "boost-circular-buffer",
+      "version": "1.82.0",
+      "port-version": 0
+    },
+    {
+      "name": "boost-program-options",
+      "version": "1.82.0",
+      "port-version": 0
+    },
+    {
+      "name": "eigen3",
+      "version": "3.4.0",
+      "port-version": 0
+    },
+    {
+      "name": "spdlog",
+      "version": "1.14.1",
+      "port-version": 0
+    },
+    {
+      "name": "magic-enum",
+      "version": "0.9.5",
+      "port-version": 0
+    }
+  ],
+  "builtin-baseline": "51b14cd4e1230dd51c11ffeff6f7d53c61cc5297"
+}

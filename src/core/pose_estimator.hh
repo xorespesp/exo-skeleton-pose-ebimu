@@ -11,9 +11,6 @@
 #include <boost/circular_buffer.hpp>
 
 #include <type_traits>
-#include <algorithm>
-#include <limits>
-#include <thread>
 #include <unordered_map>
 #include <vector>
 #include <list>
@@ -21,22 +18,20 @@
 namespace core
 {
     enum joint_id_t {
-        JOINT_PELVIS = 0, // root joint
-        JOINT_HIP_L,
-        JOINT_HIP_R,
-        JOINT_KNEE_L,
+        JOINT_HIP_R, // root
+        JOINT_HIP_L, // root
         JOINT_KNEE_R,
-        JOINT_ANKLE_L,
+        JOINT_KNEE_L,
         JOINT_ANKLE_R,
+        JOINT_ANKLE_L,
+        NumOfJoints
     };
 
-    constexpr joint_id_t kInvalidJointID{ static_cast<joint_id_t>(std::numeric_limits<std::underlying_type_t<joint_id_t>>::max()) };
-    constexpr size_t kNumOfJoints{ 7 };
+    constexpr joint_id_t kInvalidJointID{ NumOfJoints };
 
     static const std::vector<std::pair<joint_id_t/* child */, joint_id_t/* parent */>> kJointsHierarchyMap = {
-        std::make_pair(JOINT_PELVIS, JOINT_PELVIS), // root joint
-        std::make_pair(JOINT_HIP_R, JOINT_PELVIS),
-        std::make_pair(JOINT_HIP_L, JOINT_PELVIS),
+        std::make_pair(JOINT_HIP_R, JOINT_HIP_R), // root
+        std::make_pair(JOINT_HIP_L, JOINT_HIP_L), // root
         std::make_pair(JOINT_KNEE_R, JOINT_HIP_R),
         std::make_pair(JOINT_KNEE_L, JOINT_HIP_L),
         std::make_pair(JOINT_ANKLE_R, JOINT_KNEE_R),
@@ -44,7 +39,6 @@ namespace core
     };
 
     static const std::unordered_map<joint_id_t, Eigen::Quaterniond> kJointsTPoseQuaternionMap = {
-        { JOINT_PELVIS, math::quat_from_eulerZYX(Eigen::Vector3d{ /* z */0.0, /* y */0.0, /* x */0.0 }) },
         { JOINT_HIP_R, math::quat_from_eulerZYX(Eigen::Vector3d{ /* z */0.0, /* y */0.0, /* x */0.0 }) },
         { JOINT_HIP_L, math::quat_from_eulerZYX(Eigen::Vector3d{ /* z */0.0, /* y */0.0, /* x */0.0 }) },
         { JOINT_KNEE_R, math::quat_from_eulerZYX(Eigen::Vector3d{ /* z */0.0, /* y */0.0, /* x */0.0 }) },
@@ -71,7 +65,7 @@ namespace core
 
     class motion_frame final {
     private:
-        std::array<joint_data_t, kNumOfJoints> _joints_map;
+        std::array<joint_data_t, NumOfJoints> _joints_map;
 
     public:
         motion_frame() : _joints_map{} {}
@@ -346,7 +340,7 @@ namespace core
             }
 
             _ctx = std::move(new_ctx);
-            LOG_INFO("running..");
+            LOG_INFO("running...");
         }
 
         void stop()

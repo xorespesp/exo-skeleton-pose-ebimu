@@ -1,6 +1,8 @@
 # exo-skeleton-pose-ebimu
 Exo skeleton pose estimator via `EBIMU24GV52` sensors
 
+![sensors](docs/sensors.png)
+
 ## Build Environment
 - Win11 23H2 x64 OS
 - MSVC Compiler (2022 x64)

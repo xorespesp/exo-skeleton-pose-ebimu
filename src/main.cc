@@ -1,20 +1,34 @@
 ﻿#include "core/pose_estimator.hh"
 
 #include <magic_enum.hpp>
+
 #include <iostream>
-#include <future>
 #include <signal.h>
 #include <conio.h>
 
 void run_offscreen(const core::pose_estimator::options_t& opts)
 {
+    {
+        std::string ebimu_device_joint_map_dump;
+        for (const auto& [mapped_jid, dev_rf_addr] : opts.ebimu_device_joint_map) {
+            const auto mapped_jname = magic_enum::enum_name(mapped_jid);
+            ebimu_device_joint_map_dump += utils::string::c_format(
+                "\n    Dev #%lu : %.*s"
+                , dev_rf_addr
+                , static_cast<int>(mapped_jname.size())
+                , mapped_jname.data()
+            );
+        }
+        LOG_INFO("ebimu device joint map:%s", ebimu_device_joint_map_dump.c_str());
+    }
+
     core::pose_estimator estimator;
     estimator.run_async(opts);
 
     static bool s_flag_exit = false;
     ::signal(SIGINT, +[](int) { s_flag_exit = true; });
 
-    LOG_INFO("waiting motion data... (press ^C to interrupt)");
+    LOG_INFO("waiting motion frames... (press ^C to interrupt)");
     while (!s_flag_exit)
     {
         core::motion_frame mframe;
@@ -62,13 +76,12 @@ int main(int argc, char** argv)
         core::pose_estimator::options_t opts;
         opts.ebrcv_device_com_port = (argc > 1) ? argv[1] : "COM5";
         opts.ebimu_device_joint_map = {
-            { core::JOINT_PELVIS, core::ebrcv24g_proto::make_device_rf_addr(100, 0) },
-            { core::JOINT_HIP_L, core::ebrcv24g_proto::make_device_rf_addr(100, 1) },
-            { core::JOINT_HIP_R, core::ebrcv24g_proto::make_device_rf_addr(100, 2) },
-            { core::JOINT_KNEE_L, core::ebrcv24g_proto::make_device_rf_addr(100, 3) },
-            { core::JOINT_KNEE_R, core::ebrcv24g_proto::make_device_rf_addr(100, 4) },
-            { core::JOINT_ANKLE_L, core::ebrcv24g_proto::make_device_rf_addr(100, 5) },
-            { core::JOINT_ANKLE_R, core::ebrcv24g_proto::make_device_rf_addr(100, 6) }
+            { core::JOINT_HIP_R, core::ebrcv24g_proto::make_device_rf_addr(100, 0) },
+            { core::JOINT_KNEE_R, core::ebrcv24g_proto::make_device_rf_addr(100, 1) },
+            { core::JOINT_ANKLE_R, core::ebrcv24g_proto::make_device_rf_addr(100, 2) },
+            { core::JOINT_HIP_L, core::ebrcv24g_proto::make_device_rf_addr(100, 3) },
+            { core::JOINT_KNEE_L, core::ebrcv24g_proto::make_device_rf_addr(100, 4) },
+            { core::JOINT_ANKLE_L, core::ebrcv24g_proto::make_device_rf_addr(100, 5) }
         };
 
         run_offscreen(opts);

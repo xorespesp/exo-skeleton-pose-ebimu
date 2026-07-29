@@ -69,6 +69,11 @@ namespace net
         pose::exo_pose_estimator& estimator();
         const pose::exo_pose_estimator& estimator() const;
 
+        // --- tag detection tuning (tag size, decimation, pose method, ...), live -------
+        // Persisted across source reopens; the detection worker rebuilds on the next frame.
+        void set_tag_tuning(const pose::tag_tuning_t& tuning);
+        pose::tag_tuning_t tag_tuning() const;
+
         // --- stepping -----------------------------------------------------------------
         // Advance one step: pull the newest latched detections and recompute joint states.
         // Each flag reports something that happened this step and is cleared once returned.
@@ -115,6 +120,7 @@ namespace net
 
         std::shared_ptr<hw::sensor_frame_provider> _provider;
         std::shared_ptr<pose_frame_observer> _observer;
+        pose::tag_tuning_t _tuning{}; // detector tuning, applied to each observer (persists across reopens)
         std::shared_ptr<io::frame_recorder> _recorder; // non-null only while recording
         pose::exo_pose_estimator _estimator;
         std::vector<pose::tag_detection_t> _detections;

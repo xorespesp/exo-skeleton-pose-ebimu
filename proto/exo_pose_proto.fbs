@@ -1,4 +1,4 @@
-﻿// exo-skeleton-pose network protocol.
+// exo-skeleton-pose network protocol.
 //
 // codegen:
 //   C++ : flatc --cpp    -o <out> exo_pose_proto.fbs
@@ -8,7 +8,7 @@
 namespace exo.proto;
 
 // Current version of this schema
-enum ProtocolVersion : uint { Current = 26071400 } // YYMMDDrr
+enum ProtocolVersion : uint { Current = 26072900 } // YYMMDDrr
 
 // Lower-limb joints id. (pose::joint_id_t)
 enum JointId : ubyte {
@@ -49,11 +49,10 @@ table GetServerStatus {}   // request the current ServerStatus (reply a ServerSt
 
 struct Quat { x: double; y: double; z: double; w: double; }
 
-// One joint's rotation. Both rotations share presence: both set, or both null. (joint lost)
+// One joint's pose info.
 table JointPose {
     id: JointId;
-    local_rot: Quat;      // relative to the parent joint
-    local_anim_rot: Quat; // relative to the captured rest pose (drives skeleton)
+    local_anim_rot: Quat; // parent-relative rotation vs the captured rest pose (drives the skeleton); null when the joint is lost this frame.
 }
 
 // One estimation step, broadcast to subscribed clients per new frame.

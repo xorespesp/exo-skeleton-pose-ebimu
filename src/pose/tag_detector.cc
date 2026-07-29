@@ -96,17 +96,6 @@ namespace pose
             const hw::intrinsic_t& intr = _opt.intrinsics.value();
             ::apriltag_detection_info_t info{ d, _opt.tag_size_m, intr.fx, intr.fy, intr.cx, intr.cy };
 
-            // Run orthogonal iteration directly (estimate_tag_pose is just this + a min-error pick),
-            // keeping both planar-ambiguity solutions and their errors for the selector.
-            double err1{ 0.0 }, err2{ 0.0 };
-            ::apriltag_pose_t p1{}, p2{};
-            ::estimate_tag_pose_orthogonal_iteration(
-                &info, 
-                &err1, &p1, 
-                &err2, &p2, 
-                static_cast<int>(_opt.num_iters)
-            );
-
             const double len = _opt.tag_size_m * 0.5;
             const auto make_tag_pose = [&intr, len](const ::apriltag_pose_t& p, double err) {
                 const Eigen::Isometry3d tf = to_isometry(p);
@@ -122,26 +111,51 @@ namespace pose
                 };
             };
 
-            // NOTE: Orthogonal iteration always returns solution 1; the second exists only when a
-            // distinct minimum was found (p2.R != null), else err2 == HUGE_VAL and p2.t is unset.
             std::array<tag_pose_t, 2> pose_cands_buff;
             size_t num_pose_cands{};
 
-            pose_cands_buff[0] = make_tag_pose(p1, err1);
-            num_pose_cands = 1;
-            ::matd_destroy(p1.R);
-            ::matd_destroy(p1.t);
-
-            if (p2.R != nullptr) {
-                pose_cands_buff[1] = make_tag_pose(p2, err2);
-                num_pose_cands = 2;
-                ::matd_destroy(p2.R);
-                ::matd_destroy(p2.t);
+            if (_opt.pose_method == pose_method_t::homography)
+            {
+                // Closed-form pose from the detector's homography: one perspective-correct solution,
+                // no planar-ambiguity pair. obj_err is not defined for this path, so report 0.
+                ::apriltag_pose_t p{};
+                ::estimate_pose_for_tag_homography(&info, &p);
+                pose_cands_buff[0] = make_tag_pose(p, 0.0);
+                num_pose_cands = 1;
+                ::matd_destroy(p.R);
+                ::matd_destroy(p.t);
             }
+            else
+            {
+                // Run orthogonal iteration directly (estimate_tag_pose is just this + a min-error pick),
+                // keeping both planar-ambiguity solutions and their errors for the selector.
+                double err1{ 0.0 }, err2{ 0.0 };
+                ::apriltag_pose_t p1{}, p2{};
+                ::estimate_tag_pose_orthogonal_iteration(
+                    &info,
+                    &err1, &p1,
+                    &err2, &p2,
+                    static_cast<int>(_opt.num_iters)
+                );
 
-            // Order by object-space error (ascending) so candidate [0] is the best geometric fit.
-            if (num_pose_cands == 2 && pose_cands_buff[1].obj_err < pose_cands_buff[0].obj_err) {
-                std::swap(pose_cands_buff[0], pose_cands_buff[1]);
+                // NOTE: Orthogonal iteration always returns solution 1; the second exists only when a
+                // distinct minimum was found (p2.R != null), else err2 == HUGE_VAL and p2.t is unset.
+                pose_cands_buff[0] = make_tag_pose(p1, err1);
+                num_pose_cands = 1;
+                ::matd_destroy(p1.R);
+                ::matd_destroy(p1.t);
+
+                if (p2.R != nullptr) {
+                    pose_cands_buff[1] = make_tag_pose(p2, err2);
+                    num_pose_cands = 2;
+                    ::matd_destroy(p2.R);
+                    ::matd_destroy(p2.t);
+                }
+
+                // Order by object-space error (ascending) so candidate [0] is the best geometric fit.
+                if (num_pose_cands == 2 && pose_cands_buff[1].obj_err < pose_cands_buff[0].obj_err) {
+                    std::swap(pose_cands_buff[0], pose_cands_buff[1]);
+                }
             }
 
             // Expose the raw candidates so downstream consumers can re-select;

@@ -1,4 +1,4 @@
-﻿// Ported from: https://github.com/casiez/OneEuroFilter
+// Ported from: https://github.com/casiez/OneEuroFilter
 #pragma once
 
 #include <cmath>
@@ -6,6 +6,13 @@
 
 namespace dsp
 {
+    struct one_euro_params
+    {
+        double min_cutoff_hz = 1.0; // lower min_cutoff -> smoother at rest;
+        double beta = 0.05; // higher beta -> less lag in motion;
+        double dcutoff_hz = 1.0; // dcutoff shapes the internal speed estimate.
+    };
+
     // Smoothing factor for an exponential low-pass at `cutoff_hz`, sampled over
     // `dt_sec`: te = dt, tau = 1/(2*pi*cutoff), alpha = 1 / (1 + tau/te).
     // Callers must pass cutoff_hz > 0 and dt_sec > 0.
@@ -53,7 +60,7 @@ namespace dsp
         LowPassFilter _dx;  // derivative low-pass
 
     public:
-        explicit OneEuroFilter(double min_cutoff = 1.0, double beta = 0.0, double dcutoff = 1.0) noexcept
+        OneEuroFilter(double min_cutoff = 1.0, double beta = 0.0, double dcutoff = 1.0) noexcept
             : _min_cutoff{ min_cutoff }, _beta{ beta }, _dcutoff{ dcutoff }
         { }
 

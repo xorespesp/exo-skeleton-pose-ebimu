@@ -62,8 +62,7 @@ target_sources(${TARGET_NAME} PRIVATE
     # tag detection / pose
     "src/pose/tag_detector.hh"
     "src/pose/tag_detector.cc"
-    "src/pose/rotation_filter.hh"
-    "src/pose/rotation_constraint.hh"
+    "src/pose/leg_ik.hh"
     "src/pose/exo_pose_estimator.hh"
     "src/pose/exo_pose_estimator.cc"
 
@@ -73,11 +72,11 @@ target_sources(${TARGET_NAME} PRIVATE
     "src/gui/app_renderer_sdl3.cc"
     "src/gui/frame_texture.hh"
     "src/gui/frame_texture.cc"
-    "src/gui/plot_buffer.hh"
     "src/gui/log_console.hh"
     "src/gui/log_console.cc"
     "src/gui/pose_trace_recorder.hh"
     "src/gui/pose_trace_recorder.cc"
+    "src/gui/plot_buffer.hh"
     "src/gui/debugger_app.hh"
     "src/gui/debugger_app.cc"
 

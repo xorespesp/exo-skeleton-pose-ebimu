@@ -12,32 +12,21 @@ namespace gui
     {
         using json = nlohmann::json;
 
-        // --- small serializers (quaternion as [w,x,y,z], vector as [..]) -----------------------
+        json q_json(const Eigen::Quaterniond& q) { return json::array({ q.w(), q.x(), q.y(), q.z() }); }
+        json v3_json(const Eigen::Vector3d& v) { return json::array({ v.x(), v.y(), v.z() }); }
+        json v2_json(const Eigen::Vector2f& v) { return json::array({ v.x(), v.y() }); }
 
-        json q_json(const Eigen::Quaterniond& q)
+        json opt_v3_json(const std::optional<Eigen::Vector3d>& v) { return v.has_value() ? v3_json(v.value()) : json(nullptr); }
+        json opt_q_json(const std::optional<Eigen::Quaterniond>& q) { return q.has_value() ? q_json(q.value()) : json(nullptr); }
+
+        // Chosen camera-space position of a detection: the selected pose translation, else candidate[0].
+        std::optional<Eigen::Vector3d> detection_position(const pose::tag_detection_t& det)
         {
-            return json::array({ q.w(), q.x(), q.y(), q.z() });
+            if (det.pose.has_value()) { return det.pose->transform.translation(); }
+            if (det.num_pose_candidates > 0) { return det.pose_candidates[0].transform.translation(); }
+            return std::nullopt;
         }
-
-        json v3_json(const Eigen::Vector3d& v)
-        {
-            return json::array({ v.x(), v.y(), v.z() });
-        }
-
-        json v2_json(const Eigen::Vector2f& v)
-        {
-            return json::array({ v.x(), v.y() });
-        }
-
-        // std::optional<quat> -> [w,x,y,z] or null.
-        json opt_q_json(const std::optional<Eigen::Quaterniond>& q)
-        {
-            return q.has_value() ? q_json(q.value()) : json(nullptr);
-        }
-
     } // namespace
-
-    // ------------------------------------------------------------------------------------------
 
     pose_trace_recorder::pose_trace_recorder(std::size_t capacity)
         : _capacity{ capacity == 0 ? 1 : capacity }
@@ -61,12 +50,14 @@ namespace gui
         f.seq = _next_seq++;
         f.t = sensor_ts;
         f.has_rest_pose = estimator.has_rest_pose();
+        f.smoothing_enabled = opt.enable_position_smoothing;
         f.hinge_enabled = opt.enable_hinge_constraint;
-        f.smoothing_enabled = opt.enable_smoothing;
         f.max_hold_ms = opt.max_hold.count();
         f.reset_gap_ms = opt.reset_gap.count();
+        f.hinge_axis = opt.hinge_axis_world;
 
-        // --- raw detections (both pose candidates + the detector's chosen pose) ----------------
+        // --- detections (chosen camera-space position per tag) ---
+        std::array<bool, pose::kNumJoints> tag_present{};
         f.detections.reserve(detections.size());
         for (const auto& det : detections)
         {
@@ -76,58 +67,29 @@ namespace gui
             d.decision_margin = det.decision_margin;
             d.center = { det.center.x, det.center.y };
             for (std::size_t k = 0; k < 4; ++k) { d.corners[k] = { det.corners[k].x, det.corners[k].y }; }
-            d.joint = pose::tag_to_joint(det.id);
-            d.num_candidates = det.num_pose_candidates;
-
-            const auto to_pose_rec = [](const pose::tag_pose_t& p) {
-                pose_rec_t r;
-                r.obj_err = p.obj_err;
-                r.q = Eigen::Quaterniond{ p.transform.rotation() }.normalized();
-                r.t = p.transform.translation();
-                return r;
-            };
-            for (int k = 0; k < det.num_pose_candidates && k < 2; ++k) {
-                d.candidates[k] = to_pose_rec(det.pose_candidates[k]);
+            d.joint_id = pose::tag_to_joint(det.id);
+            d.position = detection_position(det);
+            if (d.joint_id.has_value() && d.position.has_value()) {
+                tag_present[static_cast<std::size_t>(d.joint_id.value())] = true;
             }
-            if (det.pose.has_value()) { d.chosen = to_pose_rec(det.pose.value()); }
-
             f.detections.push_back(std::move(d));
         }
 
-        // --- per-joint outputs + rest reference + detected/held/lost classification ------------
-        // A joint is "detected" when a bound tag carried >=1 pose candidate this frame; from that
-        // and whether a global rotation came out we separate a fresh solve from a held/lost one.
-        std::array<bool, pose::kNumJoints> tag_present{};
-        for (const auto& d : f.detections) {
-            if (d.joint.has_value() && d.num_candidates > 0) {
-                tag_present[static_cast<std::size_t>(d.joint.value())] = true;
-            }
-        }
-
+        // --- per-joint positions + IK anim + detected/held/lost + rest position ---
         for (const auto& info : pose::kJointsInfo)
         {
             const std::size_t ji = static_cast<std::size_t>(info.id);
             const pose::joint_state_t& st = estimator.get_joint_state(info.id);
             joint_rec_t& jr = f.joints[ji];
 
-            jr.selected_candidate = st.selected_candidate;
-            jr.locked_pelvis = f.hinge_enabled && pose::is_root_joint(info.id)
-                && estimator.rest_rotation(info.id).has_value();
-
-            const bool has_global = st.global_rot.has_value();
-            jr.detected = tag_present[ji] && has_global;
-            jr.held = !tag_present[ji] && has_global;
-            jr.lost = !has_global;
-
-            if (st.view_pose.has_value()) {
-                jr.view_q = Eigen::Quaterniond{ st.view_pose.value().rotation() }.normalized();
-                jr.view_t = st.view_pose.value().translation();
-            }
-            jr.global_rot = st.global_rot;
-            jr.local_rot = st.local_rot;
+            const bool has_position = st.position.has_value();
+            jr.detected = tag_present[ji] && has_position;
+            jr.held = !tag_present[ji] && has_position;
+            jr.lost = !has_position;
+            jr.raw_position = st.raw_position;
+            jr.position = st.position;
             jr.local_anim_rot = st.local_anim_rot;
-
-            f.rest_rot[ji] = estimator.rest_rotation(info.id);
+            f.rest_position[ji] = estimator.get_rest_position(info.id);
         }
 
         _frames.push_back(std::move(f));
@@ -142,12 +104,11 @@ namespace gui
         const std::optional<hw::intrinsic_t>& intrinsics) const
     {
         json root;
-        root["schema"] = "exo-pose-trace/v1";
-        root["notes"] = "Quaternions are [w,x,y,z]; translations [x,y,z] in meters; poses are tag->camera. "
-                        "candidates[] are the raw orthogonal-iteration solutions, obj_err ascending "
-                        "(index 1 is the planar-ambiguity flip when present).";
+        root["schema"] = "exo-pose-trace/v3";
+        root["notes"] = "Positions are [x,y,z] in meters, tag->camera (camera frame: X right, Y down, "
+                        "Z forward/depth). Quaternions are [w,x,y,z]. local_anim_rot is the per-joint "
+                        "IK animation rotation (parent-relative, vs the captured rest).";
 
-        // --- static source context ------------------------------------------------------------
         root["source"] = {
             { "name", source_name },
             { "width", source_resolution.x() },
@@ -164,8 +125,7 @@ namespace gui
             root["intrinsics"] = nullptr;
         }
 
-        // --- rig table (data-driven; mirrors kJointsInfo) -------------------------------------
-        root["hinge_axis_local"] = v3_json(pose::kExoHingeLocalAxis);
+        // rig table (data-driven; mirrors kJointsInfo)
         json rig = json::array();
         for (const auto& info : pose::kJointsInfo) {
             rig.push_back({
@@ -178,7 +138,6 @@ namespace gui
         }
         root["rig"] = std::move(rig);
 
-        // --- per-frame trace ------------------------------------------------------------------
         const auto joint_name = [](std::size_t i) { return std::string{ pose::kJointsInfo[i].name }; };
 
         json frames = json::array();
@@ -190,20 +149,17 @@ namespace gui
             jf["t_s"] = std::chrono::duration<double>{ f.t }.count();
             jf["gates"] = {
                 { "has_rest_pose", f.has_rest_pose },
-                { "hinge_enabled", f.hinge_enabled },
                 { "smoothing_enabled", f.smoothing_enabled },
+                { "hinge_enabled", f.hinge_enabled },
                 { "max_hold_ms", f.max_hold_ms },
                 { "reset_gap_ms", f.reset_gap_ms },
+                { "hinge_axis", v3_json(f.hinge_axis) },
             };
 
-            // rest reference in effect this frame (per joint; null where uncomputed)
             json rest = json::object();
-            for (std::size_t i = 0; i < pose::kNumJoints; ++i) {
-                rest[joint_name(i)] = opt_q_json(f.rest_rot[i]);
-            }
-            jf["rest_pose"] = std::move(rest);
+            for (std::size_t i = 0; i < pose::kNumJoints; ++i) { rest[joint_name(i)] = opt_v3_json(f.rest_position[i]); }
+            jf["rest_position"] = std::move(rest);
 
-            // raw detections
             json dets = json::array();
             for (const auto& d : f.detections)
             {
@@ -215,40 +171,20 @@ namespace gui
                 json corners = json::array();
                 for (const auto& c : d.corners) { corners.push_back(v2_json(c)); }
                 jd["corners"] = std::move(corners);
-                jd["joint"] = d.joint.has_value() ? json(joint_name(static_cast<std::size_t>(d.joint.value())))
-                                                  : json(nullptr);
-                jd["num_candidates"] = d.num_candidates;
-
-                json cands = json::array();
-                for (int k = 0; k < d.num_candidates && k < 2; ++k) {
-                    cands.push_back({
-                        { "obj_err", d.candidates[k].obj_err },
-                        { "q", q_json(d.candidates[k].q) },
-                        { "t", v3_json(d.candidates[k].t) },
-                    });
-                }
-                jd["candidates"] = std::move(cands);
-                jd["chosen_pose"] = d.chosen.has_value()
-                    ? json{ { "q", q_json(d.chosen->q) }, { "t", v3_json(d.chosen->t) } }
-                    : json(nullptr);
-
+                jd["joint"] = d.joint_id.has_value() ? json(joint_name(static_cast<std::size_t>(d.joint_id.value()))) : json(nullptr);
+                jd["position"] = opt_v3_json(d.position);
                 dets.push_back(std::move(jd));
             }
             jf["detections"] = std::move(dets);
 
-            // per-joint decisions + outputs
             json joints = json::object();
             for (std::size_t i = 0; i < pose::kNumJoints; ++i)
             {
                 const joint_rec_t& jr = f.joints[i];
                 json jj;
                 jj["status"] = jr.lost ? "lost" : (jr.held ? "held" : "detected");
-                jj["locked_pelvis"] = jr.locked_pelvis;
-                jj["selected_candidate"] = jr.selected_candidate;
-                jj["view_q"] = opt_q_json(jr.view_q);
-                jj["view_t"] = jr.view_t.has_value() ? v3_json(jr.view_t.value()) : json(nullptr);
-                jj["global_rot"] = opt_q_json(jr.global_rot);
-                jj["local_rot"] = opt_q_json(jr.local_rot);
+                jj["raw_position"] = opt_v3_json(jr.raw_position);
+                jj["position"] = opt_v3_json(jr.position);
                 jj["local_anim_rot"] = opt_q_json(jr.local_anim_rot);
                 joints[joint_name(i)] = std::move(jj);
             }

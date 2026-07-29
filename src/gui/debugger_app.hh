@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "app_base.hh"
 #include "app_renderer_sdl3.hh"
 #include "frame_texture.hh"
@@ -16,6 +16,7 @@
 #include <opencv2/core.hpp>
 #include <Eigen/Geometry>
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -27,13 +28,17 @@ namespace net { class exo_pose_server; }
 
 namespace gui
 {
-    enum class plot_type_t { axis_frame, euler_line, quat_line };
+    enum class plot_type_t {
+        raw_skeleton,  // measured per-joint 3D positions + bones, with the IK forward-kinematics overlay
+        rig_skeleton,  // fixed-length T-pose leg rig driven purely by the per-joint `local_anim_rot` (IK output)
+        positions,     // per-joint X/Y/Z position over time (2D line subplot grid)
+    };
 
     enum class source_kind_t { device, recording };
 
     // Debugger GUI for the pose server: starts/stops the WebSocket listener and drives the pose
     // pipeline (source open/close, rest-pose calibration) while visualizing the annotated frame
-    // and per-joint rotations. Owns the server; the listener starts stopped.
+    // and the per-joint 3D positions / IK skeleton. Owns the server; the listener starts stopped.
     class debugger_app final : public app_base<app_renderer_sdl3>
     {
     public:
@@ -54,84 +59,110 @@ namespace gui
         void _do_start_recording();
         void _do_stop_recording();
         void _update_pose_frame();
+        void _dump_pose_trace(); // write the trace ring to a timestamped .json under dumps/
 
         void _render_menu_bar();
         void _render_control_panel();
         void _render_recording_status(); // live counters while a recording is being written
-        void _dump_pose_trace(); // write the trace ring to a timestamped .json under dumps/
         void _render_plot_panel();
+        void _render_raw_skeleton_plot();  // raw_skeleton: measured 3D positions + bones (+ IK FK overlay)
+        void _render_rig_skeleton_plot();  // rig_skeleton: fixed-length T-pose rig driven by `local_anim_rot`
+        void _render_positions_plot();     // positions: per-joint X/Y/Z over time (2D subplot grid)
+
+        // Shared 3D skeleton renderer: one front-facing, equal-scaled, data-fitted plot drawing the
+        // per-joint display-space positions as bones + spheres + labels, with an optional second
+        // skeleton overlaid (in `overlay_color`) and an optional centered hint. Used by both skeleton modes.
+        void _render_skeleton_3d(
+            const char* title,
+            const std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints>& disp,
+            ImVec4 bone_color, ImVec4 point_color,
+            float point_size,
+            const std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints>* overlay,
+            ImVec4 overlay_color,
+            const char* hint
+        );
+
         void _render_open_dialog();
         void _render_record_dialog();
         void _render_log_panel();  // bottom dock: resize grip + log console child
-        float _log_split_height(); // clamps `_ui.log_h`; returns the main content height above the panel
-        void _sync_axis_frame(); // read-back rotation/range sync + reset for the current implot3d plot
+        float _log_split_height(); // clamps `_ui.log_panel_height`; returns the main content height above the panel
 
     private:
         // gui control states
         struct ui_state_t
         {
+            // window layout (splitter-adjustable panels)
+            float side_panel_width{ 460.0f };  // right control panel width [px]
+            bool show_log{ false };            // spdlog output console: bottom dock panel
+            float log_panel_height{ 200.0f };  // bottom log panel height [px]
+
             // view / visualization
-            bool  camera_fullscreen{ false };
-            bool  relative_rot{ true }; // true = local (vs parent), false = global (camera frame)
-            int   euler_order{ 0 };     // index into kEulerOrders for the euler readout
-            plot_type_t plot_type{ plot_type_t::axis_frame };
-            bool  autosize_plots{ true }; // pack subplots to fill the panel
-            float plot_size_px{ 150.0f }; // manual subplot cell size [px], DPI-scaled at use
-            bool  lock_plots{ false }; // true = force default ranges (live); false = mouse-adjustable
-            bool  sync_plots{ true };  // share one range across all subplots
-            float side_w{ 460.0f };    // right control panel width [px], splitter-adjustable
-            bool  show_log{ false };   // spdlog output console: bottom dock panel
-            float log_h{ 200.0f };     // bottom log panel height [px], splitter-adjustable
+            bool camera_fullscreen{ false };
+            plot_type_t plot_type{ plot_type_t::raw_skeleton };
+
+            // positions plot (2D subplot grid) controls
+            bool pos_plot_autosize{ true };   // pack subplots to fill the panel
+            float pos_plot_size_px{ 150.0f }; // manual subplot cell size [px], DPI-scaled at use
+            bool pos_plot_lock{ false };      // force the default range (live), else mouse-adjustable
+            bool pos_plot_sync{ true };       // share one Y range across all subplots
+
+            // raw_skeleton plot style
+            float raw_skel_point_size{ 7.5f };                          // joint sphere size [px]
+            float raw_skel_point_color[4]{ 0.95f, 0.45f, 0.20f, 1.0f }; // joint sphere color (orange)
+            float raw_skel_bone_color[4]{ 0.55f, 0.75f, 0.95f, 1.0f };  // bone line color (blue)
+            float raw_skel_ik_bone_color[4]{ 0.95f, 0.85f, 0.20f, 1.0f }; // IK overlay bone color
+
+            // rig_skeleton plot style
+            float rig_skel_point_size{ 7.5f };                          // joint sphere size [px]
+            float rig_skel_point_color[4]{ 0.95f, 0.45f, 0.20f, 1.0f }; // joint sphere color (orange)
+            float rig_skel_bone_color[4]{ 0.55f, 0.75f, 0.95f, 1.0f };  // bone line color (blue)
 
             // open-source dialog
-            bool  show_open{ false };
-            source_kind_t open_kind{ source_kind_t::device };
-            int   device{ 0 };
-            bool  manual_exposure{ false };
-            int   exposure{ 8000 };
-            bool  manual_gain{ false };
-            int   gain{ 0 };
-            std::string recording;
+            bool open_dlg_show{ false };
+            source_kind_t open_dlg_kind{ source_kind_t::device };
+            int open_dlg_device{ 0 };
+            bool open_dlg_manual_exposure{ false };
+            int open_dlg_exposure{ 8000 };
+            bool open_dlg_manual_gain{ false };
+            int open_dlg_gain{ 0 };
+            std::string open_dlg_recording;
 
             // record dialog
-            bool  show_record{ false };
-            int   record_codec{ 0 }; // index into io::kImageCodecs
-            int   jpeg_quality{ 90 };
-            std::string record_path;
+            bool record_dlg_show{ false };
+            int record_dlg_codec{ 0 }; // index into `io::kImageCodecs`
+            int record_dlg_jpeg_quality{ 90 };
+            std::string record_dlg_path;
 
             // diagnostic pose trace (rolling ring dumped to JSON on demand)
-            bool  trace_enabled{ true }; // capture each pose frame into the ring
-            int   trace_capacity{ 600 }; // ring length [frames]
+            bool trace_enabled{ true }; // capture each pose frame into the ring
+            int trace_capacity{ 600 }; // ring length [frames]
         };
 
         app::source_options _opt;
         std::unique_ptr<net::exo_pose_server> _server;
 
-        std::optional<frame_texture> _texture;
+        std::optional<frame_texture> _frame_texture;
         ImGui::FileBrowser _file_dialog;
         ImGui::FileBrowser _save_dialog{ ImGuiFileBrowserFlags_EnterNewFilename | ImGuiFileBrowserFlags_CreateNewDir };
         log_console _log_console;
 
-        cv::Mat _frame;
-        std::vector<pose::tag_detection_t> _detections;
+        // last frame pulled from the pipeline: annotated image, its tag detections, and its sequence number
+        cv::Mat _last_frame;
+        std::vector<pose::tag_detection_t> _last_tag_detections;
         uint64_t _last_seq{ 0 };
 
         pose_trace_recorder _trace; // rolling per-frame diagnostic trace (dumped to JSON on demand)
 
         ui_state_t _ui;
 
-        // scrolling plot buffer per joint (euler xyz / quat xyzw)
-        plot_buffer<Eigen::Vector3f, pose::kNumJoints> _euler_bufs;
-        plot_buffer<Eigen::Quaternionf, pose::kNumJoints> _quat_bufs;
-
-        // plot limit controls (one-shot reset, shared by line + axis-frame plots)
-        bool _reset_plots{ false };
-        // line plots: shared y-range link vars for "sync" (x always auto-scrolls)
-        double _sync_y[2]{ 0.0, 0.0 };
-        // axis-frame plots: shared rotation (quat xyzw) + per-axis range, captured from the hovered plot
-        double _sync_rot[4]{ 0.0, 0.0, 0.0, 1.0 };
-        double _sync_range[3][2]{ { -1.2, 1.2 }, { -1.2, 1.2 }, { -1.2, 1.2 } };
-        bool _sync_init{ false };
+        // latest per-joint camera-space 3D position for the `raw_skeleton` plot (smoothed or raw)
+        std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints> _raw_skel_positions{};
+        // per-joint position history (display space) for the positions plot
+        plot_buffer<Eigen::Vector3f, pose::kNumJoints> _pos_plot_bufs;
+        int _skel_plot_autofit_frames{ 30 }; // frames left to auto-fit the 3D box (after a source/view change), then free zoom
+        // positions plot (2D subplot grid) range controls
+        bool _pos_plot_reset{ false };   // one-shot: force the default range on the next frame
+        double _pos_plot_sync_y[2]{ 0.0, 0.0 }; // shared Y range link for "Sync Plots"
     };
 
 } // namespace gui

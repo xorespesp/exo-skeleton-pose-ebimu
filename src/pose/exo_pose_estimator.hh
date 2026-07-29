@@ -1,6 +1,6 @@
-﻿#pragma once
+#pragma once
 #include "tag_detector.hh"
-#include "rotation_filter.hh"
+#include "dsp/one_euro_filter.hh"
 
 #include <Eigen/Geometry>
 
@@ -68,8 +68,8 @@ namespace pose
         return joint_info(j).parent == j;
     }
 
-    // NOTE: The estimator computes local rotations in a single forward pass over
-    // kJointsInfo, so every parent must precede its child. (parent index <= own)
+    // NOTE: The estimator walks kJointsInfo in a single forward pass, 
+    // so every parent must precede its child. (parent index <= own)
     static_assert([] {
         for (const auto& j : kJointsInfo) {
             if (static_cast<size_t>(j.parent) > static_cast<size_t>(j.id)) { return false; }
@@ -78,54 +78,47 @@ namespace pose
     }(), "kJointsInfo must be parent-before-child ordered");
 
     // ---------------------------------------------------------------------------
-    // Leg-hinge constraint (1-DOF joint)
-    // ---------------------------------------------------------------------------
-    //
-    // IMPORTANT: Each leg joint rotates about a single leg-hinge axis.
-    // By mounting convention every tag's local X axis is aligned with its joint's flexion axis (see docs/README.md),
-    // so in the rest-relative frame the valid motion is a pure rotation about X for every joint.
-    inline const Eigen::Vector3d kExoHingeLocalAxis = Eigen::Vector3d::UnitX();
-
-    // ---------------------------------------------------------------------------
     // Per-joint result of one estimation step
     // ---------------------------------------------------------------------------
     struct joint_state_t
     {
-        std::optional<Eigen::Isometry3d> view_pose; // tag -> camera; set iff the tag was detected this frame
-        std::optional<Eigen::Quaterniond> global_rot; // smoothed+held global (camera-frame) rotation available (fresh or held; consumed by the relative pass)
-        std::optional<Eigen::Quaterniond> local_rot; // rotation relative to the parent joint's tag
-        std::optional<Eigen::Quaterniond> local_anim_rot; // local_rot relative to the captured rest pose (drives the skeleton)
-        int selected_candidate{ -1 }; // which pose candidate `view_pose` came from this frame; -1 if held/lost (diagnostic)
+        std::optional<Eigen::Vector3d> raw_position;      // raw camera-space position this frame (fresh detection)
+        std::optional<Eigen::Vector3d> position;          // smoothed + held camera-space position (drives the skeleton)
+        std::optional<Eigen::Quaterniond> local_anim_rot; // parent-relative IK rotation vs the captured rest (drives the rig)
     };
 
     // ---------------------------------------------------------------------------
-    // exo skeleton pose estimator: tag detections -> per-joint local / animation rotations
+    // exo skeleton pose estimator: tag detections -> per-joint 3D points + leg IK rotations
     // ---------------------------------------------------------------------------
     //
-    // Poses are tag->camera; the camera is not a fixed world frame, so only
-    // rotations relative to a parent tag (local_rot = R_parent^-1 * R_child; root: vs camera)
-    // or to a captured rest pose (local_anim_rot = R_rest^-1 * R_local) are meaningful.
-    // local_anim_rot drives the skeleton; the rest pose is captured by
-    // calibrate_rest_pose() in any neutral stance. (not necessarily a T-pose)
+    // A joint's position is the detected tag's camera-space translation, smoothed and held through
+    // occlusion. Once a rest pose is captured (any neutral stance), leg IK maps the position track to
+    // per-joint local_anim_rot: the minimal-swing rotation of each bone from its rest direction,
+    // constrained to a 1-DOF hinge (every exo leg joint is a forward/back hinge). local_anim_rot
+    // drives the skeleton and is the value broadcast to clients.
     class exo_pose_estimator
     {
     public:
         struct options_t
         {
-            bool enable_smoothing = true; // master switch for the smoothing kernel (hold still applies)
+            // --- position track (camera-space 3D points) ---
+            bool enable_position_smoothing{ true }; // One Euro per axis (hold still applies)
+            dsp::one_euro_params position_filter{};
 
-            // Joint occlusion policy (filter-agnostic, owned by the estimator).
-            millis_f64 max_hold{ 200.0 };  // hold a lost joint's last rotation up to this long (~6 frames @30fps)
-            millis_f64 reset_gap{ 400.0 }; // beyond this gap, reseed the kernel to the raw sample
+            // Joint occlusion policy (shared by the point track).
+            millis_f64 max_hold{ 200.0 };  // hold a lost joint's last point up to this long (~6 frames @30fps)
+            millis_f64 reset_gap{ 400.0 }; // beyond this gap, reseed the filter to the raw sample
             seconds_f64 dt_min{ 0.001 };   // dt clamp floor [s]
             seconds_f64 dt_max{ 0.100 };   // dt clamp ceiling [s] (avoids a jump after a long pause)
 
-            // Rotation-smoothing kernel selection + params (only one_euro for now).
-            rotation_filter_config filter{};
-
-            // Hinge constraint: reject the planar-ambiguity flip and constrain each joint to its 1-DOF leg-hinge axis. 
-            // Active only once a rest pose is captured.
-            bool enable_hinge_constraint = true;
+            // --- leg IK (1-DOF hinge) ---
+            // Constrain every leg joint (hip/knee/ankle) to a single forward/back hinge about the
+            // lateral axis below, dropping off-hinge components as tag-position error. When off, each
+            // joint gets the free minimal-swing rotation.
+            bool enable_hinge_constraint{ true };
+            // Lateral hinge axis in the camera frame: ~(1,0,0) for a frontal view, ~(0,0,1) for a
+            // sagittal (side) view. All leg joints share this axis.
+            Eigen::Vector3d hinge_axis_world{ Eigen::Vector3d::UnitX() };
         };
 
         explicit exo_pose_estimator(const options_t& opt = {});
@@ -139,23 +132,27 @@ namespace pose
 
         // Ingest one frame's detections and recompute every joint state.
         void update(
-            std::span<const tag_detection_t> tag_detections, 
+            std::span<const tag_detection_t> tag_detections,
             std::chrono::microseconds sensor_timestamp // sensor timestamp of the frame
         );
 
-        // Latch the current per-joint local_rot as the rest (bind) reference.
-        // Returns false if no joint had a computable local_rot this frame.
+        // Latch the current per-joint 3D points as the rest (bind) reference.
+        // Returns false if no joint had a point this frame.
         bool calibrate_rest_pose();
         void clear_rest_pose();
         bool has_rest_pose() const;
 
+        // Drop the position track: per-joint filters, occlusion timers, and held points. The next
+        // frame starts cold (the filter reseeds to its raw sample). Call when the input stream
+        // changes so a new source is not smoothed or held against the previous one's stale state.
+        void reset_tracking();
+
         const joint_state_t& get_joint_state(joint_id_t j) const;
         std::span<const joint_state_t> get_joint_states() const;
 
-        // Captured rest (bind) reference rotation for `j`, in the joint's parent frame.
-        // Empty when no rest pose is calibrated or that joint had no computable local_rot at
-        // capture time. Read-only view for diagnostics/serialization. (see calibrate_rest_pose)
-        std::optional<Eigen::Quaterniond> rest_rotation(joint_id_t j) const;
+        // Captured rest camera-space position of `j` (the bind position). Empty when uncalibrated or
+        // the joint had no position at capture. Rest bone directions/lengths derive from these.
+        std::optional<Eigen::Vector3d> get_rest_position(joint_id_t j) const;
 
     private:
         struct context_t;

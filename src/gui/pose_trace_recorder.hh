@@ -18,16 +18,16 @@
 
 namespace gui
 {
-    // Rolling per-frame trace of the pose pipeline for offline debugging.
+    // Rolling per-frame trace of the position pipeline for offline debugging.
     //
-    // Each captured frame stores the full picture needed to re-derive the estimator's decisions
-    // by hand from the algorithm source: the raw tag detections (both planar-ambiguity pose
-    // candidates + their obj_err), the estimator's chosen candidate and every output rotation,
-    // plus the per-frame gates (rest pose / hinge / smoothing) that steer selection. Kept in a
-    // fixed-capacity ring so a transient glitch can be dumped with its lead-up after it is seen.
+    // Each captured frame stores what is needed to re-derive the estimator's output by hand: the tag
+    // detections (id, corners, chosen camera-space position), the per-joint raw/smoothed 3D positions
+    // and the IK animation rotation, plus the per-frame gates (rest pose / smoothing / hinge) and the
+    // captured rest positions. Kept in a fixed-capacity ring so a transient glitch can be dumped with
+    // its lead-up after it is seen.
     //
-    // write_json() serializes the ring plus the static context (source, intrinsics, options, rig)
-    // to a self-describing JSON file. Not thread-safe: capture()/write_json() from the GUI thread.
+    // write_json() serializes the ring plus the static context (source, intrinsics, options, rig) to
+    // a self-describing JSON file. Not thread-safe: capture()/write_json() from the GUI thread.
     class pose_trace_recorder
     {
     public:
@@ -39,12 +39,13 @@ namespace gui
         bool empty() const { return _frames.empty(); }
         void clear() { _frames.clear(); }
 
-        // Append one frame. `detections` are the raw detections behind the current joint states
-        // (both carry the same frame). Copies what it needs; holds no reference afterwards.
+        // Append one frame. `detections` are the raw detections behind the current joint states.
+        // Copies what it needs; holds no reference afterwards.
         void capture(
             std::chrono::microseconds sensor_ts,
             std::span<const pose::tag_detection_t> detections,
-            const pose::exo_pose_estimator& estimator);
+            const pose::exo_pose_estimator& estimator
+        );
 
         // Serialize the ring + static context to `path` (pretty-printed JSON). The source metadata
         // is stamped once at dump time. Returns false on an I/O / serialization error (logged).
@@ -53,17 +54,11 @@ namespace gui
             const std::string& source_name,
             const Eigen::Vector2i& source_resolution,
             float source_fps,
-            const std::optional<hw::intrinsic_t>& intrinsics) const;
+            const std::optional<hw::intrinsic_t>& intrinsics
+        ) const;
 
     private:
         // --- copied per-frame trace (POD-ish; no live handles) ---------------------------------
-
-        struct pose_rec_t
-        {
-            double obj_err{ 0.0 };
-            Eigen::Quaterniond q{ Eigen::Quaterniond::Identity() }; // rotation of tag->camera
-            Eigen::Vector3d t{ Eigen::Vector3d::Zero() };           // translation of tag->camera [m]
-        };
 
         struct detection_rec_t
         {
@@ -72,24 +67,18 @@ namespace gui
             float decision_margin{ 0.0f };
             Eigen::Vector2f center{ Eigen::Vector2f::Zero() };
             std::array<Eigen::Vector2f, 4> corners{};
-            std::optional<pose::joint_id_t> joint; // rig joint this tag maps to (nullopt if off-rig)
-            int num_candidates{ 0 };
-            std::array<pose_rec_t, 2> candidates{}; // obj_err ascending
-            std::optional<pose_rec_t> chosen;       // detector's selected pose (min-error policy)
+            std::optional<pose::joint_id_t> joint_id; // rig joint this tag maps to (nullopt if off-rig)
+            std::optional<Eigen::Vector3d> position;  // chosen pose translation, tag->camera [m]
         };
 
         struct joint_rec_t
         {
-            bool detected{ false };      // a fresh candidate was bound and drove this joint
-            bool held{ false };          // no detection; reused the last smoothed rotation (hold window)
-            bool lost{ false };          // no rotation available this frame
-            bool locked_pelvis{ false }; // rest-locked constant base orientation
-            int  selected_candidate{ -1 };
-            std::optional<Eigen::Quaterniond> view_q;    // absolute selected rotation (camera frame)
-            std::optional<Eigen::Vector3d>    view_t;    // absolute selected translation [m]
-            std::optional<Eigen::Quaterniond> global_rot;
-            std::optional<Eigen::Quaterniond> local_rot;
-            std::optional<Eigen::Quaterniond> local_anim_rot;
+            bool detected{ false }; // a fresh position was measured this frame
+            bool held{ false };     // no detection; reused the last smoothed position (hold window)
+            bool lost{ false };     // no position available this frame
+            std::optional<Eigen::Vector3d> raw_position;      // raw measured position [m]
+            std::optional<Eigen::Vector3d> position;          // smoothed + held position [m]
+            std::optional<Eigen::Quaterniond> local_anim_rot; // IK animation rotation
         };
 
         struct frame_rec_t
@@ -99,14 +88,15 @@ namespace gui
             std::vector<detection_rec_t> detections;
             std::array<joint_rec_t, pose::kNumJoints> joints{};
 
-            // Gates in effect this frame (they steer candidate selection; captured so a dump reads
-            // correctly even if the operator toggles them mid-capture).
-            bool   has_rest_pose{ false };
-            bool   hinge_enabled{ false };
-            bool   smoothing_enabled{ false };
+            // Gates in effect this frame (captured so a dump reads correctly even if the operator
+            // toggles them mid-capture).
+            bool has_rest_pose{ false };
+            bool smoothing_enabled{ false };
+            bool hinge_enabled{ false };
             double max_hold_ms{ 0.0 };
             double reset_gap_ms{ 0.0 };
-            std::array<std::optional<Eigen::Quaterniond>, pose::kNumJoints> rest_rot{}; // rest reference per joint
+            Eigen::Vector3d hinge_axis{ Eigen::Vector3d::Zero() };
+            std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints> rest_position{}; // captured rest position per joint
         };
 
         std::size_t _capacity;

@@ -57,6 +57,17 @@ namespace pose
     // Apriltag detector wrapping the C apriltag library.
     class tag_detector {
     public:
+        // How a tag's 3D pose (tag->camera) is estimated from its corners.
+        enum class pose_method_t {
+            // Orthogonal iteration: refines the pose to minimize object-space error and returns BOTH
+            // planar-ambiguity solutions. Most accurate rotation; costs num_iters x 2 per tag.
+            orthogonal_iteration,
+            // Homography decomposition (closed form, from the detector's already-computed homography):
+            // a single perspective-correct pose. Rotation is coarser, but the translation (hence depth)
+            // is comparable and far cheaper. One candidate; no planar-ambiguity pair.
+            homography,
+        };
+
         // TODO: make the tag family selectable (currently fixed to tagStandard41h12).
         struct options_t {
             std::optional<hw::intrinsic_t> intrinsics; // Must be set to estimate pose (and axes); leave empty for 2D-only detection.
@@ -66,6 +77,7 @@ namespace pose
             size_t num_threads{ 4 };     // detection worker threads
             bool refine_edges{ true };   // align quad edges to image gradients (better accuracy)
             size_t num_iters{ 50 };      // orthogonal-iteration count (default = 50)
+            pose_method_t pose_method{ pose_method_t::orthogonal_iteration }; // tag->camera pose estimator
             tag_pose_candidate_selector_fn pose_selector{ selectors::min_error }; // pose-candidate selection policy
         };
 
@@ -83,6 +95,21 @@ namespace pose
 
         options_t _opt;
         std::unique_ptr<context_t> _ctx;
+    };
+
+    // Live-tunable detector settings the debugger edits while a source streams; the pose pipeline
+    // rebuilds its detector when any of these change. A subset of tag_detector::options_t: intrinsics
+    // come from the open source and the pose selector is fixed, so they are not tunable here.
+    // (num_iters / num_threads kept as int for direct use with integer sliders.)
+    struct tag_tuning_t
+    {
+        double tag_size_m{ 0.05 };
+        float quad_decimate{ 1.0f };
+        float quad_sigma{ 0.0f };
+        bool refine_edges{ true };
+        int num_iters{ 50 };
+        int num_threads{ 4 };
+        tag_detector::pose_method_t pose_method{ tag_detector::pose_method_t::orthogonal_iteration };
     };
 
     // Draw tag outlines, ids, and 3D axes (when present).

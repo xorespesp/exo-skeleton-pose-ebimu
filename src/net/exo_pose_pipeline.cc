@@ -50,8 +50,10 @@ namespace net
     {
     public:
         pose_frame_observer(const hw::sensor_frame_provider& provider, double tag_size_m, bool annotate)
-            : _provider{ provider }, _tag_size_m{ tag_size_m }, _annotate{ annotate }
-        { }
+            : _provider{ provider }, _annotate{ annotate }
+        {
+            _requested_tuning.tag_size_m = tag_size_m; // seed; the loop thread may override via set_tuning
+        }
 
         // Returns false if nothing new since `last_seq`, else copies out + advances it.
         bool try_get(
@@ -89,17 +91,43 @@ namespace net
             return _stream_ended.exchange(false);
         }
 
+        // Stage new detector tuning (tag size, decimation, pose method, ...). Thread-safe: the loop
+        // thread requests, the worker rebuilds its detector on the next frame when it differs.
+        void set_tuning(const pose::tag_tuning_t& t) { std::scoped_lock lk{ _tuning_mtx }; _requested_tuning = t; _tuning_dirty = true; }
+        pose::tag_tuning_t tuning() const { std::scoped_lock lk{ _tuning_mtx }; return _requested_tuning; }
+
     public:
         void on_sensor_frame_update(const std::shared_ptr<hw::sensor_frame>& frame) override
         {
-            if (!_detector.has_value()) // built once intrinsics are known (after open)
+            // Build/rebuild the detector on this worker thread whenever the loop thread has staged
+            // new tuning (tag size, decimation, pose method, ...). The detector is thus never touched
+            // across threads; the loop thread only stages a request under _tuning_mtx.
+            pose::tag_tuning_t tuning;
+            bool rebuild;
+            {
+                std::scoped_lock lk{ _tuning_mtx };
+                tuning = _requested_tuning;
+                rebuild = !_detector.has_value() || _tuning_dirty;
+                _tuning_dirty = false;
+            }
+            if (rebuild)
             {
                 pose::tag_detector::options_t opt;
                 opt.intrinsics = _provider.get_calibration().color_intr;
-                opt.tag_size_m = _tag_size_m;
+                opt.tag_size_m = tuning.tag_size_m;
+                opt.quad_decimate = tuning.quad_decimate;
+                opt.quad_sigma = tuning.quad_sigma;
+                opt.refine_edges = tuning.refine_edges;
+                opt.num_iters = static_cast<size_t>(tuning.num_iters);
+                opt.num_threads = static_cast<size_t>(tuning.num_threads);
+                opt.pose_method = tuning.pose_method;
                 _detector.emplace(opt);
-                spdlog::debug("pipeline: tag detector built on first frame (tag size {:.3f} m, annotate {})",
-                    _tag_size_m, _annotate);
+                spdlog::debug("pipeline: tag detector built (tag {:.3f} m, decimate {:.2f}, sigma {:.2f}, "
+                              "refine {}, iters {}, threads {}, pose {}, annotate {})",
+                    tuning.tag_size_m, tuning.quad_decimate, tuning.quad_sigma, tuning.refine_edges,
+                    tuning.num_iters, tuning.num_threads,
+                    tuning.pose_method == pose::tag_detector::pose_method_t::homography ? "homography" : "OI",
+                    _annotate);
             }
 
             cv::Mat annotated;
@@ -127,9 +155,12 @@ namespace net
 
     private:
         const hw::sensor_frame_provider& _provider;
-        double _tag_size_m{};
         bool _annotate{ false }; // keep an annotated frame copy for a monitor GUI
         std::optional<pose::tag_detector> _detector; // built once intrinsics are known (after open)
+        // Detector tuning: staged by the loop thread, applied (built) on the worker thread.
+        mutable std::mutex _tuning_mtx;
+        pose::tag_tuning_t _requested_tuning{};
+        bool _tuning_dirty{ true }; // force a (re)build on the first frame / after set_tuning
         std::mutex _mtx;
         cv::Mat _annotated; // annotated frame
         std::vector<pose::tag_detection_t> _detections;
@@ -157,6 +188,8 @@ namespace net
 
         auto new_provider = std::make_shared<hw::sensor_frame_provider>();
         auto new_observer = std::make_shared<pose_frame_observer>(*new_provider, tag_size_m, _annotate_frames);
+        _tuning.tag_size_m = tag_size_m;     // the opened source's tag size becomes the live value
+        new_observer->set_tuning(_tuning);   // carry the current tuning into the new source
         new_provider->add_observer(new_observer);
 
         const char* kind = source_addr.is_device() ? "device" : "recording";
@@ -185,6 +218,7 @@ namespace net
         _gain = gain;
         _last_seq = 0;
         _estimator.clear_rest_pose(); // a new source invalidates the captured rest reference
+        _estimator.reset_tracking();  // and its position filters/held points must not carry over
         this->_reset_frame_log_state();
 
         const auto res = _provider->get_color_camera_resolution();
@@ -303,21 +337,22 @@ namespace net
     {
         _status_changed = true;
 
-        // Which joints are contributing a reference is the first thing to know when a
-        // calibration comes out wrong, so name them rather than just counting.
-        std::string joints;
-        for (const auto& info : pose::kJointsInfo)
-        {
-            if (!_estimator.get_joint_state(info.id).local_rot.has_value()) { continue; }
-            if (!joints.empty()) { joints += ", "; }
-            joints += info.name;
-        }
-
         const bool ok = _estimator.calibrate_rest_pose();
         if (!ok) {
             spdlog::warn("pipeline: rest pose calibration failed; no joint had a computable local rotation "
                          "(is the source streaming and are the tags visible?)");
             return false;
+        }
+
+        // Which joints are contributing a reference is the first thing to know when a calibration
+        // comes out wrong, so name the ones that actually latched (only freshly detected joints,
+        // not held ones) rather than just counting.
+        std::string joints;
+        for (const auto& info : pose::kJointsInfo)
+        {
+            if (!_estimator.get_rest_position(info.id).has_value()) { continue; }
+            if (!joints.empty()) { joints += ", "; }
+            joints += info.name;
         }
 
         spdlog::info("pipeline: rest pose calibrated from [{}]", joints);
@@ -396,7 +431,7 @@ namespace net
         // missing), so joint tracking is reported on its own rather than inferred from the tags.
         for (const auto& info : pose::kJointsInfo)
         {
-            const bool tracked = _estimator.get_joint_state(info.id).local_rot.has_value();
+            const bool tracked = _estimator.get_joint_state(info.id).position.has_value();
             bool& was_tracked = _joint_tracked[static_cast<size_t>(info.id)];
             if (tracked == was_tracked) { continue; }
 
@@ -424,7 +459,7 @@ namespace net
         size_t tracked = 0;
         for (const auto& info : pose::kJointsInfo)
         {
-            if (_estimator.get_joint_state(info.id).local_rot.has_value()) { ++tracked; }
+            if (_estimator.get_joint_state(info.id).position.has_value()) { ++tracked; }
         }
 
         spdlog::debug("pipeline: {} frames in {:.1f} s ({:.1f} fps polled, source at {:.1f} fps), "
@@ -480,6 +515,17 @@ namespace net
         return _provider->get_calibration().color_intr;
     }
 
+    void exo_pose_pipeline::set_tag_tuning(const pose::tag_tuning_t& tuning)
+    {
+        _tuning = tuning;
+        if (_observer) { _observer->set_tuning(_tuning); } // worker rebuilds on the next frame
+    }
+
+    pose::tag_tuning_t exo_pose_pipeline::tag_tuning() const
+    {
+        return _tuning;
+    }
+
     uint32_t exo_pose_pipeline::current_frame_id() const
     {
         return _provider ? _provider->get_current_frame_id() : 0;
@@ -502,6 +548,7 @@ namespace net
         if (!_provider) { return; }
         spdlog::info("pipeline: seek to the beginning of the recording");
         _provider->seek_recording_to_begin();
+        _estimator.reset_tracking(); // the timestamp discontinuity must not filter/hold across the jump
     }
 
     void exo_pose_pipeline::seek_to_end()
@@ -509,6 +556,7 @@ namespace net
         if (!_provider) { return; }
         spdlog::info("pipeline: seek to the end of the recording");
         _provider->seek_recording_to_end();
+        _estimator.reset_tracking(); // the timestamp discontinuity must not filter/hold across the jump
     }
 
 } // namespace net

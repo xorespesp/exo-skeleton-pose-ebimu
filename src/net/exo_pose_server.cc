@@ -465,15 +465,13 @@ namespace net
                 return fb_proto::Quat{ q.x(), q.y(), q.z(), q.w() };
             };
 
-            // NOTE: fb_local_rot, fb_local_anim_rot must outlive CreateJointPose, which copies them immediately.
-            fb_proto::Quat fb_local_rot, fb_local_anim_rot;
-            if (st.local_rot.has_value()) { fb_local_rot = to_fb_quat(st.local_rot.value()); }
+            // local_anim_rot (the IK animation rotation) is what drives the rig; absent when lost.
+            // NOTE: fb_local_anim_rot must outlive CreateJointPose, which copies it immediately.
+            fb_proto::Quat fb_local_anim_rot;
             if (st.local_anim_rot.has_value()) { fb_local_anim_rot = to_fb_quat(st.local_anim_rot.value()); }
 
-            // Optional rotations: write a Quat only when present, else nullptr. (absent on the wire)
             joints.push_back(fb_proto::CreateJointPose(
                 b, static_cast<fb_proto::JointId>(info.id),
-                st.local_rot.has_value() ? &fb_local_rot : nullptr,
                 st.local_anim_rot.has_value() ? &fb_local_anim_rot : nullptr
             ));
         }

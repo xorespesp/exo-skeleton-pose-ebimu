@@ -1,9 +1,8 @@
-﻿#include "k4a_frame_source.hh"
+#include "k4a_frame_source.hh"
 
 #include "k4a_frameset.hh"
 
 #include <k4a/k4a.hpp>
-#include <k4arecord/playback.h>
 
 #include <spdlog/spdlog.h>
 
@@ -16,34 +15,34 @@ namespace hw
     namespace
     {
         constexpr double kPi = 3.14159265358979323846;
+    }
 
-        // Copy the color camera parameters into the SDK-agnostic calibration_t.
-        calibration_t to_calibration_t(const k4a_calibration_t& k4a_calib)
-        {
-            const k4a_calibration_camera_t& cc = k4a_calib.color_camera_calibration;
-            const auto& p = cc.intrinsics.parameters.param; // {cx,cy,fx,fy,k1..k6,codx,cody,p2,p1,...}
+    // Copy the color camera parameters into the SDK-agnostic calibration_t.
+    calibration_t k4a_to_calibration(const k4a_calibration_t& k4a_calib)
+    {
+        const k4a_calibration_camera_t& cc = k4a_calib.color_camera_calibration;
+        const auto& p = cc.intrinsics.parameters.param; // {cx,cy,fx,fy,k1..k6,codx,cody,p2,p1,...}
 
-            calibration_t out{};
-            out.color_intr = intrinsic_t{
-                p.fx, p.fy, p.cx, p.cy,
-                cc.resolution_width, cc.resolution_height
-            };
-            out.color_dist = distortion_t{
-                p.k1, p.k2, p.k3, p.k4, p.k5, p.k6, p.p1, p.p2
-            };
-            out.color_resolution = Eigen::Vector2i{ cc.resolution_width, cc.resolution_height };
+        calibration_t out{};
+        out.color_intr = intrinsic_t{
+            p.fx, p.fy, p.cx, p.cy,
+            cc.resolution_width, cc.resolution_height
+        };
+        out.color_dist = distortion_t{
+            p.k1, p.k2, p.k3, p.k4, p.k5, p.k6, p.p1, p.p2
+        };
+        out.color_resolution = Eigen::Vector2i{ cc.resolution_width, cc.resolution_height };
 
-            const float h_fov = (p.fx > 0.0f)
-                ? static_cast<float>(2.0 * std::atan(cc.resolution_width / (2.0 * p.fx)) * 180.0 / kPi)
-                : 0.0f;
-            const float v_fov = (p.fy > 0.0f)
-                ? static_cast<float>(2.0 * std::atan(cc.resolution_height / (2.0 * p.fy)) * 180.0 / kPi)
-                : 0.0f;
-            out.color_fov = Eigen::Vector2f{ h_fov, v_fov };
+        const float h_fov = (p.fx > 0.0f)
+            ? static_cast<float>(2.0 * std::atan(cc.resolution_width / (2.0 * p.fx)) * 180.0 / kPi)
+            : 0.0f;
+        const float v_fov = (p.fy > 0.0f)
+            ? static_cast<float>(2.0 * std::atan(cc.resolution_height / (2.0 * p.fy)) * 180.0 / kPi)
+            : 0.0f;
+        out.color_fov = Eigen::Vector2f{ h_fov, v_fov };
 
-            return out;
-        }
-    } // namespace
+        return out;
+    }
 
     ///////////////////////////////////////////////////////////////////////////////////////////////
     // k4a_device_capturer
@@ -122,7 +121,7 @@ namespace hw
 
         _device = device;
         _config = config;
-        _calib = to_calibration_t(k4a_calib);
+        _calib = k4a_to_calibration(k4a_calib);
         _serialnum = std::move(serialnum);
 
         spdlog::info("k4a device opened (S/N: {})", _serialnum.empty() ? "<unknown>" : _serialnum);
@@ -173,194 +172,6 @@ namespace hw
         if (!capture.is_valid()) { return nullptr; }
 
         return std::make_unique<k4a_frameset>(std::move(capture));
-    }
-
-    ///////////////////////////////////////////////////////////////////////////////////////////////
-    // k4a_record_player
-    ///////////////////////////////////////////////////////////////////////////////////////////////
-
-    namespace
-    {
-        // Step in the given direction until a capture with a valid color image is found,
-        // and return its device timestamp.
-        std::optional<std::chrono::microseconds> seek_color_timestamp(
-            k4a_playback_t playback, bool backward)
-        {
-            for (;;) {
-                k4a_capture_t handle = nullptr;
-                const k4a_stream_result_t result = backward
-                    ? ::k4a_playback_get_previous_capture(playback, &handle)
-                    : ::k4a_playback_get_next_capture(playback, &handle);
-
-                if (result != K4A_STREAM_RESULT_SUCCEEDED) { return std::nullopt; }
-
-                k4a::capture capture{ handle };
-                const k4a::image color = capture.get_color_image();
-                if (color.is_valid() && color.get_size() > 0) {
-                    return color.get_device_timestamp();
-                }
-            }
-        }
-    } // namespace
-
-    k4a_record_player::~k4a_record_player()
-    {
-        this->close();
-    }
-
-    bool k4a_record_player::open(
-        const std::filesystem::path& recording_file,
-        const std::optional<k4a_image_format_t> color_conversion_format
-    ) noexcept try
-    {
-        std::scoped_lock lk{ _mtx };
-        if (_playback) { throw std::runtime_error{ "k4a_record_player: already opened" }; }
-
-        if (!std::filesystem::is_regular_file(recording_file)) {
-            throw std::invalid_argument{ "k4a_record_player: invalid recording file path" };
-        }
-
-        k4a_playback_t playback = nullptr;
-        if (K4A_FAILED(::k4a_playback_open(recording_file.string().c_str(), &playback))) {
-            throw std::runtime_error{ "k4a_record_player: failed to open recording" };
-        }
-
-        k4a_record_configuration_t record_config{};
-        if (K4A_FAILED(::k4a_playback_get_record_configuration(playback, &record_config))) {
-            ::k4a_playback_close(playback);
-            throw std::runtime_error{ "k4a_record_player: failed to get record configuration" };
-        }
-
-        if (!record_config.color_track_enabled) {
-            ::k4a_playback_close(playback);
-            throw std::runtime_error{ "k4a_record_player: recording has no color track" };
-        }
-
-        k4a_calibration_t k4a_calib{};
-        if (K4A_FAILED(::k4a_playback_get_calibration(playback, &k4a_calib))) {
-            ::k4a_playback_close(playback);
-            throw std::runtime_error{ "k4a_record_player: failed to get calibration" };
-        }
-
-        if (color_conversion_format.has_value()) {
-            if (K4A_FAILED(::k4a_playback_set_color_conversion(playback, color_conversion_format.value()))) {
-                ::k4a_playback_close(playback);
-                throw std::runtime_error{ "k4a_record_player: failed to set color conversion" };
-            }
-        }
-
-        // Resolve first/last color timestamps.
-        std::chrono::microseconds first_ts{ 0 }, last_ts{ 0 };
-        {
-            ::k4a_playback_seek_timestamp(
-                playback, record_config.start_timestamp_offset_usec, K4A_PLAYBACK_SEEK_DEVICE_TIME);
-            const auto first = seek_color_timestamp(playback, /*backward*/false);
-
-            ::k4a_playback_seek_timestamp(playback, 0, K4A_PLAYBACK_SEEK_END);
-            const auto last = seek_color_timestamp(playback, /*backward*/true);
-
-            if (!first.has_value() || !last.has_value()) {
-                ::k4a_playback_close(playback);
-                throw std::runtime_error{ "k4a_record_player: failed to resolve record timestamps" };
-            }
-            first_ts = first.value();
-            last_ts = last.value();
-
-            // Rewind to the start, ready to play.
-            ::k4a_playback_seek_timestamp(playback, first_ts.count(), K4A_PLAYBACK_SEEK_DEVICE_TIME);
-        }
-
-        _playback = playback;
-        _record_config = record_config;
-        _calib = to_calibration_t(k4a_calib);
-        _first_ts = first_ts;
-        _last_ts = last_ts;
-
-        spdlog::info("k4a recording opened (length: {} ms)",
-            std::chrono::duration_cast<std::chrono::milliseconds>(_last_ts - _first_ts).count());
-        return true;
-    }
-    catch (const std::exception& e)
-    {
-        spdlog::error("k4a_record_player::open failed: {}", e.what());
-        return false;
-    }
-
-    bool k4a_record_player::is_valid() const
-    {
-        std::scoped_lock lk{ _mtx };
-        return _playback != nullptr;
-    }
-
-    void k4a_record_player::close()
-    {
-        std::scoped_lock lk{ _mtx };
-        if (_playback) {
-            ::k4a_playback_close(_playback);
-            _playback = nullptr;
-        }
-    }
-
-    std::unique_ptr<sensor_frameset> k4a_record_player::fetch_next_sensor_frameset()
-    {
-        std::scoped_lock lk{ _mtx };
-        if (!_playback) { return nullptr; }
-
-        k4a_capture_t handle = nullptr;
-        k4a_stream_result_t result = ::k4a_playback_get_next_capture(_playback, &handle);
-
-        if (result == K4A_STREAM_RESULT_EOF) {
-            if (!_auto_repeat) { return nullptr; }
-            // auto-repeat: seek to start and retry
-            ::k4a_playback_seek_timestamp(_playback, _first_ts.count(), K4A_PLAYBACK_SEEK_DEVICE_TIME);
-            result = ::k4a_playback_get_next_capture(_playback, &handle);
-        }
-
-        if (result == K4A_STREAM_RESULT_FAILED) {
-            throw std::runtime_error{ "k4a_record_player: failed to get next capture" };
-        }
-        if (result != K4A_STREAM_RESULT_SUCCEEDED) { return nullptr; }
-
-        k4a::capture capture{ handle };
-        if (!capture.is_valid()) { return nullptr; }
-
-        return std::make_unique<k4a_frameset>(std::move(capture));
-    }
-
-    void k4a_record_player::seek_begin()
-    {
-        std::scoped_lock lk{ _mtx };
-        if (_playback) {
-            ::k4a_playback_seek_timestamp(_playback, _first_ts.count(), K4A_PLAYBACK_SEEK_DEVICE_TIME);
-        }
-    }
-
-    void k4a_record_player::seek_end()
-    {
-        std::scoped_lock lk{ _mtx };
-        if (_playback) {
-            ::k4a_playback_seek_timestamp(_playback, _last_ts.count(), K4A_PLAYBACK_SEEK_DEVICE_TIME);
-        }
-    }
-
-    void k4a_record_player::seek_timestamp(std::chrono::microseconds offset)
-    {
-        std::scoped_lock lk{ _mtx };
-        if (_playback) {
-            ::k4a_playback_seek_timestamp(_playback, offset.count(), K4A_PLAYBACK_SEEK_DEVICE_TIME);
-        }
-    }
-
-    bool k4a_record_player::auto_repeat_enabled() const
-    {
-        std::scoped_lock lk{ _mtx };
-        return _auto_repeat;
-    }
-
-    void k4a_record_player::enable_auto_repeat(bool enable)
-    {
-        std::scoped_lock lk{ _mtx };
-        _auto_repeat = enable;
     }
 
 } // namespace hw

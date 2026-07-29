@@ -1,4 +1,4 @@
-﻿cmake_minimum_required (VERSION 3.28 FATAL_ERROR)
+cmake_minimum_required (VERSION 3.28 FATAL_ERROR)
 
 # Enable Hot Reload for MSVC compilers if supported.
 if (POLICY CMP0141)
@@ -20,6 +20,8 @@ include(GNUInstallDirs)
 add_executable(${TARGET_NAME})
 target_sources(${TARGET_NAME} PRIVATE
     "src/main.cc"
+    "src/source_address.hh"
+    "src/source_address.cc"
     "src/cli_options.hh"
     "src/cli_options.cc"
 
@@ -37,6 +39,22 @@ target_sources(${TARGET_NAME} PRIVATE
     "src/hw/k4a_frameset.cc"
     "src/hw/k4a_frame_source.hh"
     "src/hw/k4a_frame_source.cc"
+
+    # recording playback backend
+    "src/hw/mcap_frameset.hh"
+    "src/hw/mcap_record_player.hh"
+    "src/hw/mcap_record_player.cc"
+
+    # recording container (MCAP)
+    "src/io/mcap_impl.cc"
+    "src/io/recording_message.hh"
+    "src/io/recording_message.cc"
+    "src/io/recording_writer.hh"
+    "src/io/recording_writer.cc"
+    "src/io/recording_reader.hh"
+    "src/io/recording_reader.cc"
+    "src/io/frame_recorder.hh"
+    "src/io/frame_recorder.cc"
 
     # dsp
     "src/dsp/one_euro_filter.hh"
@@ -89,6 +107,7 @@ include(FetchUWebSockets)
 add_subdirectory(deps)
 
 find_package(OpenCV REQUIRED)
+find_package(unofficial-mcap CONFIG REQUIRED) # header-only; target unofficial::mcap::mcap
 
 # Generate protocol bindings from the FlatBuffers schema.
 set(FBS_SCHEMA "${CMAKE_CURRENT_SOURCE_DIR}/proto/exo_pose_proto.fbs")
@@ -119,13 +138,54 @@ add_custom_command(
 add_custom_target(webview_protocol DEPENDS ${FBS_TS_BARREL})
 add_dependencies(${TARGET_NAME} webview_protocol)
 
+# Bindings for the vendored Foxglove schemas (recording message payloads).
+# Two artifacts per schema:
+#   - a C++ header, to build and read the message payloads
+#   - the binary schema (.bfbs) baked into a byte array, to be written into the MCAP
+#     Schema record. That record is what lets external tools decode a recording.
+set(FG_FBS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/proto/foxglove")
+set(FG_MESSAGE_SCHEMAS CompressedImage RawImage CameraCalibration)
+
+set(FG_FBS_FILES "${FG_FBS_DIR}/Time.fbs")            # included by every message schema
+set(FG_GEN_HEADERS "${FBS_GEN_DIR}/Time_generated.h")
+foreach (schema IN LISTS FG_MESSAGE_SCHEMAS)
+    list(APPEND FG_FBS_FILES "${FG_FBS_DIR}/${schema}.fbs")
+    list(APPEND FG_GEN_HEADERS "${FBS_GEN_DIR}/${schema}_generated.h")
+endforeach()
+
+add_custom_command(
+    OUTPUT ${FG_GEN_HEADERS}
+    COMMAND flatc --cpp -o ${FBS_GEN_DIR} ${FG_FBS_FILES}
+    DEPENDS ${FG_FBS_FILES} flatc
+    COMMENT "Generating FlatBuffers C++ headers from the Foxglove schemas"
+    VERBATIM
+)
+target_sources(${TARGET_NAME} PRIVATE ${FG_GEN_HEADERS})
+
+foreach (schema IN LISTS FG_MESSAGE_SCHEMAS)
+    add_custom_command(
+        OUTPUT "${FBS_GEN_DIR}/${schema}_bfbs.h"
+        COMMAND flatc --schema --binary -o ${FBS_GEN_DIR} "${FG_FBS_DIR}/${schema}.fbs"
+        COMMAND ${CMAKE_COMMAND}
+                -DINPUT=${FBS_GEN_DIR}/${schema}.bfbs
+                -DOUTPUT=${FBS_GEN_DIR}/${schema}_bfbs.h
+                -DSYMBOL=k${schema}Bfbs
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
+        DEPENDS "${FG_FBS_DIR}/${schema}.fbs" "${FG_FBS_DIR}/Time.fbs" flatc
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
+        COMMENT "Embedding binary FlatBuffers schema ${schema}.bfbs"
+        VERBATIM
+    )
+    target_sources(${TARGET_NAME} PRIVATE "${FBS_GEN_DIR}/${schema}_bfbs.h")
+endforeach()
+
 target_link_libraries(${TARGET_NAME} PRIVATE
     Eigen3::Eigen
     spdlog::spdlog_header_only
     apriltag::apriltag
     CLI11::CLI11
     k4a::k4a
-    k4a::k4arecord
+    unofficial::mcap::mcap
     ${OpenCV_LIBS}
     imgui::imgui
     implot::implot
@@ -136,6 +196,43 @@ target_link_libraries(${TARGET_NAME} PRIVATE
 )
 
 setup_orbbec_k4a_binaries(${TARGET_NAME} INSTALL_PATH ${CMAKE_INSTALL_BINDIR})
+
+########################################################################################
+# Offline converter: K4A .mkv -> our .mcap
+#
+# The one tool that still reads the K4A recording format, so k4a::k4arecord stays linked
+# here and out of the app. Reuses the recording writer and the K4A color/calibration path.
+########################################################################################
+
+set(MKV2MCAP_NAME exo-mkv2mcap)
+add_executable(${MKV2MCAP_NAME}
+    "tools/mkv_to_mcap.cc"
+    "src/hw/k4a_frameset.cc"
+    "src/hw/k4a_frame_source.cc"
+    "src/io/mcap_impl.cc"
+    "src/io/recording_message.cc"
+    "src/io/recording_writer.cc"
+    ${FG_GEN_HEADERS}
+)
+foreach (schema IN LISTS FG_MESSAGE_SCHEMAS)
+    target_sources(${MKV2MCAP_NAME} PRIVATE "${FBS_GEN_DIR}/${schema}_bfbs.h")
+endforeach()
+target_include_directories(${MKV2MCAP_NAME} PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src" ${FBS_GEN_DIR})
+if (WIN32)
+    target_compile_definitions(${MKV2MCAP_NAME} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+target_link_libraries(${MKV2MCAP_NAME} PRIVATE
+    Eigen3::Eigen
+    spdlog::spdlog_header_only
+    CLI11::CLI11
+    k4a::k4a
+    k4a::k4arecord
+    unofficial::mcap::mcap
+    ${OpenCV_LIBS}
+    flatbuffers::flatbuffers
+)
+setup_orbbec_k4a_binaries(${MKV2MCAP_NAME} INSTALL_PATH ${CMAKE_INSTALL_BINDIR})
 
 ########################################################################################
 # Install
@@ -149,8 +246,8 @@ if(DEFINED CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
 endif()
 message(STATUS "CMAKE_INSTALL_PREFIX: ${CMAKE_INSTALL_PREFIX}")
 
-# Install the executable
-install(TARGETS ${TARGET_NAME}
+# Install the executables
+install(TARGETS ${TARGET_NAME} ${MKV2MCAP_NAME}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 

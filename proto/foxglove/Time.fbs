@@ -1,0 +1,10 @@
+// Ported from: https://github.com/foxglove/foxglove-sdk/tree/f590fd38686a46a347d51443b71f0e467023d956/schemas/flatbuffer/Time.fbs
+
+namespace foxglove;
+
+struct Time {
+  /// Represents seconds of UTC time since Unix epoch 1970-01-01T00:00:00Z
+  sec:uint32;
+  /// Nano-second fractions from 0 to 999,999,999 inclusive
+  nsec:uint32;
+}

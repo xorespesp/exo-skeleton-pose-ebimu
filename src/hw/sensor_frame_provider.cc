@@ -1,8 +1,7 @@
-﻿#include "sensor_frame_provider.hh"
+#include "sensor_frame_provider.hh"
 
-// Only place that knows the concrete backend. To swap backends, change this
-// include and the two constructions in open_device()/open_recording().
 #include "k4a_frame_source.hh"
+#include "mcap_record_player.hh"
 
 #include <spdlog/spdlog.h>
 
@@ -67,7 +66,7 @@ namespace hw
     {
         this->close();
 
-        auto recording = std::make_unique<k4a_record_player>();
+        auto recording = std::make_unique<mcap_record_player>();
         if (!recording->open(recording_file)) { return false; }
         recording->enable_auto_repeat(true);
 

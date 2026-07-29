@@ -7,6 +7,11 @@
       "name": "opencv4",
       "default-features": false,
       "features": [ "jpeg", "png", "eigen" ]
+    },
+    {
+      "name": "mcap",
+      "default-features": false,
+      "features": [ "zstd" ]
     }
   ],
   "overrides": [
@@ -14,6 +19,10 @@
       "name": "opencv4",
       "version": "4.8.0",
       "port-version": 10
+    },
+    {
+      "name": "mcap",
+      "version": "2.0.2"
     }
   ],
   "builtin-baseline": "a6149c39c5474bcf72820f4ac5aab615798a596b"

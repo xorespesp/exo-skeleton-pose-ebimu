@@ -1,4 +1,4 @@
-﻿#include "debugger_app.hh"
+#include "debugger_app.hh"
 
 #include "net/exo_pose_server.hh"
 #include "net/exo_pose_pipeline.hh"
@@ -11,7 +11,9 @@
 #include <implot3d_internal.h> // GetCurrentPlot / ImPlot3DPlot for axis-frame sync
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <format>
 #include <numbers>
 
@@ -19,6 +21,26 @@ namespace gui
 {
     namespace
     {
+        // Codec picker entries, one per io::kImageCodecs row and in the same order.
+        constexpr std::array<const char*, io::kImageCodecs.size()> kCodecLabels{
+            "JPEG (compressed)",
+            "Raw BGR8 (lossless)",
+        };
+
+        // A recording is named after the moment it started, so successive takes never
+        // collide and are orderable by name.
+        std::string default_recording_name()
+        {
+            const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+            try {
+                const std::chrono::zoned_time local{ std::chrono::current_zone(), now };
+                return std::format("recording_{:%Y%m%d_%H%M%S}.mcap", local);
+            }
+            catch (const std::exception&) {
+                return std::format("recording_{:%Y%m%d_%H%M%S}Z.mcap", now); // no time zone database
+            }
+        }
+
         // Selectable euler decomposition order (Eigen axis indices: 0=X, 1=Y, 2=Z).
         struct euler_order_t { const char* name; int a0, a1, a2; };
         constexpr std::array<euler_order_t, 6> kEulerOrders{ {
@@ -118,15 +140,28 @@ namespace gui
         : _opt{ opt }
         , _server{ std::make_unique<net::exo_pose_server>(port, opt, /*annotate_frames*/ true) }
     {
-        _ui.device = static_cast<int>(opt.device_index);
         if (opt.exposure_us.has_value()) { _ui.manual_exposure = true; _ui.exposure = opt.exposure_us.value(); }
         if (opt.gain.has_value()) { _ui.manual_gain = true; _ui.gain = opt.gain.value(); }
-        _ui.recording = opt.input_path;
-        _ui.open_kind = opt.is_recording() ? source_kind_t::recording : source_kind_t::device;
+
+        // The dialog holds a value per kind so toggling does not discard what was typed;
+        // only fill the one the command line named.
+        if (opt.source_addr.has_value())
+        {
+            if (opt.source_addr->is_device()) {
+                _ui.device = static_cast<int>(opt.source_addr->device_index());
+                _ui.open_kind = source_kind_t::device;
+            } else {
+                _ui.recording = opt.source_addr->recording_path().string();
+                _ui.open_kind = source_kind_t::recording;
+            }
+        }
         _ui.show_log = true; // surface the log console by default
 
         _file_dialog.SetTitle("Open recording file");
-        _file_dialog.SetTypeFilters({ ".mkv" });
+        _file_dialog.SetTypeFilters({ ".mcap" });
+
+        _save_dialog.SetTitle("Save recording as");
+        _save_dialog.SetTypeFilters({ ".mcap" });
 
         // Mirror spdlog output into the in-GUI log console. Registered here (main thread,
         // before any capture worker exists) so appending to the sink list is race-free.
@@ -247,6 +282,7 @@ namespace gui
         ImGui::End();
 
         this->_render_open_dialog();
+        this->_render_record_dialog();
 
         _file_dialog.Display();
         if (_file_dialog.HasSelected())
@@ -254,6 +290,13 @@ namespace gui
             _ui.recording = _file_dialog.GetSelected().string();
             _ui.open_kind = source_kind_t::recording;
             _file_dialog.ClearSelected();
+        }
+
+        _save_dialog.Display();
+        if (_save_dialog.HasSelected())
+        {
+            _ui.record_path = _save_dialog.GetSelected().string();
+            _save_dialog.ClearSelected();
         }
     }
 
@@ -353,6 +396,21 @@ namespace gui
             ImGui::MenuItem("Log Panel", nullptr, &_ui.show_log);
             ImGui::EndMenu();
         }
+        if (ImGui::BeginMenu("Record"))
+        {
+            net::exo_pose_pipeline& pipe = _server->pipeline();
+            const bool recording = pipe.is_recording();
+            // Only a live camera can be recorded; a playback source is already a recording.
+            const bool can_record = pipe.is_source_open() && !pipe.is_source_recording() && !recording;
+
+            if (ImGui::MenuItem("Start Recording...", nullptr, false, can_record))
+            {
+                if (_ui.record_path.empty()) { _ui.record_path = default_recording_name(); }
+                _ui.show_record = true;
+            }
+            if (ImGui::MenuItem("Stop Recording", nullptr, false, recording)) { this->_do_stop_recording(); }
+            ImGui::EndMenu();
+        }
         if (ImGui::BeginMenu("Server"))
         {
             const bool running = _server->is_listening();
@@ -398,6 +456,8 @@ namespace gui
                     ImGui::SameLine();
                     if (ImGui::Button("End >|")) { pipe.seek_to_end(); }
                 }
+
+                this->_render_recording_status();
             }
             else
             {
@@ -687,6 +747,95 @@ namespace gui
         ImGui::PopStyleVar(); // restore spacing for the console's own contents
         _log_console.draw();
         ImGui::EndChild();
+    }
+
+    void debugger_app::_do_start_recording()
+    {
+        std::filesystem::path path{ _ui.record_path };
+        if (path.empty()) { return; }
+
+        // The browser lets a name through without one, but the reader finds recordings by
+        // extension and so does the user.
+        if (path.extension() != ".mcap") { path.replace_extension(".mcap"); }
+
+        const size_t index = std::clamp<size_t>(
+            static_cast<size_t>(_ui.record_codec), 0, io::kImageCodecs.size() - 1);
+        const io::recording_options options{
+            .codec = io::kImageCodecs[index].codec,
+            .encode = { .jpeg_quality = _ui.jpeg_quality },
+        };
+
+        if (_server->pipeline().start_recording(path, options))
+        {
+            _ui.record_path.clear(); // the next take gets a fresh timestamped name
+            _ui.show_record = false;
+        }
+    }
+
+    void debugger_app::_do_stop_recording()
+    {
+        _server->pipeline().stop_recording();
+    }
+
+    void debugger_app::_render_recording_status()
+    {
+        const net::exo_pose_pipeline& pipe = _server->pipeline();
+        if (!pipe.is_recording()) { return; }
+
+        const io::recording_stats stats = pipe.recording_stats();
+        const double seconds = std::chrono::duration<double>{ stats.duration }.count();
+        const double megabytes = static_cast<double>(stats.file_bytes) / (1024.0 * 1024.0);
+
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4{ 0.90f, 0.30f, 0.30f, 1.0f }, "%s",
+            std::format("REC  {}", pipe.recording_path().filename().string()).c_str());
+        ImGui::TextUnformatted(std::format("Elapsed: {:.1f} s ({} frames)", seconds, stats.frames_written).c_str());
+        ImGui::TextUnformatted(std::format("File   : {:.1f} MB ({:.1f} MB/s)",
+            megabytes, seconds > 0.0 ? megabytes / seconds : 0.0).c_str());
+
+        // Dropped frames mean the disk or the encoder fell behind; the recording is still
+        // valid, just missing frames, so say so rather than failing silently.
+        if (stats.frames_dropped > 0)
+        {
+            ImGui::TextColored(ImVec4{ 0.90f, 0.60f, 0.20f, 1.0f }, "%s",
+                std::format("Dropped: {} frame(s)", stats.frames_dropped).c_str());
+        }
+
+        if (ImGui::Button("Stop Recording")) { this->_do_stop_recording(); }
+    }
+
+    void debugger_app::_render_record_dialog()
+    {
+        if (!_ui.show_record) { return; }
+
+        ImGui::SetNextWindowSize(ImVec2(460, 0), ImGuiCond_Appearing);
+        if (ImGui::Begin("Start Recording", &_ui.show_record, ImGuiWindowFlags_NoCollapse))
+        {
+            if (ImGui::Button("Browse...")) { _save_dialog.Open(); }
+            ImGui::SameLine();
+            ImGui::TextUnformatted(_ui.record_path.empty() ? "(no file selected)" : _ui.record_path.c_str());
+
+            ImGui::Combo("Codec", &_ui.record_codec, kCodecLabels.data(), static_cast<int>(kCodecLabels.size()));
+
+            const bool is_jpeg = (io::kImageCodecs[static_cast<size_t>(_ui.record_codec)].codec
+                == io::image_codec::jpeg);
+
+            ImGui::BeginDisabled(!is_jpeg);
+            ImGui::SliderInt("JPEG quality", &_ui.jpeg_quality, 1, 100);
+            ImGui::EndDisabled();
+
+            ImGui::TextWrapped("%s", is_jpeg
+                ? "Lossy. Roughly 5-15 MB/s at 1080p30."
+                : "Lossless pixels, compressed per chunk. Much larger; meant for short clips.");
+
+            ImGui::Separator();
+            ImGui::BeginDisabled(_ui.record_path.empty());
+            if (ImGui::Button("Start", ImVec2(90, 0))) { this->_do_start_recording(); }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(90, 0))) { _ui.show_record = false; }
+        }
+        ImGui::End();
     }
 
     void debugger_app::_render_open_dialog()

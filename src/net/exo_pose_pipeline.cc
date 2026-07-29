@@ -6,7 +6,6 @@
 #include <spdlog/spdlog.h>
 
 #include <atomic>
-#include <charconv>
 #include <format>
 #include <mutex>
 #include <string>
@@ -147,25 +146,22 @@ namespace net
     exo_pose_pipeline::~exo_pose_pipeline() = default;
 
     bool exo_pose_pipeline::open_source(
-        const std::string& source,
+        const app::source_address& source_addr,
         double tag_size_m,
         std::optional<int32_t> exposure_us,
         std::optional<int32_t> gain)
     {
         _status_changed = true; // opening a source changes the reported status (even on failure)
 
+        this->stop_recording();
+
         auto new_provider = std::make_shared<hw::sensor_frame_provider>();
         auto new_observer = std::make_shared<pose_frame_observer>(*new_provider, tag_size_m, _annotate_frames);
         new_provider->add_observer(new_observer);
 
-        // Parse: a full unsigned integer is a device index, anything else a path.
-        uint32_t device_index{};
-        const auto [ptr, ec] = std::from_chars(source.data(), source.data() + source.size(), device_index);
-        const bool is_device = (ec == std::errc{} && ptr == source.data() + source.size());
-
-        const char* kind = is_device ? "device" : "recording";
+        const char* kind = source_addr.is_device() ? "device" : "recording";
         spdlog::info("pipeline: opening {} '{}' (tag size {:.3f} m, exposure {}, gain {})",
-            kind, source, tag_size_m,
+            kind, source_addr.to_string(), tag_size_m,
             exposure_us.has_value() ? std::format("{} us", exposure_us.value()) : "auto",
             gain.has_value() ? std::format("{}", gain.value()) : "auto");
 
@@ -173,18 +169,20 @@ namespace net
             spdlog::info("pipeline: replacing the open source '{}'", _provider->get_source_name());
         }
 
-        const bool ok = is_device
-            ? new_provider->open_device(device_index, exposure_us, gain)
-            : new_provider->open_recording(source);
+        const bool ok = source_addr.is_device()
+            ? new_provider->open_device(source_addr.device_index(), exposure_us, gain)
+            : new_provider->open_recording(source_addr.recording_path());
 
         if (!ok) {
-            spdlog::error("pipeline: failed to open {} '{}'", kind, source);
+            spdlog::error("pipeline: failed to open {} '{}'", kind, source_addr.to_string());
             return false;
         }
 
         _provider = std::move(new_provider); // old provider closes/joins here
         _observer = std::move(new_observer);
-        _is_recording = !is_device;
+        _is_recording = source_addr.is_recording();
+        _exposure_us = exposure_us;
+        _gain = gain;
         _last_seq = 0;
         _estimator.clear_rest_pose(); // a new source invalidates the captured rest reference
         this->_reset_frame_log_state();
@@ -197,12 +195,12 @@ namespace net
 
     bool exo_pose_pipeline::open_device(uint32_t index, std::optional<int32_t> exposure_us, std::optional<int32_t> gain)
     {
-        return this->open_source(std::to_string(index), _default_tag_size_m, exposure_us, gain);
+        return this->open_source(app::source_address::device(index), _default_tag_size_m, exposure_us, gain);
     }
 
     bool exo_pose_pipeline::open_recording(const std::string& path)
     {
-        return this->open_source(path, _default_tag_size_m, std::nullopt, std::nullopt);
+        return this->open_source(app::source_address::recording(path), _default_tag_size_m, std::nullopt, std::nullopt);
     }
 
     void exo_pose_pipeline::close_source()
@@ -212,15 +210,94 @@ namespace net
         _status_changed = true;
         spdlog::info("pipeline: closing source '{}' after {} frames", _provider->get_source_name(), _provider->get_current_frame_id());
 
+        this->stop_recording();
+
         _provider.reset(); // stops/joins the worker thread
         _observer.reset();
         _is_recording = false;
+        _exposure_us.reset();
+        _gain.reset();
         _last_seq = 0;
         this->_reset_frame_log_state();
     }
 
     bool exo_pose_pipeline::is_source_open() const { return static_cast<bool>(_provider); }
     bool exo_pose_pipeline::is_source_recording() const { return _is_recording; }
+
+    bool exo_pose_pipeline::start_recording(
+        const std::filesystem::path& path,
+        const io::recording_options& options)
+    {
+        _status_changed = true;
+
+        if (_is_recording) {
+            spdlog::error("pipeline: cannot record a playback source");
+            return false;
+        }
+
+        if (!_provider) {
+            spdlog::error("pipeline: cannot record without an open source");
+            return false;
+        }
+        if (_recorder) {
+            spdlog::warn("pipeline: already recording to '{}'", _recorder->path().string());
+            return false;
+        }
+
+        const io::camera_stream_info camera{
+            .id = "color0", // first color stream
+            .calibration = _provider->get_calibration(),
+            .exposure_us = _exposure_us,
+            .gain = _gain,
+            .source_name = _provider->get_source_name(),
+        };
+
+        // Start the recorder before it is subscribed, 
+        // so the first frame it sees is one it can already write.
+        auto recorder = std::make_shared<io::frame_recorder>(options);
+        if (!recorder->start(path, camera)) { return false; }
+
+        _provider->add_observer(recorder);
+        _recorder = std::move(recorder);
+
+        spdlog::info("pipeline: recording '{}' to '{}'", _provider->get_source_name(), path.string());
+        return true;
+    }
+
+    void exo_pose_pipeline::stop_recording()
+    {
+        if (!_recorder) { return; }
+
+        _status_changed = true;
+
+        if (_provider) { _provider->remove_observer(_recorder); }
+        _recorder->stop();
+
+        const io::recording_stats stats = _recorder->stats();
+        if (stats.frames_dropped > 0) {
+            spdlog::warn("pipeline: {} frame(s) dropped while recording; the disk or the encoder could not keep up",
+                stats.frames_dropped);
+        }
+        spdlog::info("pipeline: recording stopped ({} frames over {:.1f} s)",
+            stats.frames_written, std::chrono::duration<double>{ stats.duration }.count());
+
+        _recorder.reset();
+    }
+
+    bool exo_pose_pipeline::is_recording() const
+    {
+        return _recorder && _recorder->is_started();
+    }
+
+    io::recording_stats exo_pose_pipeline::recording_stats() const
+    {
+        return _recorder ? _recorder->stats() : io::recording_stats{};
+    }
+
+    std::filesystem::path exo_pose_pipeline::recording_path() const
+    {
+        return _recorder ? _recorder->path() : std::filesystem::path{};
+    }
 
     bool exo_pose_pipeline::calibrate_rest_pose()
     {
@@ -287,8 +364,10 @@ namespace net
 
         // Status: consume the flag set by the last source/rest command.
         r.status_changed = std::exchange(_status_changed, false);
-        if (r.status_changed) { spdlog::trace("pipeline: status changed (source open: {}, rest pose: {})",
-            this->is_source_open(), _estimator.has_rest_pose()); }
+        if (r.status_changed) { 
+            spdlog::trace("pipeline: status changed (source open: {}, rest pose: {})",
+                this->is_source_open(), _estimator.has_rest_pose());
+        }
         return r;
     }
 

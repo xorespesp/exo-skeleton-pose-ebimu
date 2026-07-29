@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "calibration.hh"
 #include "sensor_frameset.hh"
 
@@ -25,7 +25,7 @@ namespace hw
         [[nodiscard]] virtual std::unique_ptr<sensor_frameset> fetch_next_sensor_frameset() = 0;
     };
 
-    // Recording playback backends (e.g. .mkv / .bag).
+    // Recording playback backends.
     class record_player_source : public sensor_frame_source {
     public:
         virtual std::chrono::microseconds get_recording_length() const = 0;

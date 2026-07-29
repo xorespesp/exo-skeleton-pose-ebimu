@@ -297,8 +297,12 @@ namespace net
                                 std::optional<int32_t> exposure, gain;
                                 if (const auto e = o->exposure_us()) { exposure = *e; }
                                 if (const auto g = o->gain()) { gain = *g; }
-                                const bool ok = _imp->pipeline.open_source(src, o->tag_size_m(), exposure, gain);
-                                ack = this->_serialize_ack(ok, ok ? "source opened" : "open failed", req);
+
+                                const auto addr = app::source_address::try_parse(src);
+                                const bool ok = addr.has_value()
+                                    && _imp->pipeline.open_source(*addr, o->tag_size_m(), exposure, gain);
+                                ack = this->_serialize_ack(ok,
+                                    !addr.has_value() ? "empty source" : (ok ? "source opened" : "open failed"), req);
                                 break;
                             }
                             case fb_proto::Payload_CloseSourceStream:
@@ -397,12 +401,12 @@ namespace net
             return -1;
         }
 
-        // Optional: auto-open a recording passed on the command line.
-        if (!_imp->initial.input_path.empty())
+        // Optional: auto-open the source named on the command line, device or recording alike.
+        if (_imp->initial.source_addr.has_value())
         {
             spdlog::info("auto-opening the source given on the command line");
             _imp->pipeline.open_source(
-                _imp->initial.input_path,
+                *_imp->initial.source_addr,
                 _imp->initial.tag_size_m,
                 _imp->initial.exposure_us,
                 _imp->initial.gain

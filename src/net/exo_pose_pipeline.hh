@@ -1,5 +1,8 @@
-﻿#pragma once
+#pragma once
+#include "source_address.hh"
+
 #include "hw/sensor_frame_provider.hh"
+#include "io/frame_recorder.hh"
 #include "pose/exo_pose_estimator.hh"
 #include "pose/tag_detector.hh"
 
@@ -8,6 +11,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -32,10 +36,9 @@ namespace net
         exo_pose_pipeline& operator=(const exo_pose_pipeline&) = delete;
 
         // --- source control -----------------------------------------------------------
-        // `open_source` parses `source` as a device index when it is a full unsigned integer,
-        // else as a recording path. `open_device`/`open_recording` use the default tag size.
+        // `open_device`/`open_recording` are `open_source` with the default tag size.
         bool open_source(
-            const std::string& source,
+            const app::source_address& source_addr,
             double tag_size_m,
             std::optional<int32_t> exposure_us,
             std::optional<int32_t> gain
@@ -46,6 +49,16 @@ namespace net
 
         bool is_source_open() const;
         bool is_source_recording() const;
+
+        // --- recording ----------------------------------------------------------------
+        // Captures the live source's frames to recording file. 
+        // (Refused without an open live source)
+        bool start_recording(const std::filesystem::path& path, const io::recording_options& options);
+        void stop_recording(); // drains what is queued, then finalizes the file
+
+        bool is_recording() const;
+        io::recording_stats recording_stats() const;
+        std::filesystem::path recording_path() const;
 
         // --- rest pose ----------------------------------------------------------------
         bool calibrate_rest_pose();
@@ -100,12 +113,17 @@ namespace net
 
         std::shared_ptr<hw::sensor_frame_provider> _provider;
         std::shared_ptr<pose_frame_observer> _observer;
+        std::shared_ptr<io::frame_recorder> _recorder; // non-null only while recording
         pose::exo_pose_estimator _estimator;
         std::vector<pose::tag_detection_t> _detections;
         uint64_t _last_seq{ 0 };
         std::chrono::microseconds _last_timestamp{ 0 }; // device time of the latched frame
-        bool _is_recording{ false };
+        bool _is_recording{ false }; // the open source is a recording file (vs a live camera)
         bool _status_changed{ false }; // a source/rest command changed the reported status; consumed by poll()
+
+        // Capture settings of the open source, recorded alongside its frames.
+        std::optional<int32_t> _exposure_us;
+        std::optional<int32_t> _gain;
 
         // --- frame-log state (transitions + throughput; see _log_frame_diff) --------------
         uint64_t _seen_tag_mask{ 0 };  // bit t = tag id t was detected in the previous frame

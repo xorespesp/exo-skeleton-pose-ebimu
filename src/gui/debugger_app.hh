@@ -5,6 +5,7 @@
 #include "log_console.hh"
 #include "cli_options.hh"
 
+#include "io/recording_writer.hh"
 #include "pose/tag_detector.hh"
 #include "pose/exo_pose_estimator.hh"
 #include "plot_buffer.hh"
@@ -49,12 +50,16 @@ namespace gui
 
         void _do_open_source();
         void _do_close_source();
+        void _do_start_recording();
+        void _do_stop_recording();
         void _update_pose_frame();
 
         void _render_menu_bar();
         void _render_control_panel();
+        void _render_recording_status(); // live counters while a recording is being written
         void _render_plot_panel();
         void _render_open_dialog();
+        void _render_record_dialog();
         void _render_log_panel();  // bottom dock: resize grip + log console child
         float _log_split_height(); // clamps `_ui.log_h`; returns the main content height above the panel
         void _sync_axis_frame(); // read-back rotation/range sync + reset for the current implot3d plot
@@ -85,6 +90,12 @@ namespace gui
             bool  manual_gain{ false };
             int   gain{ 0 };
             std::string recording;
+
+            // record dialog
+            bool  show_record{ false };
+            int   record_codec{ 0 }; // index into io::kImageCodecs
+            int   jpeg_quality{ 90 };
+            std::string record_path;
         };
 
         app::source_options _opt;
@@ -92,6 +103,7 @@ namespace gui
 
         std::optional<frame_texture> _texture;
         ImGui::FileBrowser _file_dialog;
+        ImGui::FileBrowser _save_dialog{ ImGuiFileBrowserFlags_EnterNewFilename | ImGuiFileBrowserFlags_CreateNewDir };
         log_console _log_console;
 
         cv::Mat _frame;

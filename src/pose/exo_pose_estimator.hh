@@ -95,6 +95,7 @@ namespace pose
         std::optional<Eigen::Quaterniond> global_rot; // smoothed+held global (camera-frame) rotation available (fresh or held; consumed by the relative pass)
         std::optional<Eigen::Quaterniond> local_rot; // rotation relative to the parent joint's tag
         std::optional<Eigen::Quaterniond> local_anim_rot; // local_rot relative to the captured rest pose (drives the skeleton)
+        int selected_candidate{ -1 }; // which pose candidate `view_pose` came from this frame; -1 if held/lost (diagnostic)
     };
 
     // ---------------------------------------------------------------------------
@@ -150,6 +151,11 @@ namespace pose
 
         const joint_state_t& get_joint_state(joint_id_t j) const;
         std::span<const joint_state_t> get_joint_states() const;
+
+        // Captured rest (bind) reference rotation for `j`, in the joint's parent frame.
+        // Empty when no rest pose is calibrated or that joint had no computable local_rot at
+        // capture time. Read-only view for diagnostics/serialization. (see calibrate_rest_pose)
+        std::optional<Eigen::Quaterniond> rest_rotation(joint_id_t j) const;
 
     private:
         struct context_t;

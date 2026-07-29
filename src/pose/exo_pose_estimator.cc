@@ -108,6 +108,14 @@ namespace pose
         return _ctx->rest_pose.has_value();
     }
 
+    std::optional<Eigen::Quaterniond> exo_pose_estimator::rest_rotation(joint_id_t j) const
+    {
+        if (_ctx->rest_pose.has_value()) {
+            return _ctx->rest_pose.value()[index_of(j)];
+        }
+        return std::nullopt;
+    }
+
     void exo_pose_estimator::update(
         const std::span<const tag_detection_t> tag_detections,
         const std::chrono::microseconds sensor_timestamp)
@@ -187,6 +195,7 @@ namespace pose
                 curr_j_state.global_rot = rest_rotation_of(curr_j_info.id);
                 if (curr_j_pose_candidates.n > 0) {
                     curr_j_state.view_pose = curr_j_pose_candidates.transform[0];
+                    curr_j_state.selected_candidate = 0; // locked base draws the detector's min-error candidate
                     _ctx->last_frame_detection_flags[curr_j_idx] = true;
                 }
                 continue;
@@ -322,6 +331,7 @@ namespace pose
             }
 
             curr_j_state.view_pose = curr_j_pose_candidates.transform[selected_candidate_idx]; // reflect the selection in the raw (absolute) view
+            curr_j_state.selected_candidate = static_cast<int>(selected_candidate_idx); // diagnostic: record which candidate won
             Eigen::Quaterniond q = rot_of(curr_j_pose_candidates.transform[selected_candidate_idx]);
 
             // A quaternion and its negation encode the same rotation (double-cover), so a

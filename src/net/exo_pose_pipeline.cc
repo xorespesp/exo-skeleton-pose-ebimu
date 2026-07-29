@@ -472,6 +472,14 @@ namespace net
         return _provider ? _provider->get_current_update_rate() : 0.0f;
     }
 
+    std::optional<hw::intrinsic_t> exo_pose_pipeline::intrinsics() const
+    {
+        // Same color intrinsics the detector was built with; lets a diagnostic dump
+        // reproject corners to check a pose candidate independently.
+        if (!_provider || !_provider->is_opened()) { return std::nullopt; }
+        return _provider->get_calibration().color_intr;
+    }
+
     uint32_t exo_pose_pipeline::current_frame_id() const
     {
         return _provider ? _provider->get_current_frame_id() : 0;

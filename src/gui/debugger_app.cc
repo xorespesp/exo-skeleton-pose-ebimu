@@ -41,6 +41,19 @@ namespace gui
             }
         }
 
+        // A pose-trace dump is named after the moment it was written (same convention as recordings).
+        std::string default_trace_name()
+        {
+            const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+            try {
+                const std::chrono::zoned_time local{ std::chrono::current_zone(), now };
+                return std::format("pose_trace_{:%Y%m%d_%H%M%S}.json", local);
+            }
+            catch (const std::exception&) {
+                return std::format("pose_trace_{:%Y%m%d_%H%M%S}Z.json", now); // no time zone database
+            }
+        }
+
         // Selectable euler decomposition order (Eigen axis indices: 0=X, 1=Y, 2=Z).
         struct euler_order_t { const char* name; int a0, a1, a2; };
         constexpr std::array<euler_order_t, 6> kEulerOrders{ {
@@ -357,6 +370,11 @@ namespace gui
         _quat_bufs.advance(ts_sec);
 
         const pose::exo_pose_estimator& est = _server->pipeline().estimator();
+
+        // Capture the full per-frame trace into the rolling ring so a glitch can be dumped with its
+        // lead-up right after it is seen on screen. Uses the same detections behind the plots below.
+        if (_ui.trace_enabled) { _trace.capture(ts, _detections, est); }
+
         int ji = 0;
         for (const auto& info : pose::kJointsInfo)
         {
@@ -570,6 +588,26 @@ namespace gui
                 ImGui::SetItemTooltip("Reject the planar-ambiguity flip and constrain each joint to its\n"
                                       "1-DOF hinge axis. Needs a captured rest pose.");
             }
+
+            // ----- Diagnostic pose trace -----
+            // Rolling ring of full per-frame traces (raw candidates + selection + outputs). See a
+            // glitch on screen, hit Dump, and the recent history lands in dumps/*.json for analysis.
+            ImGui::SeparatorText("Diagnostics");
+            {
+                ImGui::Checkbox("Capture pose trace", &_ui.trace_enabled);
+                ImGui::SetItemTooltip("Record each pose frame (raw tag pose candidates, the selected\n"
+                                      "candidate, and every output rotation) into a rolling ring buffer.");
+
+                if (ImGui::SliderInt("Trace length", &_ui.trace_capacity, 30, 3000, "%d frames")) {
+                    _trace.set_capacity(static_cast<std::size_t>(_ui.trace_capacity));
+                }
+
+                ImGui::Text("Buffered: %zu / %d frames", _trace.size(), _ui.trace_capacity);
+                if (ImGui::Button("Dump Trace")) { this->_dump_pose_trace(); }
+                ImGui::SetItemTooltip("Write the buffered frames to dumps/pose_trace_*.json");
+                ImGui::SameLine();
+                if (ImGui::Button("Clear Trace")) { _trace.clear(); }
+            }
         }
     }
 
@@ -775,6 +813,28 @@ namespace gui
     void debugger_app::_do_stop_recording()
     {
         _server->pipeline().stop_recording();
+    }
+
+    void debugger_app::_dump_pose_trace()
+    {
+        if (_trace.empty()) {
+            spdlog::warn("pose trace: nothing captured yet (enable capture and let a source run)");
+            return;
+        }
+
+        const net::exo_pose_pipeline& pipe = _server->pipeline();
+
+        std::error_code ec;
+        const std::filesystem::path dir{ "dumps" };
+        std::filesystem::create_directories(dir, ec); // best-effort; write_json reports a real failure
+        const std::filesystem::path path = dir / default_trace_name();
+
+        _trace.write_json(
+            path,
+            pipe.source_name(),
+            pipe.source_resolution(),
+            pipe.source_fps(),
+            pipe.intrinsics()); // the recorder logs success/failure
     }
 
     void debugger_app::_render_recording_status()

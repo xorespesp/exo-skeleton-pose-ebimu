@@ -76,6 +76,8 @@ target_sources(${TARGET_NAME} PRIVATE
     "src/gui/plot_buffer.hh"
     "src/gui/log_console.hh"
     "src/gui/log_console.cc"
+    "src/gui/pose_trace_recorder.hh"
+    "src/gui/pose_trace_recorder.cc"
     "src/gui/debugger_app.hh"
     "src/gui/debugger_app.cc"
 
@@ -103,6 +105,7 @@ include(FetchOrbbecK4A)
 include(FetchSDL3)
 include(FetchFlatBuffers)
 include(FetchUWebSockets)
+include(FetchNlohmannJson)
 
 add_subdirectory(deps)
 
@@ -193,6 +196,7 @@ target_link_libraries(${TARGET_NAME} PRIVATE
     imfilebrowser::imfilebrowser
     uwebsockets::uwebsockets
     flatbuffers::flatbuffers
+    nlohmann_json::nlohmann_json
 )
 
 setup_orbbec_k4a_binaries(${TARGET_NAME} INSTALL_PATH ${CMAKE_INSTALL_BINDIR})

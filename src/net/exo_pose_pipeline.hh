@@ -1,6 +1,7 @@
 #pragma once
 #include "source_address.hh"
 
+#include "hw/calibration.hh"
 #include "hw/sensor_frame_provider.hh"
 #include "io/frame_recorder.hh"
 #include "pose/exo_pose_estimator.hh"
@@ -90,6 +91,7 @@ namespace net
         std::string source_name() const;
         Eigen::Vector2i source_resolution() const;
         float source_fps() const;
+        std::optional<hw::intrinsic_t> intrinsics() const; // color intrinsics of the open source (empty if none)
         uint32_t current_frame_id() const;
         std::chrono::microseconds last_timestamp() const { return _last_timestamp; }
 

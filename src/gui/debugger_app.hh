@@ -3,6 +3,7 @@
 #include "app_renderer_sdl3.hh"
 #include "frame_texture.hh"
 #include "log_console.hh"
+#include "pose_trace_recorder.hh"
 #include "cli_options.hh"
 
 #include "io/recording_writer.hh"
@@ -57,6 +58,7 @@ namespace gui
         void _render_menu_bar();
         void _render_control_panel();
         void _render_recording_status(); // live counters while a recording is being written
+        void _dump_pose_trace(); // write the trace ring to a timestamped .json under dumps/
         void _render_plot_panel();
         void _render_open_dialog();
         void _render_record_dialog();
@@ -96,6 +98,10 @@ namespace gui
             int   record_codec{ 0 }; // index into io::kImageCodecs
             int   jpeg_quality{ 90 };
             std::string record_path;
+
+            // diagnostic pose trace (rolling ring dumped to JSON on demand)
+            bool  trace_enabled{ true }; // capture each pose frame into the ring
+            int   trace_capacity{ 600 }; // ring length [frames]
         };
 
         app::source_options _opt;
@@ -109,6 +115,8 @@ namespace gui
         cv::Mat _frame;
         std::vector<pose::tag_detection_t> _detections;
         uint64_t _last_seq{ 0 };
+
+        pose_trace_recorder _trace; // rolling per-frame diagnostic trace (dumped to JSON on demand)
 
         ui_state_t _ui;
 

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "hw/calibration.hh" // hw::intrinsic_t
 
 #include <Eigen/Geometry>
@@ -72,11 +72,11 @@ namespace pose
         struct options_t {
             std::optional<hw::intrinsic_t> intrinsics; // Must be set to estimate pose (and axes); leave empty for 2D-only detection.
             double tag_size_m{ 0.05 };   // black square edge length [m]
-            float quad_decimate{ 1.0f }; // 1.0 = full resolution (best corner accuracy)
+            float quad_decimate{ 2.0f }; // 1.0 = full resolution (best corner accuracy)
             float quad_sigma{ 0.0f };    // Gaussian blur sigma for quad detection (0 = none)
             size_t num_threads{ 4 };     // detection worker threads
             bool refine_edges{ true };   // align quad edges to image gradients (better accuracy)
-            size_t num_iters{ 50 };      // orthogonal-iteration count (default = 50)
+            size_t num_iters{ 20 };      // orthogonal-iteration count (default = 50)
             pose_method_t pose_method{ pose_method_t::orthogonal_iteration }; // tag->camera pose estimator
             tag_pose_candidate_selector_fn pose_selector{ selectors::min_error }; // pose-candidate selection policy
         };
@@ -104,10 +104,10 @@ namespace pose
     struct tag_tuning_t
     {
         double tag_size_m{ 0.05 };
-        float quad_decimate{ 1.0f };
+        float quad_decimate{ 2.0f };
         float quad_sigma{ 0.0f };
         bool refine_edges{ true };
-        int num_iters{ 50 };
+        int num_iters{ 20 };
         int num_threads{ 4 };
         tag_detector::pose_method_t pose_method{ tag_detector::pose_method_t::orthogonal_iteration };
     };

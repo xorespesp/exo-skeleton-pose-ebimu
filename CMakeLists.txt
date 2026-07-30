@@ -238,6 +238,66 @@ target_link_libraries(${K4AMKV2MCAP_NAME} PRIVATE
 setup_orbbec_k4a_binaries(${K4AMKV2MCAP_NAME} INSTALL_PATH ${CMAKE_INSTALL_BINDIR})
 
 ########################################################################################
+# VZ camera test harness: exercises the Vieworks VZ camera through the Galaxy C++ API
+#
+# Bring-up tool for the VZ backend, kept out of the app while the camera layer still
+# ships the K4A backend. Reuses the GUI shell (app_base / app_renderer_sdl3 /
+# frame_texture / log_console) so only the SDK-facing part is new.
+#
+# Built only where the SDK is installed; its location comes from the VZ_WIN64_SDK_PATH
+# environment variable the installer sets.
+########################################################################################
+
+set(VZCAM_TEST_NAME exo-vzcam-test)
+set(VZ_SDK_ROOT "$ENV{VZ_WIN64_SDK_PATH}")
+set(VZ_SDK_AVAILABLE FALSE)
+if (WIN32 AND VZ_SDK_ROOT AND EXISTS "${VZ_SDK_ROOT}/Development/inc/GalaxyIncludes.h")
+    set(VZ_SDK_AVAILABLE TRUE)
+endif()
+
+if (VZ_SDK_AVAILABLE)
+    message(STATUS "VZSolutionSDK found: ${VZ_SDK_ROOT}")
+
+    add_executable(${VZCAM_TEST_NAME}
+        "tools/vzcam-test/vz_device.hh"
+        "tools/vzcam-test/vz_device.cc"
+        "tools/vzcam-test/vzcam_test_app.cc"
+
+        # reused GUI shell
+        "src/gui/app_base.hh"
+        "src/gui/app_renderer_sdl3.hh"
+        "src/gui/app_renderer_sdl3.cc"
+        "src/gui/frame_texture.hh"
+        "src/gui/frame_texture.cc"
+        "src/gui/log_console.hh"
+        "src/gui/log_console.cc"
+
+        # tag detection, run without intrinsics for the 2D overlay
+        "src/pose/tag_detector.hh"
+        "src/pose/tag_detector.cc"
+    )
+    target_include_directories(${VZCAM_TEST_NAME} PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${VZ_SDK_ROOT}/Development/inc")
+    target_compile_definitions(${VZCAM_TEST_NAME} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    # The SDK headers carry non-UTF-8 bytes in their comments, which floods C4828 on a
+    # UTF-8 build. Nothing here reads those comments, so silence it for this target only.
+    target_compile_options(${VZCAM_TEST_NAME} PRIVATE /wd4828)
+    target_link_libraries(${VZCAM_TEST_NAME} PRIVATE
+        Eigen3::Eigen
+        spdlog::spdlog_header_only
+        apriltag::apriltag
+        ${OpenCV_LIBS}
+        imgui::imgui
+        implot::implot
+        implot3d::implot3d
+        "${VZ_SDK_ROOT}/Development/lib/x64/GxIAPICPPEx.lib"
+    )
+else()
+    message(STATUS "VZSolutionSDK not found (VZ_WIN64_SDK_PATH unset or invalid); skipping ${VZCAM_TEST_NAME}")
+endif()
+
+########################################################################################
 # Install
 ########################################################################################
 
@@ -250,9 +310,16 @@ endif()
 message(STATUS "CMAKE_INSTALL_PREFIX: ${CMAKE_INSTALL_PREFIX}")
 
 # Install the executables
-install(TARGETS ${TARGET_NAME} ${MKV2MCAP_NAME}
+install(TARGETS ${TARGET_NAME} ${K4AMKV2MCAP_NAME}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+# The VZ harness is only meaningful on a machine that has the SDK installed: its Galaxy
+# runtime DLLs are reached through the PATH entries the SDK installer adds, and the GenICam
+# runtime additionally needs that installation's environment (GenTL producers, XML cache).
+# Bundling the DLLs alone would not make it run elsewhere, so only the executable is installed.
+if (VZ_SDK_AVAILABLE)
+    install(TARGETS ${VZCAM_TEST_NAME} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
 
 # Install PDB next to the exe on MSVC for Debug / RelWithDebInfo builds
 if(MSVC)

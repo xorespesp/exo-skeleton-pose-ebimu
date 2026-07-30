@@ -207,9 +207,9 @@ setup_orbbec_k4a_binaries(${TARGET_NAME} INSTALL_PATH ${CMAKE_INSTALL_BINDIR})
 # here and out of the app. Reuses the recording writer and the K4A color/calibration path.
 ########################################################################################
 
-set(MKV2MCAP_NAME exo-mkv2mcap)
-add_executable(${MKV2MCAP_NAME}
-    "tools/mkv_to_mcap.cc"
+set(K4AMKV2MCAP_NAME exo-k4amkv2mcap)
+add_executable(${K4AMKV2MCAP_NAME}
+    "tools/k4amkv2mcap/k4amkv2mcap.cc"
     "src/hw/k4a_frameset.cc"
     "src/hw/k4a_frame_source.cc"
     "src/io/mcap_impl.cc"
@@ -218,14 +218,14 @@ add_executable(${MKV2MCAP_NAME}
     ${FG_GEN_HEADERS}
 )
 foreach (schema IN LISTS FG_MESSAGE_SCHEMAS)
-    target_sources(${MKV2MCAP_NAME} PRIVATE "${FBS_GEN_DIR}/${schema}_bfbs.h")
+    target_sources(${K4AMKV2MCAP_NAME} PRIVATE "${FBS_GEN_DIR}/${schema}_bfbs.h")
 endforeach()
-target_include_directories(${MKV2MCAP_NAME} PRIVATE
+target_include_directories(${K4AMKV2MCAP_NAME} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src" ${FBS_GEN_DIR})
 if (WIN32)
-    target_compile_definitions(${MKV2MCAP_NAME} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_definitions(${K4AMKV2MCAP_NAME} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
-target_link_libraries(${MKV2MCAP_NAME} PRIVATE
+target_link_libraries(${K4AMKV2MCAP_NAME} PRIVATE
     Eigen3::Eigen
     spdlog::spdlog_header_only
     CLI11::CLI11
@@ -235,7 +235,7 @@ target_link_libraries(${MKV2MCAP_NAME} PRIVATE
     ${OpenCV_LIBS}
     flatbuffers::flatbuffers
 )
-setup_orbbec_k4a_binaries(${MKV2MCAP_NAME} INSTALL_PATH ${CMAKE_INSTALL_BINDIR})
+setup_orbbec_k4a_binaries(${K4AMKV2MCAP_NAME} INSTALL_PATH ${CMAKE_INSTALL_BINDIR})
 
 ########################################################################################
 # Install

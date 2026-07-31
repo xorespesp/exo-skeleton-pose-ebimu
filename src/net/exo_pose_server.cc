@@ -166,7 +166,7 @@ namespace net
         size_t client_count{ 0 };   // connected clients; source released when it hits 0
 
         impl(uint16_t p, const app::source_options& in, bool annotate)
-            : port{ p }, initial{ in }, pipeline{ in.tag_size_m, annotate }
+            : port{ p }, initial{ in }, pipeline{ annotate }
         { }
     };
 
@@ -298,9 +298,11 @@ namespace net
                                 if (const auto e = o->exposure_us()) { exposure = *e; }
                                 if (const auto g = o->gain()) { gain = *g; }
 
+                                // The viewing plane is fixed when the server starts: it follows the
+                                // camera's physical placement, which a remote client cannot change.
                                 const auto addr = app::source_address::try_parse(src);
                                 const bool ok = addr.has_value()
-                                    && _imp->pipeline.open_source(*addr, o->tag_size_m(), exposure, gain);
+                                    && _imp->pipeline.open_source(*addr, _imp->initial.view_plane, o->tag_size_m(), exposure, gain);
                                 ack = this->_serialize_ack(ok,
                                     !addr.has_value() ? "empty source" : (ok ? "source opened" : "open failed"), req);
                                 break;
@@ -407,6 +409,7 @@ namespace net
             spdlog::info("auto-opening the source given on the command line");
             _imp->pipeline.open_source(
                 *_imp->initial.source_addr,
+                _imp->initial.view_plane,
                 _imp->initial.tag_size_m,
                 _imp->initial.exposure_us,
                 _imp->initial.gain
@@ -445,7 +448,7 @@ namespace net
             if (r.status_changed)
             {
                 spdlog::debug("tx ServerStatus (source open: {}, rest pose: {})",
-                    _imp->pipeline.is_source_open(), _imp->pipeline.estimator().has_rest_pose());
+                    _imp->pipeline.is_source_open(), _imp->pipeline.has_rest_pose());
                 _imp->uws_loop.publish("status", this->_serialize_server_status());
             }
         }
@@ -455,11 +458,14 @@ namespace net
     {
         fb::FlatBufferBuilder b;
 
+        // Without an open source there is no estimator and every joint reports as lost.
+        const pose::pose_estimator_base* est = _imp->pipeline.estimator();
+
         std::vector<fb::Offset<fb_proto::JointPose>> joints;
         joints.reserve(pose::kNumJoints);
         for (const auto& info : pose::kJointsInfo)
         {
-            const auto& st = _imp->pipeline.estimator().get_joint_state(info.id);
+            const pose::joint_state_t st = est ? est->get_joint_state(info.id) : pose::joint_state_t{};
 
             const auto to_fb_quat = [](const Eigen::Quaterniond& q) {
                 return fb_proto::Quat{ q.x(), q.y(), q.z(), q.w() };
@@ -478,7 +484,7 @@ namespace net
 
         const auto joints_vec = b.CreateVector(joints);
         const uint32_t frame_id = _imp->pipeline.current_frame_id();
-        const auto pose_frame = fb_proto::CreatePoseFrame(b, frame_id, _imp->pipeline.last_timestamp().count(), _imp->pipeline.estimator().has_rest_pose(), joints_vec);
+        const auto pose_frame = fb_proto::CreatePoseFrame(b, frame_id, _imp->pipeline.last_timestamp().count(), _imp->pipeline.has_rest_pose(), joints_vec);
 
         b.Finish(fb_proto::CreateMessage(b, fb_proto::Payload_PoseFrame, pose_frame.Union(), kServerNotifyReqId));
         return std::string(std::bit_cast<const char*>(b.GetBufferPointer()), b.GetSize());
@@ -498,7 +504,7 @@ namespace net
         }
 
         const auto status = fb_proto::CreateServerStatus(
-            b, opened, name, w, h, _imp->pipeline.estimator().has_rest_pose()
+            b, opened, name, w, h, _imp->pipeline.has_rest_pose()
         );
 
         b.Finish(fb_proto::CreateMessage(b, fb_proto::Payload_ServerStatus, status.Union(), req_id));

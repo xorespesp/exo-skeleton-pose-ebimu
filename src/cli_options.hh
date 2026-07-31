@@ -1,6 +1,8 @@
 #pragma once
 #include "source_address.hh"
 
+#include "pose/view_plane.hh"
+
 #include <CLI/CLI.hpp>
 
 #include <cstdint>
@@ -17,6 +19,9 @@ namespace app
         double tag_size_m{ 0.05 };
         std::optional<int32_t> exposure_us;
         std::optional<int32_t> gain;
+
+        // Where the camera stands relative to the exo; picks the pose estimator.
+        pose::view_plane_t view_plane{ pose::view_plane_t::frontal };
     };
 
     void add_source_options(CLI::App& app, source_options& o);

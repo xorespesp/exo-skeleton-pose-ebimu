@@ -1,7 +1,9 @@
 #pragma once
 #include "hw/calibration.hh"
-#include "pose/exo_pose_estimator.hh"
+#include "pose/pose_estimator_base.hh"
+#include "pose/skeleton.hh"
 #include "pose/tag_detector.hh"
+#include "pose/view_plane.hh"
 
 #include <Eigen/Geometry>
 
@@ -18,16 +20,26 @@
 
 namespace gui
 {
-    // Rolling per-frame trace of the position pipeline for offline debugging.
+    // Per-frame gates the estimator ran under, recorded so a dump reads correctly even if the
+    // operator toggles them mid-capture. Which ones exist is estimator specific (tuning is not part
+    // of the estimator base), so the caller fills what its estimator exposes.
+    struct trace_gates_t
+    {
+        double max_hold_ms{ 0.0 };  // occlusion hold window
+        double reset_gap_ms{ 0.0 }; // gap after which the filter reseeds
+        std::optional<Eigen::Vector3d> hinge_axis; // set only while a 1-DOF hinge constraint is in force
+    };
+
+    // Rolling per-frame trace of the pose pipeline for offline debugging.
     //
     // Each captured frame stores what is needed to re-derive the estimator's output by hand: the tag
-    // detections (id, corners, chosen camera-space position), the per-joint raw/smoothed 3D positions
-    // and the IK animation rotation, plus the per-frame gates (rest pose / smoothing / hinge) and the
+    // detections (id, corners, chosen camera-space position), the per-joint raw/smoothed rig positions
+    // and the joint animation rotation, plus the per-frame gates (rest pose / smoothing / ...) and the
     // captured rest positions. Kept in a fixed-capacity ring so a transient glitch can be dumped with
     // its lead-up after it is seen.
     //
-    // write_json() serializes the ring plus the static context (source, intrinsics, options, rig) to
-    // a self-describing JSON file. Not thread-safe: capture()/write_json() from the GUI thread.
+    // write_json() serializes the ring plus the static context (source, intrinsics, viewing plane,
+    // rig) to a self-describing JSON file. Not thread-safe: capture()/write_json() from the GUI thread.
     class pose_trace_recorder
     {
     public:
@@ -44,7 +56,8 @@ namespace gui
         void capture(
             std::chrono::microseconds sensor_ts,
             std::span<const pose::tag_detection_t> detections,
-            const pose::exo_pose_estimator& estimator
+            const pose::pose_estimator_base& estimator,
+            const trace_gates_t& gates
         );
 
         // Serialize the ring + static context to `path` (pretty-printed JSON). The source metadata
@@ -54,7 +67,8 @@ namespace gui
             const std::string& source_name,
             const Eigen::Vector2i& source_resolution,
             float source_fps,
-            const std::optional<hw::intrinsic_t>& intrinsics
+            const std::optional<hw::intrinsic_t>& intrinsics, // empty when the source reported none
+            pose::view_plane_t view_plane // names which estimator the frames came from
         ) const;
 
     private:
@@ -76,9 +90,9 @@ namespace gui
             bool detected{ false }; // a fresh position was measured this frame
             bool held{ false };     // no detection; reused the last smoothed position (hold window)
             bool lost{ false };     // no position available this frame
-            std::optional<Eigen::Vector3d> raw_position;      // raw measured position [m]
-            std::optional<Eigen::Vector3d> position;          // smoothed + held position [m]
-            std::optional<Eigen::Quaterniond> local_anim_rot; // IK animation rotation
+            std::optional<Eigen::Vector3d> raw_position;      // raw measured rig-space position [m]
+            std::optional<Eigen::Vector3d> position;          // smoothed + held rig-space position [m]
+            std::optional<Eigen::Quaterniond> local_anim_rot; // parent-relative animation rotation
         };
 
         struct frame_rec_t
@@ -88,14 +102,10 @@ namespace gui
             std::vector<detection_rec_t> detections;
             std::array<joint_rec_t, pose::kNumJoints> joints{};
 
-            // Gates in effect this frame (captured so a dump reads correctly even if the operator
-            // toggles them mid-capture).
+            // Gates in effect this frame.
             bool has_rest_pose{ false };
             bool smoothing_enabled{ false };
-            bool hinge_enabled{ false };
-            double max_hold_ms{ 0.0 };
-            double reset_gap_ms{ 0.0 };
-            Eigen::Vector3d hinge_axis{ Eigen::Vector3d::Zero() };
+            trace_gates_t gates{};
             std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints> rest_position{}; // captured rest position per joint
         };
 

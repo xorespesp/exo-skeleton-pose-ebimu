@@ -49,8 +49,14 @@ namespace net
     class pose_frame_observer final : public hw::sensor_frame_observer
     {
     public:
-        pose_frame_observer(const hw::sensor_frame_provider& provider, double tag_size_m, bool annotate)
-            : _provider{ provider }, _annotate{ annotate }
+        pose_frame_observer(
+            const hw::sensor_frame_provider& provider,
+            double tag_size_m,
+            bool annotate,
+            bool estimate_tag_pose)
+            : _provider{ provider }
+            , _annotate{ annotate }
+            , _estimate_tag_pose{ estimate_tag_pose }
         {
             _requested_tuning.tag_size_m = tag_size_m; // seed; the loop thread may override via set_tuning
         }
@@ -113,7 +119,10 @@ namespace net
             if (rebuild)
             {
                 pose::tag_detector::options_t opt;
-                opt.intrinsics = _provider.get_calibration().color_intr;
+                // Intrinsics are what turn pose estimation on. Leaving them out when the estimator
+                // works off 2D tag centers skips the per-tag pose solve entirely, which is the bulk
+                // of the detector's cost.
+                if (_estimate_tag_pose) { opt.intrinsics = _provider.get_calibration().color_intr; }
                 opt.tag_size_m = tuning.tag_size_m;
                 opt.quad_decimate = tuning.quad_decimate;
                 opt.quad_sigma = tuning.quad_sigma;
@@ -126,7 +135,9 @@ namespace net
                               "refine {}, iters {}, threads {}, pose {}, annotate {})",
                     tuning.tag_size_m, tuning.quad_decimate, tuning.quad_sigma, tuning.refine_edges,
                     tuning.num_iters, tuning.num_threads,
-                    tuning.pose_method == pose::tag_detector::pose_method_t::homography ? "homography" : "OI",
+                    !_estimate_tag_pose 
+                        ? "off"
+                        : (tuning.pose_method == pose::tag_detector::pose_method_t::homography ? "homography" : "OI"),
                     _annotate);
             }
 
@@ -156,7 +167,8 @@ namespace net
     private:
         const hw::sensor_frame_provider& _provider;
         bool _annotate{ false }; // keep an annotated frame copy for a monitor GUI
-        std::optional<pose::tag_detector> _detector; // built once intrinsics are known (after open)
+        bool _estimate_tag_pose{ true }; // feed the detector intrinsics so it solves each tag's pose
+        std::optional<pose::tag_detector> _detector; // built on the first frame, rebuilt on tuning changes
         // Detector tuning: staged by the loop thread, applied (built) on the worker thread.
         mutable std::mutex _tuning_mtx;
         pose::tag_tuning_t _requested_tuning{};
@@ -170,14 +182,40 @@ namespace net
     };
 
     // --- exo_pose_pipeline -------------------------------------------------------
-    exo_pose_pipeline::exo_pose_pipeline(double default_tag_size_m, bool annotate_frames)
-        : _default_tag_size_m{ default_tag_size_m }, _annotate_frames{ annotate_frames }
+    exo_pose_pipeline::exo_pose_pipeline(bool annotate_frames)
+        : _annotate_frames{ annotate_frames }
     { }
 
     exo_pose_pipeline::~exo_pose_pipeline() = default;
 
+    void exo_pose_pipeline::_select_estimator(pose::view_plane_t view_plane)
+    {
+        if (_active && _view_plane == view_plane) { return; } // unchanged: keep the estimator and its tuning
+
+        _frontal.reset();
+        _sagittal.reset();
+
+        switch (view_plane)
+        {
+        case pose::view_plane_t::sagittal:
+            _sagittal.emplace();
+            // Scaling image-plane points into approximate meters needs the printed tag size, so the
+            // estimator is handed the same value the detector is tuned with.
+            _sagittal->options().tag_size_m = _tuning.tag_size_m;
+            _active = &_sagittal.value();
+            break;
+        case pose::view_plane_t::frontal:
+        default:
+            _frontal.emplace();
+            _active = &_frontal.value();
+            break;
+        }
+        _view_plane = view_plane;
+    }
+
     bool exo_pose_pipeline::open_source(
         const app::source_address& source_addr,
+        pose::view_plane_t view_plane,
         double tag_size_m,
         std::optional<int32_t> exposure_us,
         std::optional<int32_t> gain)
@@ -186,15 +224,19 @@ namespace net
 
         this->stop_recording();
 
+        // The detector only needs to solve tag poses for an estimator that consumes 3D positions.
+        const bool estimate_tag_pose = (view_plane == pose::view_plane_t::frontal);
+
         auto new_provider = std::make_shared<hw::sensor_frame_provider>();
-        auto new_observer = std::make_shared<pose_frame_observer>(*new_provider, tag_size_m, _annotate_frames);
+        auto new_observer = std::make_shared<pose_frame_observer>(
+            *new_provider, tag_size_m, _annotate_frames, estimate_tag_pose);
         _tuning.tag_size_m = tag_size_m;     // the opened source's tag size becomes the live value
         new_observer->set_tuning(_tuning);   // carry the current tuning into the new source
         new_provider->add_observer(new_observer);
 
         const char* kind = source_addr.is_device() ? "device" : "recording";
-        spdlog::info("pipeline: opening {} '{}' (tag size {:.3f} m, exposure {}, gain {})",
-            kind, source_addr.to_string(), tag_size_m,
+        spdlog::info("pipeline: opening {} '{}' ({} view, tag size {:.3f} m, exposure {}, gain {})",
+            kind, source_addr.to_string(), pose::view_plane_name(view_plane), tag_size_m,
             exposure_us.has_value() ? std::format("{} us", exposure_us.value()) : "auto",
             gain.has_value() ? std::format("{}", gain.value()) : "auto");
 
@@ -217,24 +259,16 @@ namespace net
         _exposure_us = exposure_us;
         _gain = gain;
         _last_seq = 0;
-        _estimator.clear_rest_pose(); // a new source invalidates the captured rest reference
-        _estimator.reset_tracking();  // and its position filters/held points must not carry over
+        this->_select_estimator(view_plane); // swaps the estimator only when the viewing plane changed
+        if (_sagittal) { _sagittal->options().tag_size_m = _tuning.tag_size_m; } // a kept estimator still needs the new tag size
+        _active->clear_rest_pose(); // a new source invalidates the captured rest reference
+        _active->reset_tracking();  // and its position filters/held points must not carry over
         this->_reset_frame_log_state();
 
         const auto res = _provider->get_color_camera_resolution();
-        spdlog::info("pipeline: {} '{}' opened ({}x{} color); rest pose cleared, awaiting first frame",
-            kind, _provider->get_source_name(), res.x(), res.y());
+        spdlog::info("pipeline: {} '{}' opened ({}x{} color, {} estimator); rest pose cleared, awaiting first frame",
+            kind, _provider->get_source_name(), res.x(), res.y(), pose::view_plane_name(_view_plane));
         return true;
-    }
-
-    bool exo_pose_pipeline::open_device(uint32_t index, std::optional<int32_t> exposure_us, std::optional<int32_t> gain)
-    {
-        return this->open_source(app::source_address::device(index), _default_tag_size_m, exposure_us, gain);
-    }
-
-    bool exo_pose_pipeline::open_recording(const std::string& path)
-    {
-        return this->open_source(app::source_address::recording(path), _default_tag_size_m, std::nullopt, std::nullopt);
     }
 
     void exo_pose_pipeline::close_source()
@@ -337,7 +371,12 @@ namespace net
     {
         _status_changed = true;
 
-        const bool ok = _estimator.calibrate_rest_pose();
+        if (!_active) {
+            spdlog::warn("pipeline: cannot calibrate a rest pose without an open source");
+            return false;
+        }
+
+        const bool ok = _active->calibrate_rest_pose();
         if (!ok) {
             spdlog::warn("pipeline: rest pose calibration failed; no joint had a computable local rotation "
                          "(is the source streaming and are the tags visible?)");
@@ -350,7 +389,7 @@ namespace net
         std::string joints;
         for (const auto& info : pose::kJointsInfo)
         {
-            if (!_estimator.get_rest_position(info.id).has_value()) { continue; }
+            if (!_active->get_rest_position(info.id).has_value()) { continue; }
             if (!joints.empty()) { joints += ", "; }
             joints += info.name;
         }
@@ -361,13 +400,34 @@ namespace net
 
     void exo_pose_pipeline::clear_rest_pose()
     {
+        if (!_active) { return; }
         _status_changed = true;
         spdlog::info("pipeline: rest pose cleared");
-        _estimator.clear_rest_pose();
+        _active->clear_rest_pose();
     }
 
-    pose::exo_pose_estimator& exo_pose_pipeline::estimator() { return _estimator; }
-    const pose::exo_pose_estimator& exo_pose_pipeline::estimator() const { return _estimator; }
+    bool exo_pose_pipeline::has_rest_pose() const
+    {
+        return _active && _active->has_rest_pose();
+    }
+
+    pose::pose_estimator_base* exo_pose_pipeline::estimator() { return _active; }
+    const pose::pose_estimator_base* exo_pose_pipeline::estimator() const { return _active; }
+
+    pose::frontal_pose_estimator::options_t* exo_pose_pipeline::frontal_options()
+    {
+        return _frontal ? &_frontal->options() : nullptr;
+    }
+
+    pose::sagittal_pose_estimator::options_t* exo_pose_pipeline::sagittal_options()
+    {
+        return _sagittal ? &_sagittal->options() : nullptr;
+    }
+
+    const pose::sagittal_pose_estimator* exo_pose_pipeline::sagittal_estimator() const
+    {
+        return _sagittal ? &_sagittal.value() : nullptr;
+    }
 
     exo_pose_pipeline::poll_result exo_pose_pipeline::poll()
     {
@@ -376,7 +436,10 @@ namespace net
         // Detections: pull the newest latched frame and recompute joint states.
         if (_observer && _observer->try_get(_detections, _last_timestamp, _last_seq))
         {
-            _estimator.update(_detections, _last_timestamp);
+            // update() is not part of the estimator base: each one takes the input its algorithm
+            // needs, so the pipeline feeds whichever it built.
+            if (_frontal) { _frontal->update(_detections, _last_timestamp); }
+            else if (_sagittal) { _sagittal->update(_detections, _last_timestamp); }
             r.new_pose = true;
 
             spdlog::trace("pipeline: frame #{} (t={:.3f} s) with {} tag(s)",
@@ -401,7 +464,7 @@ namespace net
         r.status_changed = std::exchange(_status_changed, false);
         if (r.status_changed) { 
             spdlog::trace("pipeline: status changed (source open: {}, rest pose: {})",
-                this->is_source_open(), _estimator.has_rest_pose());
+                this->is_source_open(), this->has_rest_pose());
         }
         return r;
     }
@@ -431,7 +494,7 @@ namespace net
         // missing), so joint tracking is reported on its own rather than inferred from the tags.
         for (const auto& info : pose::kJointsInfo)
         {
-            const bool tracked = _estimator.get_joint_state(info.id).position.has_value();
+            const bool tracked = _active->get_joint_state(info.id).position.has_value();
             bool& was_tracked = _joint_tracked[static_cast<size_t>(info.id)];
             if (tracked == was_tracked) { continue; }
 
@@ -459,7 +522,7 @@ namespace net
         size_t tracked = 0;
         for (const auto& info : pose::kJointsInfo)
         {
-            if (_estimator.get_joint_state(info.id).position.has_value()) { ++tracked; }
+            if (_active->get_joint_state(info.id).position.has_value()) { ++tracked; }
         }
 
         spdlog::debug("pipeline: {} frames in {:.1f} s ({:.1f} fps polled, source at {:.1f} fps), "
@@ -467,7 +530,7 @@ namespace net
             _stats_frames, sec, _stats_frames / sec, this->source_fps(),
             _stats_frames > 0 ? static_cast<double>(_stats_detections) / _stats_frames : 0.0,
             tracked, pose::kNumJoints,
-            _estimator.has_rest_pose() ? "captured" : "not captured");
+            this->has_rest_pose() ? "captured" : "not captured");
 
         _stats_since = now;
         _stats_frames = 0;
@@ -509,8 +572,8 @@ namespace net
 
     std::optional<hw::intrinsic_t> exo_pose_pipeline::intrinsics() const
     {
-        // Same color intrinsics the detector was built with; lets a diagnostic dump
-        // reproject corners to check a pose candidate independently.
+        // Color intrinsics of the open source; lets a diagnostic dump reproject
+        // corners independently of whatever the pipeline computed.
         if (!_provider || !_provider->is_opened()) { return std::nullopt; }
         return _provider->get_calibration().color_intr;
     }
@@ -518,6 +581,7 @@ namespace net
     void exo_pose_pipeline::set_tag_tuning(const pose::tag_tuning_t& tuning)
     {
         _tuning = tuning;
+        if (_sagittal) { _sagittal->options().tag_size_m = _tuning.tag_size_m; }
         if (_observer) { _observer->set_tuning(_tuning); } // worker rebuilds on the next frame
     }
 
@@ -548,7 +612,7 @@ namespace net
         if (!_provider) { return; }
         spdlog::info("pipeline: seek to the beginning of the recording");
         _provider->seek_recording_to_begin();
-        _estimator.reset_tracking(); // the timestamp discontinuity must not filter/hold across the jump
+        if (_active) { _active->reset_tracking(); } // the timestamp discontinuity must not filter/hold across the jump
     }
 
     void exo_pose_pipeline::seek_to_end()
@@ -556,7 +620,7 @@ namespace net
         if (!_provider) { return; }
         spdlog::info("pipeline: seek to the end of the recording");
         _provider->seek_recording_to_end();
-        _estimator.reset_tracking(); // the timestamp discontinuity must not filter/hold across the jump
+        if (_active) { _active->reset_tracking(); } // the timestamp discontinuity must not filter/hold across the jump
     }
 
 } // namespace net

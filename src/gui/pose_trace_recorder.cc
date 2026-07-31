@@ -42,19 +42,15 @@ namespace gui
     void pose_trace_recorder::capture(
         std::chrono::microseconds sensor_ts,
         std::span<const pose::tag_detection_t> detections,
-        const pose::exo_pose_estimator& estimator)
+        const pose::pose_estimator_base& estimator,
+        const trace_gates_t& gates)
     {
-        const auto& opt = estimator.options();
-
         frame_rec_t f;
         f.seq = _next_seq++;
         f.t = sensor_ts;
         f.has_rest_pose = estimator.has_rest_pose();
-        f.smoothing_enabled = opt.enable_position_smoothing;
-        f.hinge_enabled = opt.enable_hinge_constraint;
-        f.max_hold_ms = opt.max_hold.count();
-        f.reset_gap_ms = opt.reset_gap.count();
-        f.hinge_axis = opt.hinge_axis_world;
+        f.smoothing_enabled = estimator.uses_smoothed_positions();
+        f.gates = gates;
 
         // --- detections (chosen camera-space position per tag) ---
         std::array<bool, pose::kNumJoints> tag_present{};
@@ -75,7 +71,7 @@ namespace gui
             f.detections.push_back(std::move(d));
         }
 
-        // --- per-joint positions + IK anim + detected/held/lost + rest position ---
+        // --- per-joint positions + anim rotation + detected/held/lost + rest position ---
         for (const auto& info : pose::kJointsInfo)
         {
             const std::size_t ji = static_cast<std::size_t>(info.id);
@@ -101,13 +97,18 @@ namespace gui
         const std::string& source_name,
         const Eigen::Vector2i& source_resolution,
         float source_fps,
-        const std::optional<hw::intrinsic_t>& intrinsics) const
+        const std::optional<hw::intrinsic_t>& intrinsics,
+        pose::view_plane_t view_plane) const
     {
         json root;
-        root["schema"] = "exo-pose-trace/v3";
-        root["notes"] = "Positions are [x,y,z] in meters, tag->camera (camera frame: X right, Y down, "
-                        "Z forward/depth). Quaternions are [w,x,y,z]. local_anim_rot is the per-joint "
-                        "IK animation rotation (parent-relative, vs the captured rest).";
+        root["schema"] = "exo-pose-trace/v4";
+        root["notes"] = "Joint positions are [x,y,z] in meters, rig frame (X to the exo's left, Y down, "
+                        "Z behind it; the frame of a camera facing it head-on). A sagittal run "
+                        "approximates them from the image plane, so they lie on x = 0. "
+                        "Detection positions are tag->camera translations and exist only when the "
+                        "detector solved a tag pose. Quaternions are [w,x,y,z]. local_anim_rot is the "
+                        "per-joint animation rotation (parent-relative, vs the captured rest).";
+        root["view_plane"] = std::string{ pose::view_plane_name(view_plane) };
 
         root["source"] = {
             { "name", source_name },
@@ -133,6 +134,9 @@ namespace gui
                 { "joint", std::string{ info.name } },
                 { "tag_id", info.tag_id },
                 { "parent", std::string{ pose::joint_info(info.parent).name } },
+                { "mirror", std::string{ pose::joint_info(info.mirror).name } },
+                { "side", info.side == pose::joint_side_t::right ? "right"
+                        : info.side == pose::joint_side_t::left  ? "left" : "midline" },
                 { "is_root", pose::is_root_joint(info.id) },
             });
         }
@@ -150,10 +154,9 @@ namespace gui
             jf["gates"] = {
                 { "has_rest_pose", f.has_rest_pose },
                 { "smoothing_enabled", f.smoothing_enabled },
-                { "hinge_enabled", f.hinge_enabled },
-                { "max_hold_ms", f.max_hold_ms },
-                { "reset_gap_ms", f.reset_gap_ms },
-                { "hinge_axis", v3_json(f.hinge_axis) },
+                { "max_hold_ms", f.gates.max_hold_ms },
+                { "reset_gap_ms", f.gates.reset_gap_ms },
+                { "hinge_axis", opt_v3_json(f.gates.hinge_axis) }, // null when no hinge constraint applies
             };
 
             json rest = json::object();

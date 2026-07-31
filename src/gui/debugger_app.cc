@@ -53,17 +53,26 @@ namespace gui
             }
         }
 
-        // Map a camera-space position into the ImPlot3D plot frame, shared by every 3D view (raw + rig).
-        //   Camera frame:   X-right, Y-down,  Z-forward (depth).
+        // Map a rig-space position into the ImPlot3D plot frame, shared by every 3D view (raw + rig).
+        //   Rig frame:      X-right, Y-down,  Z-depth   (see skeleton.hh).
         //   ImPlot3D frame: X-right, Y-depth, Z-up      (ImPlot3D treats Z as vertical).
-        // So (x, y, z) -> (x, z, -y): a mirror-free rotation, camera-down (-Y) becoming plot-up.
-        Eigen::Vector3f cam_to_display(const Eigen::Vector3d& p)
+        // So (x, y, z) -> (x, z, -y): a mirror-free rotation, rig-down (-Y) becoming plot-up.
+        Eigen::Vector3f rig_to_display(const Eigen::Vector3d& p)
         {
             return Eigen::Vector3f(static_cast<float>(p.x()), static_cast<float>(p.z()), static_cast<float>(-p.y()));
         }
 
         constexpr float kPositionsWindowSec = 6.0f; // positions-plot x-axis scroll span [s]
         constexpr int kNumAutofitFrames = 30; // auto-fit the 3D box for this many frames after a source/view change
+
+        constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
+
+        // Small double-DragScalar helper (estimator options are double; avoids float temporaries).
+        bool option_drag(const char* label, double& v, double lo, double hi, double step, const char* fmt)
+        {
+            return ImGui::DragScalar(label, ImGuiDataType_Double, &v, static_cast<float>(step),
+                &lo, &hi, fmt, ImGuiSliderFlags_AlwaysClamp);
+        }
 
         // Initial box rotation: a readable 3/4 front view. ImPlot3D projects with screen-up = (Rotation*p).y, 
         // so bringing the plot's up axis (Z) onto screen-up needs a -90 deg turn about X (== `FromElAz(0,0)`); 
@@ -77,8 +86,8 @@ namespace gui
                  * ImPlot3DQuat(20.0 * d, ImPlot3DPoint(0, 0, 1));  // yaw about up: slight 3/4
         }
 
-        // Fixed-length T-pose lower-limb rest layout in camera space (X-right, Y-down, Z-forward), indexed to `kJointsInfo`.
-        // The rig-skeleton plot drives it by each joint's `local_anim_rot` to eyeball the IK output without a rig client. 
+        // Fixed-length T-pose lower-limb rest layout in rig space (X-right, Y-down, Z-depth), indexed to `kJointsInfo`.
+        // The rig-skeleton plot drives it by each joint's `local_anim_rot` to eyeball the joint rotations without a rig client.
         // The robot faces the camera, so its right leg sits on camera-left (-X), its left leg on camera-right (+X).
         std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints> canonical_rest_layout()
         {
@@ -90,7 +99,7 @@ namespace gui
             r[at(pose::joint_id_t::l_knee)]  = Eigen::Vector3d{ +hip, thigh, 0.0 };
             r[at(pose::joint_id_t::r_ankle)] = Eigen::Vector3d{ -hip, thigh + shin, 0.0 };
             r[at(pose::joint_id_t::l_ankle)] = Eigen::Vector3d{ +hip, thigh + shin, 0.0 };
-            // Foot points down and back from the ankle (-Z), matching the ankle->foot marker bone direction.
+            // Foot points down and forward from the ankle (-Z), matching the ankle->foot marker bone direction.
             r[at(pose::joint_id_t::r_foot)]  = Eigen::Vector3d{ -hip, thigh + shin + 0.75 * foot, -0.66 * foot };
             r[at(pose::joint_id_t::l_foot)]  = Eigen::Vector3d{ +hip, thigh + shin + 0.75 * foot, -0.66 * foot };
             return r;
@@ -182,6 +191,7 @@ namespace gui
     {
         if (opt.exposure_us.has_value()) { _ui.open_dlg_manual_exposure = true; _ui.open_dlg_exposure = opt.exposure_us.value(); }
         if (opt.gain.has_value()) { _ui.open_dlg_manual_gain = true; _ui.open_dlg_gain = opt.gain.value(); }
+        _ui.open_dlg_view_plane = opt.view_plane; // command-line viewing plane seeds the dialog
 
         // The dialog holds a value per kind so toggling does not discard what was typed;
         // only fill the one the command line named.
@@ -338,18 +348,28 @@ namespace gui
         }
     }
 
-    void debugger_app::_open_device(uint32_t index)
+    void debugger_app::_open_device(uint32_t index, pose::view_plane_t view_plane)
     {
-        _server->pipeline().open_device(index, _opt.exposure_us, _opt.gain);
+        _server->pipeline().open_source(
+            app::source_address::device(index), 
+            view_plane, 
+            _opt.tag_size_m, 
+            _opt.exposure_us, _opt.gain
+        );
         _last_seq = 0;
         _pos_plot_bufs.clear(); // restart the positions-plot timeline for the new source
         _raw_skel_positions = {};
         _skel_plot_autofit_frames = kNumAutofitFrames; // re-fit the 3D box over the next frames of the new source
     }
 
-    void debugger_app::_open_recording(const std::string& path)
+    void debugger_app::_open_recording(const std::string& path, pose::view_plane_t view_plane)
     {
-        _server->pipeline().open_recording(path);
+        _server->pipeline().open_source(
+            app::source_address::recording(path), 
+            view_plane, 
+            _opt.tag_size_m, 
+            std::nullopt, std::nullopt
+        );
         _last_seq = 0;
         _pos_plot_bufs.clear(); // restart the positions-plot timeline for the new source
         _raw_skel_positions = {};
@@ -358,18 +378,20 @@ namespace gui
 
     void debugger_app::_do_open_source()
     {
+        _opt.view_plane = _ui.open_dlg_view_plane; // the dialog's choice becomes the session default
+
         if (_ui.open_dlg_kind == source_kind_t::recording)
         {
             if (_ui.open_dlg_recording.empty()) { spdlog::warn("no recording file selected"); return; }
             _opt.exposure_us.reset();
             _opt.gain.reset();
-            this->_open_recording(_ui.open_dlg_recording);
+            this->_open_recording(_ui.open_dlg_recording, _ui.open_dlg_view_plane);
         }
         else
         {
             _opt.exposure_us = _ui.open_dlg_manual_exposure ? std::optional<int32_t>{ _ui.open_dlg_exposure } : std::nullopt;
             _opt.gain = _ui.open_dlg_manual_gain ? std::optional<int32_t>{ _ui.open_dlg_gain } : std::nullopt;
-            this->_open_device(static_cast<uint32_t>(_ui.open_dlg_device));
+            this->_open_device(static_cast<uint32_t>(_ui.open_dlg_device), _ui.open_dlg_view_plane);
         }
         _ui.open_dlg_show = false;
     }
@@ -393,25 +415,41 @@ namespace gui
         _frame_texture.value().update(_last_frame);
 
         const double t_now = std::chrono::duration<double>{ ts }.count();
-        const pose::exo_pose_estimator& est = _server->pipeline().estimator();
+        net::exo_pose_pipeline& pipe = _server->pipeline();
+        const pose::pose_estimator_base* est = pipe.estimator();
+        if (!est) { return; } // a frame arrived, so a source is open and so is its estimator
 
         // Capture the full per-frame trace into the rolling ring so a glitch can be dumped with its
         // lead-up right after it is seen on screen. Uses the same detections behind the plots below.
-        if (_ui.trace_enabled) { _trace.capture(ts, _last_tag_detections, est); }
+        // The gates are estimator specific, so they are read off whichever options exist.
+        if (_ui.trace_enabled)
+        {
+            trace_gates_t gates;
+            if (const auto* o = pipe.frontal_options()) {
+                gates.max_hold_ms = o->max_hold.count();
+                gates.reset_gap_ms = o->reset_gap.count();
+                if (o->enable_hinge_constraint) { gates.hinge_axis = o->hinge_axis_world; }
+            }
+            else if (const auto* o = pipe.sagittal_options()) {
+                gates.max_hold_ms = o->max_hold.count();
+                gates.reset_gap_ms = o->reset_gap.count();
+            }
+            _trace.capture(ts, _last_tag_detections, *est, gates);
+        }
 
         // Advance the positions-plot timeline.
         _pos_plot_bufs.advance(t_now);
 
         // Position source follows the smoothing switch: smoothed+held when on, raw when off.
-        const bool smoothed_positions = est.options().enable_position_smoothing;
+        const bool smoothed_positions = est->uses_smoothed_positions();
 
         int ji = 0;
         for (const auto& info : pose::kJointsInfo)
         {
-            const auto& st = est.get_joint_state(info.id);
+            const auto& st = est->get_joint_state(info.id);
             const std::optional<Eigen::Vector3d> p = smoothed_positions ? st.position : st.raw_position;
-            _raw_skel_positions[ji] = p; // latest camera-space position for the skeleton plot
-            if (p.has_value()) { _pos_plot_bufs.push(ji, cam_to_display(p.value())); } // display-space history
+            _raw_skel_positions[ji] = p; // latest rig-space position for the skeleton plot
+            if (p.has_value()) { _pos_plot_bufs.push(ji, rig_to_display(p.value())); } // display-space history
             ++ji;
         }
     }
@@ -518,9 +556,9 @@ namespace gui
                 }
                 ImGui::EndCombo();
             }
-            ImGui::SetItemTooltip("Raw Skeleton: measured joint positions + bones (+ IK skeleton overlay).\n"
-                                  "Rig Skeleton: a fixed-length T-pose leg rig driven by local_anim_rot.\n"
-                                  "Positions: per-joint X/Y/Z position channels as 2D line plots.");
+            ImGui::SetItemTooltip("Raw Skeleton: Measured raw skeleton (+ FK reconstruction overlay).\n"
+                                  "Rig Skeleton: Fixed-length T-pose leg rig driven by local_anim_rot.\n"
+                                  "Positions: Per-joint XYZ position channels as 2D line plots.");
 
             // Plot controls, matched to the selected type: the 3D skeletons get a box re-fit; the
             // positions grid gets the range lock/sync/reset and cell-size controls.
@@ -559,7 +597,7 @@ namespace gui
                 ImGui::ColorEdit4("Sphere color", point_color, col_flags);
                 ImGui::ColorEdit4("Bone color", bone_color, col_flags);
                 if (is_raw) {
-                    ImGui::ColorEdit4("IK bone color", _ui.raw_skel_ik_bone_color, col_flags);
+                    ImGui::ColorEdit4("FK overlay color", _ui.raw_skel_fk_bone_color, col_flags);
                 }
             }
         }
@@ -570,6 +608,8 @@ namespace gui
             // ----- AprilTag detection tuning (live; the worker rebuilds the detector on change) -----
             ImGui::SeparatorText("AprilTag Detection");
             {
+                const bool solves_tag_pose = (pipe.view_plane() == pose::view_plane_t::frontal);
+
                 // Edit a copy of the current tuning, push it back only when something changed.
                 pose::tag_tuning_t t = pipe.tag_tuning();
                 bool changed = false;
@@ -582,6 +622,9 @@ namespace gui
                                       "Higher: estimated depth and the whole skeleton scale up.\n"
                                       "Lower: they scale down.");
 
+                // A sagittal run works off 2D tag centers, so the detector never solves a tag pose
+                // and these two knobs have nothing to act on.
+                ImGui::BeginDisabled(!solves_tag_pose);
                 const char* const methods[] = { "Orthogonal iteration", "Homography (closed form)" };
                 int mi = (t.pose_method == pose::tag_detector::pose_method_t::homography) ? 1 : 0;
                 if (ImGui::Combo("Pose method", &mi, methods, IM_ARRAYSIZE(methods))) {
@@ -592,6 +635,7 @@ namespace gui
                 ImGui::SetItemTooltip("How tag->camera pose (hence the 3D position) is solved.\n"
                                       "OI: iterative; most accurate rotation, two candidates, costlier.\n"
                                       "Homography: closed-form; cheaper, translation/depth comparable.");
+                ImGui::EndDisabled();
 
                 changed |= ImGui::SliderFloat("quad_decimate", &t.quad_decimate, 1.0f, 4.0f, "%.1f", ImGuiSliderFlags_AlwaysClamp);
                 ImGui::SetItemTooltip("Image downsample factor before quad detection (1.0 = full res).\n"
@@ -610,7 +654,8 @@ namespace gui
                                       "On: better pose/depth accuracy, small extra cost.\n"
                                       "Off: faster, coarser corners (fine when decimating hard).");
 
-                ImGui::BeginDisabled(t.pose_method != pose::tag_detector::pose_method_t::orthogonal_iteration);
+                ImGui::BeginDisabled(!solves_tag_pose
+                    || t.pose_method != pose::tag_detector::pose_method_t::orthogonal_iteration);
                 changed |= ImGui::SliderInt("num_iters", &t.num_iters, 1, 100, "%d");
                 ImGui::SetItemTooltip("Orthogonal-iteration steps for pose refinement (OI only).\n"
                                       "Higher: more accurate rotation, diminishing returns past ~50.\n"
@@ -630,89 +675,25 @@ namespace gui
             // ----- Rest Pose calibration options -----
             ImGui::SeparatorText("Rest Pose");
             {
-                ImGui::TextUnformatted(pipe.estimator().has_rest_pose() ? "Rest Pose: calibrated" : "Rest Pose: N/A");
+                ImGui::TextUnformatted(pipe.has_rest_pose() ? "Rest Pose: calibrated" : "Rest Pose: N/A");
                 ImGui::SameLine();
                 if (ImGui::Button("Calibrate")) { pipe.calibrate_rest_pose(); } // the pipeline logs the outcome
                 ImGui::SameLine();
                 if (ImGui::Button("Clear")) { pipe.clear_rest_pose(); }
             }
 
-            constexpr auto kFlags = ImGuiSliderFlags_AlwaysClamp;
-            // Small double-DragScalar helper (options are double; avoids float temporaries).
-            const auto drag = [](const char* label, double& v, double lo, double hi, double step, const char* fmt) {
-                return ImGui::DragScalar(label, ImGuiDataType_Double, &v, static_cast<float>(step), &lo, &hi, fmt, kFlags);
-            };
-
-            // ----- Leg hinge (1-DOF) -----
-            ImGui::SeparatorText("Leg Hinge (1-DOF)");
-            {
-                auto& opt = pipe.estimator().options();
-                ImGui::Checkbox("Constrain leg joints to 1-DOF hinge", &opt.enable_hinge_constraint);
-                ImGui::SetItemTooltip("Every exo leg joint (hip/knee/ankle) is a forward/back hinge. Keep\n"
-                                      "only the rotation about the lateral axis; drop off-hinge components\n"
-                                      "as tag-position error. Needs a captured rest pose.\n"
-                                      "On: clean 1-DOF swing per joint.\n"
-                                      "Off: free minimal-swing (also picks up lateral wobble).");
-
-                ImGui::BeginDisabled(!opt.enable_hinge_constraint);
-                float axis[3]{ static_cast<float>(opt.hinge_axis_world.x()),
-                               static_cast<float>(opt.hinge_axis_world.y()),
-                               static_cast<float>(opt.hinge_axis_world.z()) };
-                if (ImGui::DragFloat3("Hinge axis (cam)", axis, 0.01f, -1.0f, 1.0f, "%.2f")) {
-                    opt.hinge_axis_world = Eigen::Vector3d{ axis[0], axis[1], axis[2] };
-                }
-                ImGui::SetItemTooltip("Lateral hinge axis in the camera frame, shared by all leg joints.\n"
-                                      "~(1,0,0) for a frontal view, ~(0,0,1) for a sagittal (side) view.\n"
-                                      "It is normalized internally; direction matters, length does not.");
-                ImGui::EndDisabled();
-            }
-
-            // ----- Position pipeline (camera-space 3D position track) -----
-            ImGui::SeparatorText("Position (3D positions)");
-            {
-                auto& opt = pipe.estimator().options();
-                ImGui::Checkbox("Enable position smoothing", &opt.enable_position_smoothing);
-                ImGui::SetItemTooltip("Low-pass the 3D positions (One Euro per axis) and hold them briefly\n"
-                                      "through occlusion. Also selects what the plots draw.\n"
-                                      "On: steadier smoothed+held positions, some lag.\n"
-                                      "Off: raw per-frame positions (noisier, no lag).");
-
-                ImGui::BeginDisabled(!opt.enable_position_smoothing);
-                drag("Min cutoff [Hz]", opt.position_filter.min_cutoff_hz, 0.01, 10.0, 0.01, "%.2f");
-                ImGui::SetItemTooltip("Baseline low-pass cutoff for the 3D position while it is still.\n"
-                                      "Higher: more responsive position, but more jitter.\n"
-                                      "Lower: steadier position at rest, but adds lag.");
-                drag("Beta", opt.position_filter.beta, 0.0, 1.0, 0.001, "%.3f");
-                ImGui::SetItemTooltip("Speed coefficient: how much position motion raises the cutoff.\n"
-                                      "Higher: less lag when the joint moves, more jitter.\n"
-                                      "Lower: smoother in motion, more lag (0 = plain low-pass).");
-                drag("Deriv cutoff [Hz]", opt.position_filter.dcutoff_hz, 0.01, 10.0, 0.01, "%.2f");
-                ImGui::SetItemTooltip("Cutoff for the internal speed-estimate low-pass.\n"
-                                      "Higher: speed reacts faster (beta engages sooner), a bit noisier.\n"
-                                      "Lower: steadier speed estimate.");
-                ImGui::EndDisabled();
-
-                // Occlusion hold (independent of the smoothing on/off switch).
-                double hold_ms = opt.max_hold.count();
-                if (drag("Max hold [ms]", hold_ms, 0.0, 1000.0, 1.0, "%.0f")) { opt.max_hold = pose::millis_f64{ hold_ms }; }
-                ImGui::SetItemTooltip("How long a lost joint keeps its last position before dropping out.\n"
-                                      "Higher: rides through longer occlusions, but shows staler positions.\n"
-                                      "Lower: drops a lost joint sooner (fresher, but blinks out more).");
-                double reset_ms = opt.reset_gap.count();
-                if (drag("Reset gap [ms]", reset_ms, 0.0, 2000.0, 1.0, "%.0f")) { opt.reset_gap = pose::millis_f64{ reset_ms }; }
-                ImGui::SetItemTooltip("Gap after which the filter reseeds to the raw position instead of smoothing.\n"
-                                      "Higher: keeps smoothing across longer pauses (may lurch on return).\n"
-                                      "Lower: reseeds sooner after a pause (snappier, less overshoot).");
-            }
+            // ----- Estimator tuning (the two estimators expose different knobs) -----
+            if (auto* frontal = pipe.frontal_options()) { this->_render_frontal_estimator_control(*frontal); }
+            else if (auto* sagittal = pipe.sagittal_options()) { this->_render_sagittal_estimator_control(*sagittal); }
 
             // ----- Diagnostic pose trace -----
-            // Rolling ring of full per-frame traces (detections + 3D positions + IK rotations). See a
+            // Rolling ring of full per-frame traces (detections + 3D positions + joint rotations). See a
             // glitch on screen, hit Dump, and the recent history lands in dumps/*.json for analysis.
             ImGui::SeparatorText("Diagnostics");
             {
                 ImGui::Checkbox("Capture pose trace", &_ui.trace_enabled);
                 ImGui::SetItemTooltip("Record each frame (tag detections + chosen 3D positions, per-joint\n"
-                                      "raw/smoothed positions and IK rotation) into a rolling ring buffer.");
+                                      "raw/smoothed positions and animation rotation) into a rolling ring buffer.");
 
                 if (ImGui::SliderInt("Trace length", &_ui.trace_capacity, 30, 3000, "%d frames")) {
                     _trace.set_capacity(static_cast<std::size_t>(_ui.trace_capacity));
@@ -724,6 +705,139 @@ namespace gui
                 ImGui::SameLine();
                 if (ImGui::Button("Clear Trace")) { _trace.clear(); }
             }
+        }
+    }
+
+    void debugger_app::_render_frontal_estimator_control(pose::frontal_pose_estimator::options_t& opt)
+    {
+        // ----- Leg hinge (1-DOF) -----
+        ImGui::SeparatorText("Leg Hinge (1-DOF)");
+        {
+            ImGui::Checkbox("Constrain leg joints to 1-DOF hinge", &opt.enable_hinge_constraint);
+            ImGui::SetItemTooltip("Every exo leg joint (hip/knee/ankle) is a forward/back hinge. Keep\n"
+                                  "only the rotation about the lateral axis; drop off-hinge components\n"
+                                  "as tag-position error. Needs a captured rest pose.\n"
+                                  "On: clean 1-DOF swing per joint.\n"
+                                  "Off: free minimal-swing (also picks up lateral wobble).");
+
+            ImGui::BeginDisabled(!opt.enable_hinge_constraint);
+            float axis[3]{ static_cast<float>(opt.hinge_axis_world.x()),
+                           static_cast<float>(opt.hinge_axis_world.y()),
+                           static_cast<float>(opt.hinge_axis_world.z()) };
+            if (ImGui::DragFloat3("Hinge axis (cam)", axis, 0.01f, -1.0f, 1.0f, "%.2f")) {
+                opt.hinge_axis_world = Eigen::Vector3d{ axis[0], axis[1], axis[2] };
+            }
+            ImGui::SetItemTooltip("Lateral hinge axis in the rig frame, shared by all leg joints.\n"
+                                  "~(1,0,0) for a frontal view, ~(0,0,1) for a sagittal (side) view.\n"
+                                  "It is normalized internally; direction matters, length does not.");
+            ImGui::EndDisabled();
+        }
+
+        // ----- Position pipeline (rig-space 3D position track) -----
+        ImGui::SeparatorText("Position (3D positions)");
+        {
+            ImGui::Checkbox("Enable position smoothing", &opt.enable_position_smoothing);
+            ImGui::SetItemTooltip("Low-pass the 3D positions (One Euro per axis) and hold them briefly\n"
+                                  "through occlusion. Also selects what the plots draw.\n"
+                                  "On: steadier smoothed+held positions, some lag.\n"
+                                  "Off: raw per-frame positions (noisier, no lag).");
+
+            ImGui::BeginDisabled(!opt.enable_position_smoothing);
+            option_drag("Min cutoff [Hz]", opt.position_filter.min_cutoff_hz, 0.01, 10.0, 0.01, "%.2f");
+            ImGui::SetItemTooltip("Baseline low-pass cutoff for the 3D position while it is still.\n"
+                                  "Higher: more responsive position, but more jitter.\n"
+                                  "Lower: steadier position at rest, but adds lag.");
+            option_drag("Beta", opt.position_filter.beta, 0.0, 1.0, 0.001, "%.3f");
+            ImGui::SetItemTooltip("Speed coefficient: how much position motion raises the cutoff.\n"
+                                  "Higher: less lag when the joint moves, more jitter.\n"
+                                  "Lower: smoother in motion, more lag (0 = plain low-pass).");
+            option_drag("Deriv cutoff [Hz]", opt.position_filter.dcutoff_hz, 0.01, 10.0, 0.01, "%.2f");
+            ImGui::SetItemTooltip("Cutoff for the internal speed-estimate low-pass.\n"
+                                  "Higher: speed reacts faster (beta engages sooner), a bit noisier.\n"
+                                  "Lower: steadier speed estimate.");
+            ImGui::EndDisabled();
+
+            // Occlusion hold (independent of the smoothing on/off switch).
+            double hold_ms = opt.max_hold.count();
+            if (option_drag("Max hold [ms]", hold_ms, 0.0, 1000.0, 1.0, "%.0f")) { opt.max_hold = pose::millis_f64{ hold_ms }; }
+            ImGui::SetItemTooltip("How long a lost joint keeps its last position before dropping out.\n"
+                                  "Higher: rides through longer occlusions, but shows staler positions.\n"
+                                  "Lower: drops a lost joint sooner (fresher, but blinks out more).");
+            double reset_ms = opt.reset_gap.count();
+            if (option_drag("Reset gap [ms]", reset_ms, 0.0, 2000.0, 1.0, "%.0f")) { opt.reset_gap = pose::millis_f64{ reset_ms }; }
+            ImGui::SetItemTooltip("Gap after which the filter reseeds to the raw position instead of smoothing.\n"
+                                  "Higher: keeps smoothing across longer pauses (may lurch on return).\n"
+                                  "Lower: reseeds sooner after a pause (snappier, less overshoot).");
+        }
+    }
+
+    void debugger_app::_render_sagittal_estimator_control(pose::sagittal_pose_estimator::options_t& opt)
+    {
+        // ----- Readout: which leg is being tracked and what it currently measures -----
+        // The side is inferred from the detected tag ids, so showing it is the only way to catch a
+        // camera placed on the wrong side (or a leg whose tags are not being seen at all).
+        ImGui::SeparatorText("Tracked Leg");
+        {
+            const pose::sagittal_pose_estimator* est = _server->pipeline().sagittal_estimator();
+            const auto knee = est ? est->tracked_leg_knee() : std::nullopt;
+
+            if (knee.has_value()) {
+                const auto& info = pose::joint_info(knee.value());
+                ImGui::TextUnformatted(std::format("Near leg: {} (tag {})", info.name, info.tag_id).c_str());
+            } else {
+                ImGui::TextDisabled("Near leg: undecided (waiting for tags)");
+            }
+            ImGui::SetItemTooltip("Read off the detected tag ids: only one leg carries tags.\n"
+                                  "It also tells which side the camera stands on, hence which way\n"
+                                  "the legs swing.");
+
+            const auto angles = est ? est->leg_angles() : std::nullopt;
+            if (angles.has_value()) {
+                ImGui::TextUnformatted(std::format("Hip   {:+7.2f} deg", angles->hip * kRadToDeg).c_str());
+                ImGui::TextUnformatted(std::format("Knee  {:+7.2f} deg", angles->knee * kRadToDeg).c_str());
+                ImGui::TextUnformatted(std::format("Ankle {:+7.2f} deg", angles->ankle * kRadToDeg).c_str());
+            } else {
+                ImGui::TextDisabled("Angles: n/a (needs a rest pose and the full chain visible)");
+            }
+        }
+
+        // ----- Position track (image-plane points; angles are read off them) -----
+        ImGui::SeparatorText("Position (image plane)");
+        {
+            ImGui::Checkbox("Enable position smoothing", &opt.enable_position_smoothing);
+            ImGui::SetItemTooltip("Low-pass the tag centers (One Euro per image axis) and hold them briefly\n"
+                                  "through occlusion. The angles are measured on these points, so this\n"
+                                  "smooths the angles too. Also selects what the plots draw.\n"
+                                  "On: steadier angles, some lag.\n"
+                                  "Off: raw per-frame centers (noisier, no lag).");
+
+            ImGui::BeginDisabled(!opt.enable_position_smoothing);
+            option_drag("Min cutoff [Hz]", opt.position_filter.min_cutoff_hz, 0.01, 10.0, 0.01, "%.2f");
+            ImGui::SetItemTooltip("Baseline low-pass cutoff for a tag center while it is still.\n"
+                                  "Higher: more responsive angles, but more jitter.\n"
+                                  "Lower: steadier angles at rest, but adds lag.");
+            option_drag("Beta", opt.position_filter.beta, 0.0, 1.0, 0.001, "%.3f");
+            ImGui::SetItemTooltip("Speed coefficient: how much marker motion raises the cutoff.\n"
+                                  "Higher: less lag when the leg swings, more jitter.\n"
+                                  "Lower: smoother in motion, more lag (0 = plain low-pass).");
+            option_drag("Deriv cutoff [Hz]", opt.position_filter.dcutoff_hz, 0.01, 10.0, 0.01, "%.2f");
+            ImGui::SetItemTooltip("Cutoff for the internal speed-estimate low-pass.\n"
+                                  "Higher: speed reacts faster (beta engages sooner), a bit noisier.\n"
+                                  "Lower: steadier speed estimate.");
+            ImGui::EndDisabled();
+
+            // Occlusion hold (independent of the smoothing on/off switch).
+            double hold_ms = opt.max_hold.count();
+            if (option_drag("Max hold [ms]", hold_ms, 0.0, 1000.0, 1.0, "%.0f")) { opt.max_hold = pose::millis_f64{ hold_ms }; }
+            ImGui::SetItemTooltip("How long a lost joint keeps its last center before dropping out. The far\n"
+                                  "leg swinging past the near one is the usual occlusion here.\n"
+                                  "Higher: rides through longer occlusions, but holds staler angles.\n"
+                                  "Lower: drops a lost joint sooner (fresher, but the chain breaks more).");
+            double reset_ms = opt.reset_gap.count();
+            if (option_drag("Reset gap [ms]", reset_ms, 0.0, 2000.0, 1.0, "%.0f")) { opt.reset_gap = pose::millis_f64{ reset_ms }; }
+            ImGui::SetItemTooltip("Gap after which the filter reseeds to the raw center instead of smoothing.\n"
+                                  "Higher: keeps smoothing across longer pauses (may lurch on return).\n"
+                                  "Lower: reseeds sooner after a pause (snappier, less overshoot).");
         }
     }
 
@@ -739,8 +853,8 @@ namespace gui
 
     void debugger_app::_render_raw_skeleton_plot()
     {
-        const auto to_display = [](const Eigen::Vector3d& p) -> Eigen::Vector3d { return cam_to_display(p).cast<double>(); };
-        const pose::exo_pose_estimator& est = _server->pipeline().estimator();
+        const auto to_display = [](const Eigen::Vector3d& p) -> Eigen::Vector3d { return rig_to_display(p).cast<double>(); };
+        const pose::pose_estimator_base* est = _server->pipeline().estimator();
 
         // Measured per-joint positions (display space), smoothed or raw per the smoothing switch.
         std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints> measured{};
@@ -748,21 +862,24 @@ namespace gui
             if (_raw_skel_positions[i].has_value()) { measured[i] = to_display(_raw_skel_positions[i].value()); }
         }
 
-        // IK forward-kinematics overlay: FK from the anim rotations + captured rest geometry, anchored
-        // at the measured pelvis, kept only where the joint was actually solved this frame (anim
-        // present). If it overlays the measured skeleton, the IK is self-consistent.
+        // Forward-kinematics overlay: the per-joint anim rotations replayed on the captured rest
+        // geometry, anchored at the measured pelvis, kept only where the joint was actually solved
+        // this frame (anim present). Where it sits on the measured skeleton, the rotations agree
+        // with the points they came from; where the two split, the rotations no longer describe what
+        // was measured (the overlay keeps the rest bone lengths, so a length-only split is scale or
+        // perspective rather than a wrong angle).
         std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints> overlay{};
         bool has_overlay = false;
-        if (est.has_rest_pose())
+        if (est && est->has_rest_pose())
         {
             std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints> rest{};
             std::array<std::optional<Eigen::Quaterniond>, pose::kNumJoints> anim{};
             std::optional<Eigen::Vector3d> anchor; // measured position of the root
             for (const auto& info : pose::kJointsInfo) {
                 const std::size_t k = static_cast<std::size_t>(info.id);
-                rest[k] = est.get_rest_position(info.id);
-                anim[k] = est.get_joint_state(info.id).local_anim_rot;
-                if (pose::is_root_joint(info.id)) { anchor = est.get_joint_state(info.id).position; }
+                rest[k] = est->get_rest_position(info.id);
+                anim[k] = est->get_joint_state(info.id).local_anim_rot;
+                if (pose::is_root_joint(info.id)) { anchor = est->get_joint_state(info.id).position; }
             }
             if (anchor.has_value())
             {
@@ -775,29 +892,31 @@ namespace gui
 
         const ImVec4 bone_col(_ui.raw_skel_bone_color[0], _ui.raw_skel_bone_color[1], _ui.raw_skel_bone_color[2], _ui.raw_skel_bone_color[3]);
         const ImVec4 point_col(_ui.raw_skel_point_color[0], _ui.raw_skel_point_color[1], _ui.raw_skel_point_color[2], _ui.raw_skel_point_color[3]);
-        const ImVec4 ik_col(_ui.raw_skel_ik_bone_color[0], _ui.raw_skel_ik_bone_color[1], _ui.raw_skel_ik_bone_color[2], _ui.raw_skel_ik_bone_color[3]);
+        const ImVec4 fk_col(_ui.raw_skel_fk_bone_color[0], _ui.raw_skel_fk_bone_color[1], _ui.raw_skel_fk_bone_color[2], _ui.raw_skel_fk_bone_color[3]);
         this->_render_skeleton_3d(
-            "Raw skeleton (measured positions + IK overlay)",
+            "Raw skeleton (measured positions + FK overlay)",
             measured, bone_col, point_col,
             _ui.raw_skel_point_size,
             has_overlay ? &overlay : nullptr,
-            ik_col,
+            fk_col,
             /*hint*/nullptr
         );
     }
 
     void debugger_app::_render_rig_skeleton_plot()
     {
-        const auto to_display = [](const Eigen::Vector3d& p) -> Eigen::Vector3d { return cam_to_display(p).cast<double>(); };
-        const pose::exo_pose_estimator& est = _server->pipeline().estimator();
+        const auto to_display = [](const Eigen::Vector3d& p) -> Eigen::Vector3d { return rig_to_display(p).cast<double>(); };
+        const pose::pose_estimator_base* est = _server->pipeline().estimator();
 
-        // Fixed-length clean rig (xbot-like T-pose) driven by the live per-joint IK rotations; FK
+        // Fixed-length clean rig (xbot-like T-pose) driven by the live per-joint rotations; FK
         // anchored at the rig root. With no rest pose captured every anim rotation is absent, so the rig
         // holds its neutral T-pose.
         const auto rest = canonical_rest_layout();
         std::array<std::optional<Eigen::Quaterniond>, pose::kNumJoints> anim{};
-        for (const auto& info : pose::kJointsInfo) {
-            anim[static_cast<std::size_t>(info.id)] = est.get_joint_state(info.id).local_anim_rot;
+        if (est) {
+            for (const auto& info : pose::kJointsInfo) {
+                anim[static_cast<std::size_t>(info.id)] = est->get_joint_state(info.id).local_anim_rot;
+            }
         }
         const Eigen::Vector3d anchor =
             rest[static_cast<std::size_t>(pose::kJointsInfo[0].id)].value_or(Eigen::Vector3d::Zero());
@@ -816,7 +935,7 @@ namespace gui
             _ui.rig_skel_point_size,
             /*overlay*/nullptr,
             /*overlay_color*/ImVec4{},
-            est.has_rest_pose() ? nullptr : "calibrate a rest pose to animate"
+            _server->pipeline().has_rest_pose() ? nullptr : "calibrate a rest pose to animate"
         );
     }
 
@@ -847,6 +966,8 @@ namespace gui
         constexpr float kYLo = -1.2f, kYHi = 1.2f; // default position range [m], display space
         const ImPlotCond y_cond = (_ui.pos_plot_lock || _pos_plot_reset) ? ImPlotCond_Always : ImPlotCond_Once;
 
+        // Channels are plot space: rig X, rig Z, and -rig Y (the 3D views label the same three axes
+        // right / depth / up).
         const ImVec4 axis_col[3]{ { 0.95f, 0.35f, 0.35f, 1 }, { 0.45f, 0.85f, 0.45f, 1 }, { 0.45f, 0.55f, 0.95f, 1 } };
         const char* const axis_nm[3]{ "x", "y", "z" };
 
@@ -894,7 +1015,7 @@ namespace gui
 
         const ImPlot3DFlags f3d = ImPlot3DFlags_Equal | ImPlot3DFlags_NoClip | ImPlot3DFlags_NoLegend;
         if (!ImPlot3D::BeginPlot(title, avail, f3d)) { return; }
-        ImPlot3D::SetupAxes("right [m]", "depth [m]", "up [m]"); // plot X=cam right, Y=cam depth(Z), Z=up(-cam Y)
+        ImPlot3D::SetupAxes("right [m]", "depth [m]", "up [m]"); // plot X=rig X, Y=rig Z (depth), Z=-rig Y (up)
         {
             const ImPlot3DQuat r = front_view_quat();
             ImPlot3D::SetupBoxInitialRotation(r); // double-click reset returns to front
@@ -950,8 +1071,8 @@ namespace gui
         pt_spec.MarkerFillColor = point_color;
         ImPlot3D::PlotScatter("joints", jx.data(), jy.data(), jz.data(), jn, pt_spec);
 
-        // Optional second skeleton (the IK forward-kinematics reconstruction), thinner and in `overlay_color`.
-        if (overlay != nullptr) { draw_bones(*overlay, overlay_color, 2.0f, "ik"); }
+        // Optional second skeleton (the forward-kinematics reconstruction), thinner and in `overlay_color`.
+        if (overlay != nullptr) { draw_bones(*overlay, overlay_color, 2.0f, "fk"); }
 
         if (hint != nullptr) { ImPlot3D::PlotText(hint, 0.0, 0.0, 0.15); }
         ImPlot3D::EndPlot();
@@ -1033,7 +1154,9 @@ namespace gui
             pipe.source_name(),
             pipe.source_resolution(),
             pipe.source_fps(),
-            pipe.intrinsics()); // the recorder logs success/failure
+            pipe.intrinsics(),
+            pipe.view_plane()
+        );
     }
 
     void debugger_app::_render_recording_status()
@@ -1103,6 +1226,20 @@ namespace gui
         ImGui::SetNextWindowSize(ImVec2(420, 0), ImGuiCond_Appearing);
         if (ImGui::Begin("Open Source", &_ui.open_dlg_show, ImGuiWindowFlags_NoCollapse))
         {
+            // The viewing plane decides which estimator runs, and swapping it mid-stream would
+            // invalidate the rest pose and the tracking state, so it is picked alongside the source.
+            const auto view_plane_radio = [this](const char* label, pose::view_plane_t val) {
+                if (ImGui::RadioButton(label, _ui.open_dlg_view_plane == val)) { _ui.open_dlg_view_plane = val; }
+            };
+            ImGui::TextUnformatted("Viewing plane");
+            view_plane_radio("Frontal", pose::view_plane_t::frontal);
+            ImGui::SameLine();
+            view_plane_radio("Sagittal", pose::view_plane_t::sagittal);
+            ImGui::SetItemTooltip("Frontal: camera faces the exo; both legs tagged, rig solved in 3D.\n"
+                                  "Sagittal: camera at the side; only the near leg is tagged and its\n"
+                                  "          angles are read off the image plane (no tag pose solve).");
+            ImGui::Separator();
+
             const auto kind_radio = [this](const char* label, source_kind_t val) {
                 if (ImGui::RadioButton(label, _ui.open_dlg_kind == val)) { _ui.open_dlg_kind = val; }
             };

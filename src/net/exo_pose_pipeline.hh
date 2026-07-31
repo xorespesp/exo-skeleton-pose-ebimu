@@ -4,7 +4,9 @@
 #include "hw/calibration.hh"
 #include "hw/sensor_frame_provider.hh"
 #include "io/frame_recorder.hh"
-#include "pose/exo_pose_estimator.hh"
+#include "pose/frontal_pose_estimator.hh"
+#include "pose/sagittal_pose_estimator.hh"
+#include "pose/pose_estimator_base.hh"
 #include "pose/tag_detector.hh"
 
 #include <opencv2/core.hpp>
@@ -30,22 +32,20 @@ namespace net
     class exo_pose_pipeline final
     {
     public:
-        exo_pose_pipeline(double default_tag_size_m, bool annotate_frames);
+        explicit exo_pose_pipeline(bool annotate_frames);
         ~exo_pose_pipeline();
 
         exo_pose_pipeline(const exo_pose_pipeline&) = delete;
         exo_pose_pipeline& operator=(const exo_pose_pipeline&) = delete;
 
         // --- source control -----------------------------------------------------------
-        // `open_device`/`open_recording` are `open_source` with the default tag size.
         bool open_source(
-            const app::source_address& source_addr,
-            double tag_size_m,
-            std::optional<int32_t> exposure_us,
-            std::optional<int32_t> gain
+            const app::source_address& source_addr, // camera device or recording file to stream
+            pose::view_plane_t view_plane,   // picks the estimator; a different one swaps it in, tuning fresh
+            double tag_size_m,               // printed black-square edge length [m]
+            std::optional<int32_t> exposure_us, // optional (nullopt: auto exposure)
+            std::optional<int32_t> gain         // optional (nullopt: auto gain)
         );
-        bool open_device(uint32_t index, std::optional<int32_t> exposure_us, std::optional<int32_t> gain);
-        bool open_recording(const std::string& path);
         void close_source();
 
         bool is_source_open() const;
@@ -62,12 +62,30 @@ namespace net
         std::filesystem::path recording_path() const;
 
         // --- rest pose ----------------------------------------------------------------
+        // All three are no-ops / false until a source has been opened, since the estimator holding
+        // the reference is created then. Closing a source leaves the estimator in place, so a
+        // captured rest survives until the next open replaces it.
+        bool has_rest_pose() const;
         bool calibrate_rest_pose();
         void clear_rest_pose();
 
-        // --- estimator (read + live option edits) -------------------------------------
-        pose::exo_pose_estimator& estimator();
-        const pose::exo_pose_estimator& estimator() const;
+        // --- estimator ----------------------------------------------------------------
+        // The active estimator, null until the first source is opened (the viewing plane it is built
+        // for comes from that source). It outlives close_source(), so the last frame's joint state
+        // stays readable. Enough for anything that only reads that state.
+        pose::pose_estimator_base* estimator();
+        const pose::pose_estimator_base* estimator() const;
+
+        // Which plane the active estimator solves in; meaningful only once one exists.
+        pose::view_plane_t view_plane() const { return _view_plane; }
+
+        // Live tuning of the active estimator. At most one is non-null, matching the plane, which
+        // lets a caller render the right controls without testing the plane itself.
+        pose::frontal_pose_estimator::options_t* frontal_options();
+        pose::sagittal_pose_estimator::options_t* sagittal_options();
+
+        // The sagittal estimator's readouts (tracked leg, joint angles); null in a frontal run.
+        const pose::sagittal_pose_estimator* sagittal_estimator() const;
 
         // --- tag detection tuning (tag size, decimation, pose method, ...), live -------
         // Persisted across source reopens; the detection worker rebuilds on the next frame.
@@ -114,15 +132,24 @@ namespace net
         void _log_periodic_stats();
         void _reset_frame_log_state();
 
+        // Build the estimator for `view_plane` when it differs from the active one, and point
+        // _active at it. A no-op when unchanged, so reopening a source keeps its tuning.
+        void _select_estimator(pose::view_plane_t view_plane);
+
     private:
-        double _default_tag_size_m;
         bool _annotate_frames; // observer keeps an annotated frame for a monitor GUI
 
         std::shared_ptr<hw::sensor_frame_provider> _provider;
         std::shared_ptr<pose_frame_observer> _observer;
         pose::tag_tuning_t _tuning{}; // detector tuning, applied to each observer (persists across reopens)
         std::shared_ptr<io::frame_recorder> _recorder; // non-null only while recording
-        pose::exo_pose_estimator _estimator;
+
+        // At most one estimator is engaged at a time and _active points at it, so the readers of
+        // joint state never learn which plane produced it. Both are empty until a source is opened.
+        pose::view_plane_t _view_plane{ pose::view_plane_t::frontal };
+        std::optional<pose::frontal_pose_estimator> _frontal;
+        std::optional<pose::sagittal_pose_estimator> _sagittal;
+        pose::pose_estimator_base* _active{ nullptr };
         std::vector<pose::tag_detection_t> _detections;
         uint64_t _last_seq{ 0 };
         std::chrono::microseconds _last_timestamp{ 0 }; // device time of the latched frame

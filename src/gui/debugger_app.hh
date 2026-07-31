@@ -8,7 +8,9 @@
 
 #include "io/recording_writer.hh"
 #include "pose/tag_detector.hh"
-#include "pose/exo_pose_estimator.hh"
+#include "pose/frontal_pose_estimator.hh"
+#include "pose/sagittal_pose_estimator.hh"
+#include "pose/view_plane.hh"
 #include "plot_buffer.hh"
 
 #include <imfilebrowser.h>
@@ -29,16 +31,16 @@ namespace net { class exo_pose_server; }
 namespace gui
 {
     enum class plot_type_t {
-        raw_skeleton,  // measured per-joint 3D positions + bones, with the IK forward-kinematics overlay
-        rig_skeleton,  // fixed-length T-pose leg rig driven purely by the per-joint `local_anim_rot` (IK output)
-        positions,     // per-joint X/Y/Z position over time (2D line subplot grid)
+        raw_skeleton,  // measured per-joint 3D positions + bones, with the forward-kinematics overlay
+        rig_skeleton,  // fixed-length T-pose leg rig driven purely by the per-joint `local_anim_rot`
+        positions,     // per-joint position channels over time, in plot space (2D line subplot grid)
     };
 
     enum class source_kind_t { device, recording };
 
     // Debugger GUI for the pose server: starts/stops the WebSocket listener and drives the pose
     // pipeline (source open/close, rest-pose calibration) while visualizing the annotated frame
-    // and the per-joint 3D positions / IK skeleton. Owns the server; the listener starts stopped.
+    // and the per-joint 3D positions / reconstructed skeleton. Owns the server; the listener starts stopped.
     class debugger_app final : public app_base<app_renderer_sdl3>
     {
     public:
@@ -51,8 +53,8 @@ namespace gui
         void render_ui() override;
 
     private:
-        void _open_device(uint32_t index);
-        void _open_recording(const std::string& path);
+        void _open_device(uint32_t index, pose::view_plane_t view_plane);
+        void _open_recording(const std::string& path, pose::view_plane_t view_plane);
 
         void _do_open_source();
         void _do_close_source();
@@ -63,11 +65,18 @@ namespace gui
 
         void _render_menu_bar();
         void _render_control_panel();
+
+        // Estimator tuning, one function per viewing plane. The two estimators keep separate option
+        // types (their algorithms share no knobs), so the panels cannot be folded into one; the
+        // caller picks by asking the pipeline which options exist rather than testing the plane
+        // itself.
+        void _render_frontal_estimator_control(pose::frontal_pose_estimator::options_t& opt);
+        void _render_sagittal_estimator_control(pose::sagittal_pose_estimator::options_t& opt);
         void _render_recording_status(); // live counters while a recording is being written
         void _render_plot_panel();
-        void _render_raw_skeleton_plot();  // raw_skeleton: measured 3D positions + bones (+ IK FK overlay)
+        void _render_raw_skeleton_plot();  // raw_skeleton: measured 3D positions + bones (+ FK overlay)
         void _render_rig_skeleton_plot();  // rig_skeleton: fixed-length T-pose rig driven by `local_anim_rot`
-        void _render_positions_plot();     // positions: per-joint X/Y/Z over time (2D subplot grid)
+        void _render_positions_plot();     // positions: per-joint positions over time (2D subplot grid)
 
         // Shared 3D skeleton renderer: one front-facing, equal-scaled, data-fitted plot drawing the
         // per-joint display-space positions as bones + spheres + labels, with an optional second
@@ -110,7 +119,7 @@ namespace gui
             float raw_skel_point_size{ 7.5f };                          // joint sphere size [px]
             float raw_skel_point_color[4]{ 0.95f, 0.45f, 0.20f, 1.0f }; // joint sphere color (orange)
             float raw_skel_bone_color[4]{ 0.55f, 0.75f, 0.95f, 1.0f };  // bone line color (blue)
-            float raw_skel_ik_bone_color[4]{ 0.95f, 0.85f, 0.20f, 1.0f }; // IK overlay bone color
+            float raw_skel_fk_bone_color[4]{ 0.95f, 0.85f, 0.20f, 1.0f }; // FK overlay bone color
 
             // rig_skeleton plot style
             float rig_skel_point_size{ 7.5f };                          // joint sphere size [px]
@@ -120,6 +129,7 @@ namespace gui
             // open-source dialog
             bool open_dlg_show{ false };
             source_kind_t open_dlg_kind{ source_kind_t::device };
+            pose::view_plane_t open_dlg_view_plane{ pose::view_plane_t::frontal };
             int open_dlg_device{ 0 };
             bool open_dlg_manual_exposure{ false };
             int open_dlg_exposure{ 8000 };
@@ -155,7 +165,7 @@ namespace gui
 
         ui_state_t _ui;
 
-        // latest per-joint camera-space 3D position for the `raw_skeleton` plot (smoothed or raw)
+        // latest per-joint rig-space 3D position for the `raw_skeleton` plot (smoothed or raw)
         std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints> _raw_skel_positions{};
         // per-joint position history (display space) for the positions plot
         plot_buffer<Eigen::Vector3f, pose::kNumJoints> _pos_plot_bufs;

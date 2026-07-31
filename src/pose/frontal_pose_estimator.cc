@@ -1,4 +1,4 @@
-#include "exo_pose_estimator.hh"
+#include "frontal_pose_estimator.hh"
 #include "leg_ik.hh"
 
 #include <algorithm>
@@ -21,7 +21,7 @@ namespace pose
         }
     } // namespace
 
-    struct exo_pose_estimator::context_t
+    struct frontal_pose_estimator::context_t
     {
         // Per-joint position filter + occlusion timers, persisting across frames. One Euro per axis.
         struct joint_filter_state_t
@@ -37,43 +37,47 @@ namespace pose
         std::array<std::optional<Eigen::Vector3d>, kNumJoints> last_frame_raw_positions{}; // per-frame raw detected positions
         std::array<bool, kNumJoints> last_frame_detection_flags{}; // per-joint fresh-detection flag
 
-        // Captured rest camera-space positions (bind positions). Outer optional == "calibrated";
-        // inner per-joint optional == "that joint had a position at capture time". Rest bone
-        // directions/lengths for the leg IK derive from these.
-        std::optional<std::array<std::optional<Eigen::Vector3d>, kNumJoints>> rest_positions;
+        // The captured rest (bind) reference. Rest bone directions and lengths for the leg IK
+        // derive from these positions.
+        struct rest_pose_info_t
+        {
+            // Per-joint rig-space position at capture; empty for a joint that was not measured then.
+            std::array<std::optional<Eigen::Vector3d>, kNumJoints> joint_position{};
+        };
+        std::optional<rest_pose_info_t> rest_pose; // empty until calibrated
     };
 
-    exo_pose_estimator::exo_pose_estimator(const options_t& opt)
+    frontal_pose_estimator::frontal_pose_estimator(const options_t& opt)
         : _opt{ opt }
         , _ctx{ std::make_unique<context_t>() }
     { }
 
-    exo_pose_estimator::~exo_pose_estimator() = default;
+    frontal_pose_estimator::~frontal_pose_estimator() = default;
 
-    const joint_state_t& exo_pose_estimator::get_joint_state(joint_id_t j) const
+    const joint_state_t& frontal_pose_estimator::get_joint_state(joint_id_t j) const
     {
         return _ctx->last_frame_joint_states[index_of(j)];
     }
 
-    std::span<const joint_state_t> exo_pose_estimator::get_joint_states() const
+    std::span<const joint_state_t> frontal_pose_estimator::get_joint_states() const
     {
         return _ctx->last_frame_joint_states;
     }
 
-    bool exo_pose_estimator::has_rest_pose() const
+    bool frontal_pose_estimator::has_rest_pose() const
     {
-        return _ctx->rest_positions.has_value();
+        return _ctx->rest_pose.has_value();
     }
 
-    std::optional<Eigen::Vector3d> exo_pose_estimator::get_rest_position(joint_id_t j) const
+    std::optional<Eigen::Vector3d> frontal_pose_estimator::get_rest_position(joint_id_t j) const
     {
-        if (_ctx->rest_positions.has_value()) {
-            return _ctx->rest_positions.value()[index_of(j)];
+        if (_ctx->rest_pose.has_value()) {
+            return _ctx->rest_pose->joint_position[index_of(j)];
         }
         return std::nullopt;
     }
 
-    void exo_pose_estimator::update(
+    void frontal_pose_estimator::update(
         const std::span<const tag_detection_t> tag_detections,
         const std::chrono::microseconds sensor_timestamp)
     {
@@ -98,7 +102,7 @@ namespace pose
             _ctx->last_frame_joint_states[i].raw_position = p; // raw
         }
 
-        // ----- Pass 2: smooth + hold each joint's camera-space position -----
+        // ----- Pass 2: smooth + hold each joint's rig-space position -----
         for (const auto& info : kJointsInfo)
         {
             const size_t i = index_of(info.id);
@@ -143,9 +147,9 @@ namespace pose
         // Needs a captured rest pose (for rest bone directions). Data driven over kJointsInfo: a leg
         // is (knee = child of root, ankle = child of knee, foot = child of ankle). Each joint is a
         // 1-DOF forward/back hinge about the shared lateral axis when the hinge constraint is on.
-        if (_ctx->rest_positions.has_value())
+        if (_ctx->rest_pose.has_value())
         {
-            const auto& rest = _ctx->rest_positions.value();
+            const auto& rest = _ctx->rest_pose->joint_position;
             const auto position_of = [this](joint_id_t j) { return _ctx->last_frame_joint_states[index_of(j)].position; };
             const auto child_of = [](joint_id_t parent) -> std::optional<joint_id_t> {
                 for (const auto& c : kJointsInfo) {
@@ -185,8 +189,8 @@ namespace pose
 
                 const leg_ik_result r = solve_leg_ik(
                     hip_pos.value(), knee_pos.value(), ankle_pos.value(), foot_pos.value(),
-                    thigh_rest, shin_rest, foot_rest, 
-                    Eigen::Quaterniond::Identity(), 
+                    thigh_rest, shin_rest, foot_rest,
+                    Eigen::Quaterniond::Identity(),
                     hinge
                 );
 
@@ -199,31 +203,31 @@ namespace pose
         }
     }
 
-    bool exo_pose_estimator::calibrate_rest_pose()
+    bool frontal_pose_estimator::calibrate_rest_pose()
     {
-        std::array<std::optional<Eigen::Vector3d>, kNumJoints> new_rest_positions{};
+        context_t::rest_pose_info_t new_rest{};
 
         bool any = false;
         for (size_t i = 0; i < kNumJoints; ++i) {
             // Only latch freshly detected joints; a held position is a stale reference.
             if (_ctx->last_frame_detection_flags[i]) {
-                new_rest_positions[i] = _ctx->last_frame_joint_states[i].raw_position;
+                new_rest.joint_position[i] = _ctx->last_frame_joint_states[i].raw_position;
             }
-            any = any || new_rest_positions[i].has_value();
+            any = any || new_rest.joint_position[i].has_value();
         }
 
-        if (any) { _ctx->rest_positions = new_rest_positions; }
-        else { _ctx->rest_positions.reset(); }
+        if (any) { _ctx->rest_pose = new_rest; }
+        else { _ctx->rest_pose.reset(); }
 
         return any;
     }
 
-    void exo_pose_estimator::clear_rest_pose()
+    void frontal_pose_estimator::clear_rest_pose()
     {
-        _ctx->rest_positions.reset();
+        _ctx->rest_pose.reset();
     }
 
-    void exo_pose_estimator::reset_tracking()
+    void frontal_pose_estimator::reset_tracking()
     {
         // Fresh filters/timers and no held positions, so the first frame of the next stream reseeds
         // rather than filtering or holding against a prior stream's position and timestamps.

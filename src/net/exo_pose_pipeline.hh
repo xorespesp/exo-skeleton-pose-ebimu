@@ -8,6 +8,7 @@
 #include "pose/sagittal_pose_estimator.hh"
 #include "pose/pose_estimator_base.hh"
 #include "pose/tag_detector.hh"
+#include "pose/view_plane.hh"
 
 #include <opencv2/core.hpp>
 

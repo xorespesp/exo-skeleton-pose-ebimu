@@ -91,7 +91,7 @@ namespace pose
         // ----- Pass 1: bind each detection's 3D position to its joint (via the static tag table) -----
         for (const auto& det : tag_detections)
         {
-            const auto joint = tag_to_joint(det.id);
+            const auto joint = tag_id_to_joint_id(det.id);
             if (!joint.has_value()) { continue; } // tag id not part of the rig
             const auto p = detection_position(det);
             if (!p.has_value()) { continue; } // no pose (no intrinsics / undetected)
@@ -103,9 +103,9 @@ namespace pose
         }
 
         // ----- Pass 2: smooth + hold each joint's rig-space position -----
-        for (const auto& info : kJointsInfo)
+        for (const auto& def : get_joint_defs())
         {
-            const size_t i = index_of(info.id);
+            const size_t i = index_of(def.joint_id);
             auto& fs = _ctx->filter_states[i];
             joint_state_t& st = _ctx->last_frame_joint_states[i];
 
@@ -144,7 +144,7 @@ namespace pose
         }
 
         // ----- Pass 3: leg IK (3D positions -> per-joint local_anim_rot) -----
-        // Needs a captured rest pose (for rest bone directions). Data driven over kJointsInfo: a leg
+        // Needs a captured rest pose (for rest bone directions). Data driven over `get_joint_defs()`: a leg
         // is (knee = child of root, ankle = child of knee, foot = child of ankle). Each joint is a
         // 1-DOF forward/back hinge about the shared lateral axis when the hinge constraint is on.
         if (_ctx->rest_pose.has_value())
@@ -152,14 +152,13 @@ namespace pose
             const auto& rest = _ctx->rest_pose->joint_position;
             const auto position_of = [this](joint_id_t j) { return _ctx->last_frame_joint_states[index_of(j)].position; };
             const auto child_of = [](joint_id_t parent) -> std::optional<joint_id_t> {
-                for (const auto& c : kJointsInfo) {
-                    if (!is_root_joint(c.id) && c.parent == parent) { return c.id; }
+                for (const auto& c : get_joint_defs()) {
+                    if (!is_root_joint(c.joint_id) && c.parent == parent) { return c.joint_id; }
                 }
                 return std::nullopt;
             };
 
-            joint_id_t root = kJointsInfo[0].id;
-            for (const auto& j : kJointsInfo) { if (is_root_joint(j.id)) { root = j.id; break; } }
+            const joint_id_t root = get_root_joint();
 
             const std::optional<Eigen::Vector3d> hinge = _opt.enable_hinge_constraint
                 ? std::optional<Eigen::Vector3d>{ ik_normalize(_opt.hinge_axis_world) } : std::nullopt;
@@ -167,10 +166,10 @@ namespace pose
             // Pelvis is the fixed base: identity animation.
             _ctx->last_frame_joint_states[index_of(root)].local_anim_rot = Eigen::Quaterniond::Identity();
 
-            for (const auto& knee_info : kJointsInfo)
+            for (const auto& knee_def : get_joint_defs())
             {
-                if (is_root_joint(knee_info.id) || knee_info.parent != root) { continue; } // knee = child of root
-                const joint_id_t knee = knee_info.id;
+                if (is_root_joint(knee_def.joint_id) || knee_def.parent != root) { continue; } // knee = child of root
+                const joint_id_t knee = knee_def.joint_id;
                 const std::optional<joint_id_t> ankle = child_of(knee);
                 const std::optional<joint_id_t> foot = ankle.has_value() ? child_of(ankle.value()) : std::nullopt;
                 if (!ankle.has_value() || !foot.has_value()) { continue; }

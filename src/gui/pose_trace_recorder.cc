@@ -63,7 +63,7 @@ namespace gui
             d.decision_margin = det.decision_margin;
             d.center = { det.center.x, det.center.y };
             for (std::size_t k = 0; k < 4; ++k) { d.corners[k] = { det.corners[k].x, det.corners[k].y }; }
-            d.joint_id = pose::tag_to_joint(det.id);
+            d.joint_id = pose::tag_id_to_joint_id(det.id);
             d.position = detection_position(det);
             if (d.joint_id.has_value() && d.position.has_value()) {
                 tag_present[static_cast<std::size_t>(d.joint_id.value())] = true;
@@ -72,10 +72,10 @@ namespace gui
         }
 
         // --- per-joint positions + anim rotation + detected/held/lost + rest position ---
-        for (const auto& info : pose::kJointsInfo)
+        for (const auto& def : pose::get_joint_defs())
         {
-            const std::size_t ji = static_cast<std::size_t>(info.id);
-            const pose::joint_state_t& st = estimator.get_joint_state(info.id);
+            const std::size_t ji = static_cast<std::size_t>(def.joint_id);
+            const pose::joint_state_t& st = estimator.get_joint_state(def.joint_id);
             joint_rec_t& jr = f.joints[ji];
 
             const bool has_position = st.position.has_value();
@@ -85,7 +85,7 @@ namespace gui
             jr.raw_position = st.raw_position;
             jr.position = st.position;
             jr.local_anim_rot = st.local_anim_rot;
-            f.rest_position[ji] = estimator.get_rest_position(info.id);
+            f.rest_position[ji] = estimator.get_rest_position(def.joint_id);
         }
 
         _frames.push_back(std::move(f));
@@ -126,23 +126,25 @@ namespace gui
             root["intrinsics"] = nullptr;
         }
 
-        // rig table (data-driven; mirrors kJointsInfo)
+        // rig table (data-driven; mirrors `get_joint_defs()`)
         json rig = json::array();
-        for (const auto& info : pose::kJointsInfo) {
+        for (const auto& def : pose::get_joint_defs()) {
             rig.push_back({
-                { "index", static_cast<int>(info.id) },
-                { "joint", std::string{ info.name } },
-                { "tag_id", info.tag_id },
-                { "parent", std::string{ pose::joint_info(info.parent).name } },
-                { "mirror", std::string{ pose::joint_info(info.mirror).name } },
-                { "side", info.side == pose::joint_side_t::right ? "right"
-                        : info.side == pose::joint_side_t::left  ? "left" : "midline" },
-                { "is_root", pose::is_root_joint(info.id) },
+                { "index", static_cast<int>(def.joint_id) },
+                { "joint", std::string{ def.name } },
+                { "tag_id", def.tag_id },
+                { "parent", std::string{ pose::get_joint_name(def.parent) } },
+                { "mirror", std::string{ pose::get_joint_name(def.mirror) } },
+                { "side", def.side == pose::joint_side_t::right ? "right"
+                        : def.side == pose::joint_side_t::left  ? "left" : "midline" },
+                { "is_root", pose::is_root_joint(def.joint_id) },
             });
         }
         root["rig"] = std::move(rig);
 
-        const auto joint_name = [](std::size_t i) { return std::string{ pose::kJointsInfo[i].name }; };
+        const auto joint_name = [](std::size_t i) {
+            return std::string{ pose::get_joint_name(static_cast<pose::joint_id_t>(i)) };
+        };
 
         json frames = json::array();
         for (const auto& f : _frames)

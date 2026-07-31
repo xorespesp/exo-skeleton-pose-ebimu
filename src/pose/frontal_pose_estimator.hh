@@ -1,6 +1,6 @@
 #pragma once
 #include "pose_estimator_base.hh"
-#include "skeleton.hh"
+#include "joints_def.hh"
 #include "tag_detector.hh"
 #include "dsp/one_euro_filter.hh"
 

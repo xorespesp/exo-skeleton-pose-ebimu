@@ -1,7 +1,7 @@
 #pragma once
 #include "hw/calibration.hh"
 #include "pose/pose_estimator_base.hh"
-#include "pose/skeleton.hh"
+#include "pose/joints_def.hh"
 #include "pose/tag_detector.hh"
 #include "pose/view_plane.hh"
 

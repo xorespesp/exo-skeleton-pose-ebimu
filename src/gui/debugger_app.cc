@@ -54,7 +54,7 @@ namespace gui
         }
 
         // Map a rig-space position into the ImPlot3D plot frame, shared by every 3D view (raw + rig).
-        //   Rig frame:      X-right, Y-down,  Z-depth   (see skeleton.hh).
+        //   Rig frame:      X-right, Y-down,  Z-depth   (see joints_def.hh).
         //   ImPlot3D frame: X-right, Y-depth, Z-up      (ImPlot3D treats Z as vertical).
         // So (x, y, z) -> (x, z, -y): a mirror-free rotation, rig-down (-Y) becoming plot-up.
         Eigen::Vector3f rig_to_display(const Eigen::Vector3d& p)
@@ -86,7 +86,7 @@ namespace gui
                  * ImPlot3DQuat(20.0 * d, ImPlot3DPoint(0, 0, 1));  // yaw about up: slight 3/4
         }
 
-        // Fixed-length T-pose lower-limb rest layout in rig space (X-right, Y-down, Z-depth), indexed to `kJointsInfo`.
+        // Fixed-length T-pose lower-limb rest layout in rig space (X-right, Y-down, Z-depth), indexed by `joint_id_t`.
         // The rig-skeleton plot drives it by each joint's `local_anim_rot` to eyeball the joint rotations without a rig client.
         // The robot faces the camera, so its right leg sits on camera-left (-X), its left leg on camera-right (+X).
         std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints> canonical_rest_layout()
@@ -105,7 +105,7 @@ namespace gui
             return r;
         }
 
-        // Forward-kinematics the rig from per-joint local rotations, data driven over `kJointsInfo`(parent precedes child). 
+        // Forward-kinematics the rig from per-joint local rotations, data driven over `get_joint_defs()`(parent precedes child). 
         // Each joint, from its parent:
         //   world_rot = parent_world_rot * anim
         //   world_pos = parent_world_pos + world_rot * (rest[joint] - rest[parent])
@@ -119,17 +119,17 @@ namespace gui
         {
             std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints> pos{};
             std::array<Eigen::Quaterniond, pose::kNumJoints> world_rot{};
-            for (const auto& info : pose::kJointsInfo)
+            for (const auto& def : pose::get_joint_defs())
             {
-                const std::size_t j = static_cast<std::size_t>(info.id);
+                const std::size_t j = static_cast<std::size_t>(def.joint_id);
                 const Eigen::Quaterniond a = anim[j].value_or(Eigen::Quaterniond::Identity());
-                if (pose::is_root_joint(info.id))
+                if (pose::is_root_joint(def.joint_id))
                 {
                     world_rot[j] = a.normalized();
                     pos[j] = root_anchor;
                     continue;
                 }
-                const std::size_t p = static_cast<std::size_t>(info.parent);
+                const std::size_t p = static_cast<std::size_t>(def.parent);
                 if (!pos[p].has_value() || !rest[j].has_value() || !rest[p].has_value()) { continue; }
                 world_rot[j] = (world_rot[p] * a).normalized();
                 pos[j] = pos[p].value() + world_rot[j] * (rest[j].value() - rest[p].value());
@@ -444,9 +444,9 @@ namespace gui
         const bool smoothed_positions = est->uses_smoothed_positions();
 
         int ji = 0;
-        for (const auto& info : pose::kJointsInfo)
+        for (const auto& def : pose::get_joint_defs())
         {
-            const auto& st = est->get_joint_state(info.id);
+            const auto& st = est->get_joint_state(def.joint_id);
             const std::optional<Eigen::Vector3d> p = smoothed_positions ? st.position : st.raw_position;
             _raw_skel_positions[ji] = p; // latest rig-space position for the skeleton plot
             if (p.has_value()) { _pos_plot_bufs.push(ji, rig_to_display(p.value())); } // display-space history
@@ -781,9 +781,12 @@ namespace gui
             const pose::sagittal_pose_estimator* est = _server->pipeline().sagittal_estimator();
             const auto knee = est ? est->tracked_leg_knee() : std::nullopt;
 
-            if (knee.has_value()) {
-                const auto& info = pose::joint_info(knee.value());
-                ImGui::TextUnformatted(std::format("Near leg: {} (tag {})", info.name, info.tag_id).c_str());
+            const auto def = knee.has_value()
+                ? pose::get_joint_def(knee.value())
+                : std::optional<pose::joint_definition_t>{};
+
+            if (def.has_value()) {
+                ImGui::TextUnformatted(std::format("Near leg: {} (tag {})", def->name, def->tag_id).c_str());
             } else {
                 ImGui::TextDisabled("Near leg: undecided (waiting for tags)");
             }
@@ -875,11 +878,11 @@ namespace gui
             std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints> rest{};
             std::array<std::optional<Eigen::Quaterniond>, pose::kNumJoints> anim{};
             std::optional<Eigen::Vector3d> anchor; // measured position of the root
-            for (const auto& info : pose::kJointsInfo) {
-                const std::size_t k = static_cast<std::size_t>(info.id);
-                rest[k] = est->get_rest_position(info.id);
-                anim[k] = est->get_joint_state(info.id).local_anim_rot;
-                if (pose::is_root_joint(info.id)) { anchor = est->get_joint_state(info.id).position; }
+            for (const auto& def : pose::get_joint_defs()) {
+                const std::size_t k = static_cast<std::size_t>(def.joint_id);
+                rest[k] = est->get_rest_position(def.joint_id);
+                anim[k] = est->get_joint_state(def.joint_id).local_anim_rot;
+                if (pose::is_root_joint(def.joint_id)) { anchor = est->get_joint_state(def.joint_id).position; }
             }
             if (anchor.has_value())
             {
@@ -914,12 +917,12 @@ namespace gui
         const auto rest = canonical_rest_layout();
         std::array<std::optional<Eigen::Quaterniond>, pose::kNumJoints> anim{};
         if (est) {
-            for (const auto& info : pose::kJointsInfo) {
-                anim[static_cast<std::size_t>(info.id)] = est->get_joint_state(info.id).local_anim_rot;
+            for (const auto& def : pose::get_joint_defs()) {
+                anim[static_cast<std::size_t>(def.joint_id)] = est->get_joint_state(def.joint_id).local_anim_rot;
             }
         }
         const Eigen::Vector3d anchor =
-            rest[static_cast<std::size_t>(pose::kJointsInfo[0].id)].value_or(Eigen::Vector3d::Zero());
+            rest[static_cast<std::size_t>(pose::get_root_joint())].value_or(Eigen::Vector3d::Zero());
         const auto world = rig_fk(rest, anim, anchor);
 
         std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints> disp{};
@@ -974,7 +977,8 @@ namespace gui
         int col = 0;
         for (std::size_t i = 0; i < pose::kNumJoints; ++i)
         {
-            const std::string title = std::format("{}###{}", pose::kJointsInfo[i].name, pose::kJointsInfo[i].name);
+            const auto name = pose::get_joint_name(static_cast<pose::joint_id_t>(i));
+            const std::string title = std::format("{}###{}", name, name);
             if (col != 0) { ImGui::SameLine(); }
             ImGui::PushID(static_cast<int>(i));
             ImGui::BeginGroup();
@@ -1043,15 +1047,15 @@ namespace gui
             ImPlot3DSpec bone;
             bone.LineWeight = weight;
             bone.LineColor = color;
-            for (const auto& info : pose::kJointsInfo) {
-                if (pose::is_root_joint(info.id)) { continue; }
-                const std::size_t c = static_cast<std::size_t>(info.id);
-                const std::size_t p = static_cast<std::size_t>(info.parent);
+            for (const auto& def : pose::get_joint_defs()) {
+                if (pose::is_root_joint(def.joint_id)) { continue; }
+                const std::size_t c = static_cast<std::size_t>(def.joint_id);
+                const std::size_t p = static_cast<std::size_t>(def.parent);
                 if (!a[c].has_value() || !a[p].has_value()) { continue; }
                 const double bx[2]{ a[p]->x(), a[c]->x() };
                 const double by[2]{ a[p]->y(), a[c]->y() };
                 const double bz[2]{ a[p]->z(), a[c]->z() };
-                ImPlot3D::PlotLine(label != nullptr ? label : info.name.data(), bx, by, bz, 2, bone);
+                ImPlot3D::PlotLine(label != nullptr ? label : def.name.data(), bx, by, bz, 2, bone);
             }
         };
 
@@ -1063,7 +1067,8 @@ namespace gui
         for (std::size_t i = 0; i < pose::kNumJoints; ++i) {
             if (!disp[i].has_value()) { continue; }
             jx[jn] = disp[i]->x(); jy[jn] = disp[i]->y(); jz[jn] = disp[i]->z(); ++jn;
-            ImPlot3D::PlotText(pose::kJointsInfo[i].name.data(), disp[i]->x(), disp[i]->y(), disp[i]->z());
+            ImPlot3D::PlotText(pose::get_joint_name(static_cast<pose::joint_id_t>(i)).data(),
+                disp[i]->x(), disp[i]->y(), disp[i]->z());
         }
         ImPlot3DSpec pt_spec;
         pt_spec.Marker = ImPlot3DMarker_Circle;

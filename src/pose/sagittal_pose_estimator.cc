@@ -11,14 +11,9 @@ namespace pose
     {
         size_t index_of(joint_id_t jid) { return static_cast<size_t>(jid); }
 
-        joint_id_t root_joint() {
-            for (const auto& j : kJointsInfo) { if (is_root_joint(j.id)) { return j.id; } }
-            return kJointsInfo[0].id;
-        }
-
         std::optional<joint_id_t> child_of(joint_id_t parent) {
-            for (const auto& c : kJointsInfo) {
-                if (!is_root_joint(c.id) && c.parent == parent) { return c.id; }
+            for (const auto& c : get_joint_defs()) {
+                if (!is_root_joint(c.joint_id) && c.parent == parent) { return c.joint_id; }
             }
             return std::nullopt;
         }
@@ -26,10 +21,10 @@ namespace pose
         // Entry point of one leg's chain: the root's child on `side`.
         std::optional<joint_id_t> knee_of_side(std::optional<joint_side_t> side) {
             if (!side.has_value()) { return std::nullopt; }
-            const joint_id_t root = root_joint();
-            for (const auto& c : kJointsInfo) {
-                if (is_root_joint(c.id) || c.parent != root) { continue; }
-                if (c.side == side.value()) { return c.id; }
+            const joint_id_t root = get_root_joint();
+            for (const auto& c : get_joint_defs()) {
+                if (is_root_joint(c.joint_id) || c.parent != root) { continue; }
+                if (c.side == side.value()) { return c.joint_id; }
             }
             return std::nullopt;
         }
@@ -199,13 +194,12 @@ namespace pose
         {
             int right_seen = 0, left_seen = 0;
             for (const auto& det : tag_detections) {
-                const auto joint = tag_to_joint(det.id);
+                const auto joint = tag_id_to_joint_id(det.id);
                 if (!joint.has_value()) { continue; } // tag id not part of the rig
-                switch (joint_side(joint.value())) {
-                case joint_side_t::right: ++right_seen; break;
-                case joint_side_t::left:  ++left_seen;  break;
-                default: break; // midline: belongs to neither leg
-                }
+                const auto side = get_joint_side(joint.value());
+                if (side == joint_side_t::right)     { ++right_seen; }
+                else if (side == joint_side_t::left) { ++left_seen; }
+                // midline: belongs to neither leg
             }
 
             if (right_seen != left_seen) {
@@ -221,7 +215,7 @@ namespace pose
         int edge_px_count = 0;
         for (const auto& det : tag_detections)
         {
-            const auto joint = tag_to_joint(det.id);
+            const auto joint = tag_id_to_joint_id(det.id);
             if (!joint.has_value()) { continue; } // tag id not part of the rig
 
             const double edge_px = mean_edge_px(det.corners);
@@ -238,9 +232,9 @@ namespace pose
         if (edge_px_count > 0) { _ctx->meters_per_pixel = _opt.tag_size_m / (edge_px_sum / edge_px_count); }
 
         // ----- Pass 3: smooth + hold each joint's image-plane point -----
-        for (const auto& info : kJointsInfo)
+        for (const auto& def : get_joint_defs())
         {
-            const size_t i = index_of(info.id);
+            const size_t i = index_of(def.joint_id);
             auto& fs = _ctx->filter_states[i];
             joint_state_t& st = _ctx->last_frame_joint_states[i];
 
@@ -290,7 +284,7 @@ namespace pose
         const std::optional<joint_id_t> tracked_knee = knee_of_side(_ctx->tracked_side);
         if (_ctx->rest_pose.has_value() && tracked_knee.has_value())
         {
-            const joint_id_t root = root_joint();
+            const joint_id_t root = get_root_joint();
             const joint_id_t knee = tracked_knee.value();
             const std::optional<joint_id_t> ankle = child_of(knee);
             const std::optional<joint_id_t> foot = ankle.has_value() ? child_of(ankle.value()) : std::nullopt;
@@ -341,11 +335,11 @@ namespace pose
         // Every joint owes the consumer a rotation, so a joint left without one takes its mirror's.
         // Positions stay as measured: only the tagged leg was observed, and the plots should say so.
         auto& states = _ctx->last_frame_joint_states;
-        for (const auto& info : kJointsInfo)
+        for (const auto& def : get_joint_defs())
         {
-            if (!has_mirror_joint(info.id)) { continue; }
-            const size_t src = index_of(info.id);
-            const size_t dst = index_of(info.mirror);
+            if (!has_mirror_joint(def.joint_id)) { continue; }
+            const size_t src = index_of(def.joint_id);
+            const size_t dst = index_of(def.mirror);
             if (states[src].local_anim_rot.has_value() && !states[dst].local_anim_rot.has_value()) {
                 states[dst].local_anim_rot = states[src].local_anim_rot;
             }

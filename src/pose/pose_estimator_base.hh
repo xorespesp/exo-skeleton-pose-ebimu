@@ -1,6 +1,5 @@
 #pragma once
-#include "skeleton.hh"
-#include "view_plane.hh"
+#include "joints_def.hh"
 
 #include <Eigen/Geometry>
 
@@ -13,11 +12,19 @@ namespace pose
     using millis_f64 = std::chrono::duration<double, std::milli>;
     using seconds_f64 = std::chrono::duration<double>;
 
+    // Per-joint result of one estimation step. Positions are in rig space (see joints_def.hh).
+    struct joint_state_t
+    {
+        std::optional<Eigen::Vector3d> raw_position;      // raw position this frame (fresh detection)
+        std::optional<Eigen::Vector3d> position;          // smoothed + held position (drives the skeleton)
+        std::optional<Eigen::Quaterniond> local_anim_rot; // parent-relative rotation vs the captured rest (drives the rig)
+    };
+
     // ---------------------------------------------------------------------------
     // Pose estimator base: per-joint rig state, readable without knowing the estimator
     // ---------------------------------------------------------------------------
     //
-    // Every estimator fills `joint_state_t` for the joints of `kJointsInfo`, so the readers of that
+    // Every estimator fills `joint_state_t` for every joint of the rig, so the readers of that
     // state (plots, diagnostic trace, protocol broadcast) see one shape and need no knowledge of
     // which implementation produced it.
     //

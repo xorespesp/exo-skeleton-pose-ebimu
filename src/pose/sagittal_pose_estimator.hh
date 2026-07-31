@@ -1,6 +1,6 @@
 #pragma once
 #include "pose_estimator_base.hh"
-#include "skeleton.hh"
+#include "joints_def.hh"
 #include "tag_detector.hh"
 #include "dsp/one_euro_filter.hh"
 
@@ -116,7 +116,7 @@ namespace pose
         // --- sagittal specifics -----------------------------------------------------------
 
         // Knee joint of the leg the tags were seen on; empty until a leg tag has been detected. Its
-        // `joint_info().name` identifies the side for an operator.
+        // `get_joint_name()` identifies the side for an operator.
         std::optional<joint_id_t> tracked_leg_knee() const;
 
         // This frame's joint angles for the tracked leg. Empty until a rest pose is captured and the

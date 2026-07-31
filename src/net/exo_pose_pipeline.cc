@@ -25,9 +25,9 @@ namespace net
         // "3(r_ankle)": a log line names the joint a tag stands for, not just the raw id.
         std::string tag_label(int tag_id)
         {
-            const auto j = pose::tag_to_joint(tag_id);
+            const auto j = pose::tag_id_to_joint_id(tag_id);
             return j.has_value()
-                ? std::format("{}({})", tag_id, pose::joint_info(j.value()).name)
+                ? std::format("{}({})", tag_id, pose::get_joint_name(j.value()))
                 : std::format("{}(unmapped)", tag_id);
         }
 
@@ -387,11 +387,11 @@ namespace net
         // comes out wrong, so name the ones that actually latched (only freshly detected joints,
         // not held ones) rather than just counting.
         std::string joints;
-        for (const auto& info : pose::kJointsInfo)
+        for (const auto& def : pose::get_joint_defs())
         {
-            if (!_active->get_rest_position(info.id).has_value()) { continue; }
+            if (!_active->get_rest_position(def.joint_id).has_value()) { continue; }
             if (!joints.empty()) { joints += ", "; }
-            joints += info.name;
+            joints += def.name;
         }
 
         spdlog::info("pipeline: rest pose calibrated from [{}]", joints);
@@ -492,14 +492,14 @@ namespace net
 
         // A tag can be visible while its joint still has no local rotation (the parent's tag is
         // missing), so joint tracking is reported on its own rather than inferred from the tags.
-        for (const auto& info : pose::kJointsInfo)
+        for (const auto& def : pose::get_joint_defs())
         {
-            const bool tracked = _active->get_joint_state(info.id).position.has_value();
-            bool& was_tracked = _joint_tracked[static_cast<size_t>(info.id)];
+            const bool tracked = _active->get_joint_state(def.joint_id).position.has_value();
+            bool& was_tracked = _joint_tracked[static_cast<size_t>(def.joint_id)];
             if (tracked == was_tracked) { continue; }
 
-            if (tracked) { spdlog::debug("pipeline: joint '{}' tracking acquired", info.name); }
-            else { spdlog::debug("pipeline: joint '{}' tracking lost", info.name); }
+            if (tracked) { spdlog::debug("pipeline: joint '{}' tracking acquired", def.name); }
+            else { spdlog::debug("pipeline: joint '{}' tracking lost", def.name); }
             was_tracked = tracked;
         }
     }
@@ -520,9 +520,9 @@ namespace net
 
         const double sec = std::chrono::duration<double>{ elapsed }.count();
         size_t tracked = 0;
-        for (const auto& info : pose::kJointsInfo)
+        for (const auto& def : pose::get_joint_defs())
         {
-            if (_active->get_joint_state(info.id).position.has_value()) { ++tracked; }
+            if (_active->get_joint_state(def.joint_id).position.has_value()) { ++tracked; }
         }
 
         spdlog::debug("pipeline: {} frames in {:.1f} s ({:.1f} fps polled, source at {:.1f} fps), "

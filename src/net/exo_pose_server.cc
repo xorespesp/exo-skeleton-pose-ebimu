@@ -1,4 +1,4 @@
-﻿#include "exo_pose_server.hh"
+#include "exo_pose_server.hh"
 
 #include "exo_pose_pipeline.hh"
 
@@ -463,9 +463,9 @@ namespace net
 
         std::vector<fb::Offset<fb_proto::JointPose>> joints;
         joints.reserve(pose::kNumJoints);
-        for (const auto& info : pose::kJointsInfo)
+        for (const auto& def : pose::get_joint_defs())
         {
-            const pose::joint_state_t st = est ? est->get_joint_state(info.id) : pose::joint_state_t{};
+            const pose::joint_state_t st = est ? est->get_joint_state(def.joint_id) : pose::joint_state_t{};
 
             const auto to_fb_quat = [](const Eigen::Quaterniond& q) {
                 return fb_proto::Quat{ q.x(), q.y(), q.z(), q.w() };
@@ -477,7 +477,7 @@ namespace net
             if (st.local_anim_rot.has_value()) { fb_local_anim_rot = to_fb_quat(st.local_anim_rot.value()); }
 
             joints.push_back(fb_proto::CreateJointPose(
-                b, static_cast<fb_proto::JointId>(info.id),
+                b, static_cast<fb_proto::JointId>(def.joint_id),
                 st.local_anim_rot.has_value() ? &fb_local_anim_rot : nullptr
             ));
         }

@@ -6,7 +6,7 @@
 
 #include <stdexcept>
 
-namespace hw
+namespace io
 {
     namespace
     {
@@ -30,7 +30,7 @@ namespace hw
             throw std::runtime_error{ "mcap_record_player: failed to open recording" };
         }
 
-        const std::span<const io::recorded_camera_stream> streams = _reader.camera_streams();
+        const std::span<const recorded_camera_stream> streams = _reader.camera_streams();
         if (streams.size() > 1) {
             spdlog::warn("mcap_record_player: recording has {} camera streams, playing back '{}' only",
                 streams.size(), streams.front().id
@@ -70,12 +70,12 @@ namespace hw
         }
     }
 
-    std::unique_ptr<sensor_frameset> mcap_record_player::fetch_next_sensor_frameset()
+    std::unique_ptr<hw::sensor_frameset> mcap_record_player::fetch_next_sensor_frameset()
     {
         std::scoped_lock lk{ _mtx };
         if (!_opened) { return nullptr; }
 
-        std::optional<io::recording_reader::frame> frame = _reader.fetch_next_frame(_stream_id);
+        std::optional<recording_reader::frame> frame = _reader.fetch_next_frame(_stream_id);
 
         if (!frame.has_value()) {
             if (!_auto_repeat) { return nullptr; } // EOF; the provider reports the stream end
@@ -117,4 +117,4 @@ namespace hw
         _auto_repeat = enable;
     }
 
-} // namespace hw
+} // namespace io

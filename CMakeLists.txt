@@ -35,18 +35,16 @@ target_sources(${TARGET_NAME} PRIVATE
     "src/hw/sensor_frame_provider.cc"
 
     # camera sensor backend implementation (Orbbec K4A Wrapper, temporary)
-    "src/hw/k4a_frameset.hh"
-    "src/hw/k4a_frameset.cc"
-    "src/hw/k4a_frame_source.hh"
-    "src/hw/k4a_frame_source.cc"
+    "src/hw/backends/k4a_frameset.hh"
+    "src/hw/backends/k4a_frameset.cc"
+    "src/hw/backends/k4a_frame_source.hh"
+    "src/hw/backends/k4a_frame_source.cc"
 
-    # recording playback backend
-    "src/hw/mcap_frameset.hh"
-    "src/hw/mcap_record_player.hh"
-    "src/hw/mcap_record_player.cc"
-
-    # recording container (MCAP)
+    # recording container (MCAP), and playback as a frame source
     "src/io/mcap_impl.cc"
+    "src/io/mcap_frameset.hh"
+    "src/io/mcap_record_player.hh"
+    "src/io/mcap_record_player.cc"
     "src/io/recording_message.hh"
     "src/io/recording_message.cc"
     "src/io/recording_writer.hh"
@@ -215,8 +213,8 @@ setup_orbbec_k4a_binaries(${TARGET_NAME} INSTALL_PATH ${CMAKE_INSTALL_BINDIR})
 set(K4AMKV2MCAP_NAME exo-k4amkv2mcap)
 add_executable(${K4AMKV2MCAP_NAME}
     "tools/k4amkv2mcap/k4amkv2mcap.cc"
-    "src/hw/k4a_frameset.cc"
-    "src/hw/k4a_frame_source.cc"
+    "src/hw/backends/k4a_frameset.cc"
+    "src/hw/backends/k4a_frame_source.cc"
     "src/io/mcap_impl.cc"
     "src/io/recording_message.cc"
     "src/io/recording_writer.cc"

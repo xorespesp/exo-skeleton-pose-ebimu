@@ -1,7 +1,8 @@
 #include "sensor_frame_provider.hh"
 
-#include "k4a_frame_source.hh"
-#include "mcap_record_player.hh"
+#include "backends/k4a_frame_source.hh"
+
+#include "io/mcap_record_player.hh"
 
 #include <spdlog/spdlog.h>
 
@@ -66,7 +67,7 @@ namespace hw
     {
         this->close();
 
-        auto recording = std::make_unique<mcap_record_player>();
+        auto recording = std::make_unique<io::mcap_record_player>();
         if (!recording->open(recording_file)) { return false; }
         recording->enable_auto_repeat(true);
 

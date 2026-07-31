@@ -1,5 +1,5 @@
 ﻿#pragma once
-#include "sensor_frameset.hh"
+#include "hw/sensor_frameset.hh"
 
 #include <k4a/k4a.hpp>
 #include <opencv2/core.hpp>

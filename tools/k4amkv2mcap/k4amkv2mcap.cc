@@ -1,6 +1,6 @@
 // Offline K4A .mkv recording -> our .mcap recording converter
-#include "hw/k4a_frame_source.hh" // hw::k4a_to_calibration
-#include "hw/k4a_frameset.hh"     // color -> BGR, device timestamp
+#include "hw/backends/k4a_frame_source.hh" // hw::k4a_to_calibration
+#include "hw/backends/k4a_frameset.hh"     // color -> BGR, device timestamp
 #include "io/recording_writer.hh"
 
 #include <k4a/k4a.hpp>

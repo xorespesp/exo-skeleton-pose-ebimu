@@ -1,5 +1,5 @@
 #pragma once
-#include "sensor_frame_source.hh"
+#include "hw/sensor_frame_source.hh"
 
 #include <k4a/k4a.h>
 
@@ -11,7 +11,7 @@ namespace hw
 {
     ////////////////////////////////////////////////////////////////////////////////////////
     // Orbbec K4A Wrapper backend.
-    // (live capture only; recordings are read back through hw::mcap_record_player)
+    // (live capture only; recordings are read back through io::mcap_record_player)
     ////////////////////////////////////////////////////////////////////////////////////////
 
     // Copy the K4A color camera parameters into the SDK-agnostic calibration_t. 

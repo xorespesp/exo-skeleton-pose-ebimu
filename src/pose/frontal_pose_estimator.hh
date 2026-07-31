@@ -47,7 +47,7 @@ namespace pose
             // Constrain every leg joint (hip/knee/ankle) to a single forward/back hinge about the
             // lateral axis below, dropping off-hinge components as tag-position error. When off, each
             // joint gets the free minimal-swing rotation.
-            bool enable_hinge_constraint{ true };
+            bool enable_hinge_constraint{ false };
             // Lateral hinge axis in the rig frame: ~(1,0,0) for a frontal view, ~(0,0,1) for a
             // sagittal (side) view. All leg joints share this axis.
             Eigen::Vector3d hinge_axis_world{ Eigen::Vector3d::UnitX() };

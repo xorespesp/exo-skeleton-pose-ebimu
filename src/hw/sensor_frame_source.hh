@@ -1,11 +1,12 @@
 #pragma once
 #include "calibration.hh"
+#include "frame_format.hh"
+#include "roi.hh"
 #include "sensor_frameset.hh"
-
-#include <Eigen/Core>
 
 #include <chrono>
 #include <memory>
+#include <optional>
 
 namespace hw
 {
@@ -18,11 +19,21 @@ namespace hw
         virtual void close() = 0;
 
         virtual const calibration_t& get_calibration() const = 0;
-        virtual Eigen::Vector2i      get_color_camera_resolution() const = 0; // (width, height)
-        virtual Eigen::Vector2f      get_color_camera_fov()        const = 0; // (h_fov, v_fov) [deg]
+        virtual frame_format_t get_color_format() const = 0;
 
-        // Blocking. Returns nullptr on EOF / timeout / disconnect.
-        [[nodiscard]] virtual std::unique_ptr<sensor_frameset> fetch_next_sensor_frameset() = 0;
+        // Narrow delivered images to `roi`, given in full-frame pixels. The source is the
+        // authority on its own frame, so it clips `roi` to that frame, and a sensor's readout
+        // window may quantize it further. Returns whatever came of that.
+        //
+        // Empty means no ROI is in force afterwards, whether because this source does not narrow
+        // at all or because `roi` left nothing of the frame. Nothing narrows on a source's
+        // behalf, so an empty answer means the request is dropped. Implement this wherever the
+        // backend can, be it in the sensor's readout window or ahead of the colour conversion.
+        virtual std::optional<roi_t> try_set_color_roi(const roi_t& /*roi*/) { return std::nullopt; }
+
+        // Blocking. Returns the frames of one capture, already converted and narrowed.
+        // Empty on EOF / timeout / disconnect.
+        [[nodiscard]] virtual std::optional<sensor_frameset> fetch_next_sensor_frameset() = 0;
     };
 
     // Recording playback backends.

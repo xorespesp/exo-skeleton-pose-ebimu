@@ -1,7 +1,5 @@
 #include "mcap_record_player.hh"
 
-#include "mcap_frameset.hh"
-
 #include <spdlog/spdlog.h>
 
 #include <stdexcept>
@@ -70,21 +68,45 @@ namespace io
         }
     }
 
-    std::unique_ptr<hw::sensor_frameset> mcap_record_player::fetch_next_sensor_frameset()
+    std::optional<hw::sensor_frameset> mcap_record_player::fetch_next_sensor_frameset()
     {
         std::scoped_lock lk{ _mtx };
-        if (!_opened) { return nullptr; }
+        if (!_opened) { return std::nullopt; }
 
         std::optional<recording_reader::frame> frame = _reader.fetch_next_frame(_stream_id);
 
         if (!frame.has_value()) {
-            if (!_auto_repeat) { return nullptr; } // EOF; the provider reports the stream end
+            if (!_auto_repeat) { return std::nullopt; } // EOF; the provider reports the stream end
             _reader.seek_timestamp(_stream_id, _reader.first_timestamp());
             frame = _reader.fetch_next_frame(_stream_id);
-            if (!frame.has_value()) { return nullptr; }
+            if (!frame.has_value()) { return std::nullopt; }
         }
 
-        return std::make_unique<mcap_frameset>(std::move(frame->bgr), to_us(frame->timestamp));
+        cv::Mat image = std::move(frame->bgr);
+        if (_color_roi.has_value()) {
+            image = image(cv::Rect{ _color_roi->x, _color_roi->y, _color_roi->width, _color_roi->height });
+        }
+
+        return hw::sensor_frameset{ std::make_shared<hw::sensor_frame>(
+            std::move(image),
+            hw::frame_format_t::bgr8,
+            to_us(frame->timestamp)
+        ) };
+    }
+
+    std::optional<hw::roi_t> mcap_record_player::try_set_color_roi(const hw::roi_t& roi)
+    {
+        std::scoped_lock lk{ _mtx };
+
+        const hw::roi_t clipped = hw::clamp_roi(roi,
+            _calib.color_resolution.x(),
+            _calib.color_resolution.y()
+        );
+
+        if (clipped.is_empty()) { return std::nullopt; }
+
+        _color_roi = clipped;
+        return _color_roi;
     }
 
     void mcap_record_player::seek_begin()

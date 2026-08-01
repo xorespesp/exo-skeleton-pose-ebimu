@@ -3,6 +3,7 @@
 #include "hw/sensor_frame_observer.hh"
 #include "pose/tag_detector.hh"
 
+#include <opencv2/imgproc.hpp>
 #include <spdlog/spdlog.h>
 
 #include <atomic>
@@ -141,20 +142,22 @@ namespace net
                     _annotate);
             }
 
+            std::vector<pose::tag_detection_t> detections = _detector.value().detect(frame->color_image());
+
             cv::Mat annotated;
-            std::vector<pose::tag_detection_t> detections;
             if (_annotate) {
-                annotated = frame->color_image.clone();
-                detections = _detector.value().detect(annotated);
+                if (frame->color_format() == hw::frame_format_t::gray8) {
+                    cv::cvtColor(frame->color_image(), annotated, cv::COLOR_GRAY2BGR);
+                } else {
+                    annotated = frame->color_image().clone();
+                }
                 pose::draw_tag_detections(annotated, detections);
-            } else {
-                detections = _detector.value().detect(frame->color_image);
             }
 
             std::scoped_lock lk{ _mtx };
             _annotated = std::move(annotated);
             _detections = std::move(detections);
-            _timestamp = frame->timestamp;
+            _timestamp = frame->timestamp();
             ++_seq;
         }
 
@@ -218,7 +221,9 @@ namespace net
         pose::view_plane_t view_plane,
         double tag_size_m,
         std::optional<int32_t> exposure_us,
-        std::optional<int32_t> gain)
+        std::optional<int32_t> gain,
+        hw::frame_format_t color_format,
+        std::optional<hw::roi_t> color_roi)
     {
         _status_changed = true; // opening a source changes the reported status (even on failure)
 
@@ -234,20 +239,40 @@ namespace net
         new_observer->set_tuning(_tuning);   // carry the current tuning into the new source
         new_provider->add_observer(new_observer);
 
+        // TODO: a device index can only mean the K4A camera. Reaching a second one needs the
+        // source address to name the backend (e.g. "k4a:0" / "vz:<serial>").
+        hw::source_config_t source_config;
+        if (source_addr.is_device()) {
+            source_config = hw::k4a_device_config{
+                .device_index = source_addr.device_index(),
+                .exposure_us = exposure_us,
+                .gain = gain,
+                .color_format = color_format,
+                .color_roi = color_roi,
+            };
+        } else {
+            source_config = hw::recording_config{
+                .file = source_addr.recording_path(),
+                .color_roi = color_roi,
+            };
+        }
+
         const char* kind = source_addr.is_device() ? "device" : "recording";
-        spdlog::info("pipeline: opening {} '{}' ({} view, tag size {:.3f} m, exposure {}, gain {})",
-            kind, source_addr.to_string(), pose::view_plane_name(view_plane), tag_size_m,
-            exposure_us.has_value() ? std::format("{} us", exposure_us.value()) : "auto",
-            gain.has_value() ? std::format("{}", gain.value()) : "auto");
+        spdlog::info("pipeline: opening {} '{}' ({} view, tag size {:.3f} m, exposure {}, gain {}, {})"
+            , kind
+            , source_addr.to_string()
+            , pose::view_plane_name(view_plane)
+            , tag_size_m
+            , exposure_us.has_value() ? std::format("{} us", exposure_us.value()) : "auto"
+            , gain.has_value() ? std::format("{}", gain.value()) : "auto"
+            , hw::frame_format_name(color_format)
+        );
 
         if (_provider) {
             spdlog::info("pipeline: replacing the open source '{}'", _provider->get_source_name());
         }
 
-        const bool ok = source_addr.is_device()
-            ? new_provider->open_device(source_addr.device_index(), exposure_us, gain)
-            : new_provider->open_recording(source_addr.recording_path());
-
+        const bool ok = new_provider->open(source_config);
         if (!ok) {
             spdlog::error("pipeline: failed to open {} '{}'", kind, source_addr.to_string());
             return false;
@@ -276,7 +301,10 @@ namespace net
         if (!_provider) { return; } // nothing open; keep the status flag and the log quiet
 
         _status_changed = true;
-        spdlog::info("pipeline: closing source '{}' after {} frames", _provider->get_source_name(), _provider->get_current_frame_id());
+        spdlog::info("pipeline: closing source '{}' after {} frames"
+            , _provider->get_source_name()
+            , _provider->get_current_frame_seq()
+        );
 
         this->stop_recording();
 
@@ -309,6 +337,13 @@ namespace net
         }
         if (_recorder) {
             spdlog::warn("pipeline: already recording to '{}'", _recorder->path().string());
+            return false;
+        }
+        if (_provider->get_color_format() != hw::frame_format_t::bgr8) {
+            // The recording container carries 8-bit BGR frames only.
+            spdlog::error("pipeline: cannot record a {} stream; reopen the source as bgr8"
+                , hw::frame_format_name(_provider->get_color_format())
+            );
             return false;
         }
 
@@ -442,10 +477,11 @@ namespace net
             else if (_sagittal) { _sagittal->update(_detections, _last_timestamp); }
             r.new_pose = true;
 
-            spdlog::trace("pipeline: frame #{} (t={:.3f} s) with {} tag(s)",
-                this->current_frame_id(),
-                std::chrono::duration<double>{ _last_timestamp }.count(),
-                _detections.size());
+            spdlog::trace("pipeline: frame #{} (t={:.3f} s) with {} tag(s)"
+                , this->current_frame_seq()
+                , std::chrono::duration<double>{ _last_timestamp }.count()
+                , _detections.size()
+            );
 
             this->_log_frame_diff();
             this->_log_periodic_stats();
@@ -590,9 +626,9 @@ namespace net
         return _tuning;
     }
 
-    uint32_t exo_pose_pipeline::current_frame_id() const
+    uint32_t exo_pose_pipeline::current_frame_seq() const
     {
-        return _provider ? _provider->get_current_frame_id() : 0;
+        return _provider ? _provider->get_current_frame_seq() : 0;
     }
 
     bool exo_pose_pipeline::is_source_paused() const

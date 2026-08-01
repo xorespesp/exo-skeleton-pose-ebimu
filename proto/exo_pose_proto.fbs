@@ -57,7 +57,7 @@ table JointPose {
 
 // One estimation step, broadcast to subscribed clients per new frame.
 table PoseFrame {
-    frame_id: uint;
+    frame_seq: uint; // position of this frame in the open source's stream; restarts on every open
     timestamp_us: long; // source (device) timestamp of the frame
     has_rest_pose: bool;
     joints: [JointPose];

@@ -351,10 +351,13 @@ namespace gui
     void debugger_app::_open_device(uint32_t index, pose::view_plane_t view_plane)
     {
         _server->pipeline().open_source(
-            app::source_address::device(index), 
-            view_plane, 
-            _opt.tag_size_m, 
-            _opt.exposure_us, _opt.gain
+            app::source_address::device(index),
+            view_plane,
+            _opt.tag_size_m,
+            _opt.exposure_us, 
+            _opt.gain,
+            _opt.color_format, 
+            _opt.color_roi
         );
         _last_seq = 0;
         _pos_plot_bufs.clear(); // restart the positions-plot timeline for the new source
@@ -365,10 +368,13 @@ namespace gui
     void debugger_app::_open_recording(const std::string& path, pose::view_plane_t view_plane)
     {
         _server->pipeline().open_source(
-            app::source_address::recording(path), 
-            view_plane, 
-            _opt.tag_size_m, 
-            std::nullopt, std::nullopt
+            app::source_address::recording(path),
+            view_plane,
+            _opt.tag_size_m,
+            std::nullopt, 
+            std::nullopt,
+            _opt.color_format, 
+            _opt.color_roi
         );
         _last_seq = 0;
         _pos_plot_bufs.clear(); // restart the positions-plot timeline for the new source

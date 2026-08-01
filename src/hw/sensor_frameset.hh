@@ -1,24 +1,24 @@
-﻿#pragma once
-#include <opencv2/core.hpp>
+#pragma once
+#include "sensor_frame.hh"
 
-#include <chrono>
+#include <memory>
+#include <utility>
 
 namespace hw
 {
-    // One capture from a backend (wraps e.g. k4a::capture / ob::FrameSet).
-    class sensor_frameset {
+    // Single frameset capture from a backend.
+    class sensor_frameset final
+    {
     public:
-        virtual ~sensor_frameset() = default;
+        explicit sensor_frameset(std::shared_ptr<sensor_frame> color_frame)
+            : _color_frame{ std::move(color_frame) }
+        { }
 
-        virtual std::chrono::microseconds get_color_timestamp() const = 0;
+        // Null when the capture carried no colour image.
+        const std::shared_ptr<sensor_frame>& color_frame() const noexcept { return _color_frame; }
 
-        virtual bool has_color_image() const = 0;
-
-        // get_color_image() may return a zero-copy view valid only while this
-        // frameset is alive; clone it to outlive the frameset. 
-        // Color is always exposed as BGR (CV_8UC3).
-        // (backends convert from their native format)
-        virtual cv::Mat get_color_image() const = 0;
+    private:
+        std::shared_ptr<sensor_frame> _color_frame;
     };
 
 } // namespace hw

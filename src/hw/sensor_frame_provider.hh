@@ -1,14 +1,14 @@
-﻿#pragma once
+#pragma once
 #include "calibration.hh"
 #include "sensor_frame_source.hh"
 #include "sensor_frame_observer.hh"
+#include "source_config.hh"
 
 #include <Eigen/Core>
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -18,8 +18,8 @@
 
 namespace hw
 {
-    // Owns a camera backend and runs a background polling thread that pulls
-    // framesets, builds sensor_frame, and pushes them to observers.
+    // Owns a camera backend and runs a background polling thread 
+    // that pulls framesets from it and pushes their frames to observers.
     // SDK-agnostic: the concrete backend is created only in the .cc.
     class sensor_frame_provider final {
     public:
@@ -35,24 +35,24 @@ namespace hw
         void remove_observer(const std::shared_ptr<sensor_frame_observer>& observer);
 
         bool is_opened() const;
-
-        [[nodiscard]] bool open_device(
-            uint32_t device_index,
-            std::optional<int32_t> exposure_us = std::nullopt,
-            std::optional<int32_t> gain = std::nullopt
-        ) noexcept;
-        
-        [[nodiscard]] bool open_recording(const std::filesystem::path& recording_file) noexcept;
-
+        [[nodiscard]] bool open(const source_config_t& config) noexcept;
         void close();
 
         const std::string& get_source_name() const { return _source_name; }
+
+        // Describes the images observers actually receive, not the raw sensor:
+        // an ROI shifts the principal point and shrinks the resolution these report.
         const calibration_t& get_calibration() const { return _calib; }
         Eigen::Vector2i get_color_camera_resolution() const { return _color_resolution; }
         Eigen::Vector2f get_color_camera_fov() const { return _color_fov; }
+        frame_format_t get_color_format() const { return _color_format; }
+        std::optional<roi_t> get_color_roi() const { return _color_roi; } // nullopt: whole frames
 
         float get_current_update_rate() const { return _update_rate.load(); } // EMA-smoothed fps
-        uint32_t get_current_frame_id() const { return _frame_id.load(); }
+
+        // Position of the newest frame in this source's stream, restarting at zero on every open.
+        // NOTE: This value is NOT an identity; for that, see `sensor_frame::id()`.
+        uint32_t get_current_frame_seq() const { return _frame_seq.load(); }
 
         bool is_paused() const { return _paused.load(); }
         void play();
@@ -76,8 +76,8 @@ namespace hw
     private:
         void _install_source(
             std::unique_ptr<sensor_frame_source> source,
-            record_player_source* player,
-            std::string source_name
+            std::string source_name,
+            const std::optional<roi_t>& requested_roi
         );
 
         void _start_thread();
@@ -107,8 +107,10 @@ namespace hw
         Eigen::Vector2i _color_resolution{ Eigen::Vector2i::Zero() };
         Eigen::Vector2f _color_fov{ Eigen::Vector2f::Zero() };
         std::string _source_name;
+        frame_format_t _color_format{};
+        std::optional<roi_t> _color_roi; // ROI in force
 
-        std::atomic<uint32_t> _frame_id{ 0 };
+        std::atomic<uint32_t> _frame_seq{ 0 };
         std::atomic<float> _update_rate{ 0.0f };
         std::atomic<float> _speed{ 1.0f };
     }; // class

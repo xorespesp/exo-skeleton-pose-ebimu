@@ -1,6 +1,5 @@
 // Offline K4A .mkv recording -> our .mcap recording converter
-#include "hw/backends/k4a_frame_source.hh" // hw::k4a_to_calibration
-#include "hw/backends/k4a_frameset.hh"     // color -> BGR, device timestamp
+#include "hw/backends/k4a_frame_source.hh" // hw::k4a_to_calibration, hw::k4a_color_to_mat
 #include "io/recording_writer.hh"
 
 #include <k4a/k4a.hpp>
@@ -75,7 +74,7 @@ int main(int argc, char** argv) try
         return 1;
     }
 
-    // Decode every color format (MJPG, NV12, ...) to a common one; k4a_frameset turns that
+    // Decode every color format (MJPG, NV12, ...) to a common one; k4a_color_to_mat turns that
     // into BGR, matching what the live pipeline produces.
     if (K4A_FAILED(::k4a_playback_set_color_conversion(playback.h, K4A_IMAGE_FORMAT_COLOR_BGRA32))) {
         spdlog::error("failed to set color conversion on the recording");
@@ -126,12 +125,13 @@ int main(int argc, char** argv) try
             return 1;
         }
 
-        k4a::capture capture{ handle };
-        hw::k4a_frameset frameset{ std::move(capture) };
-        if (!frameset.has_color_image()) { ++skipped; continue; }
+        const k4a::capture capture{ handle };
+        const k4a::image color = capture.get_color_image();
+        if (!color.is_valid() || color.get_size() == 0) { ++skipped; continue; }
 
-        const cv::Mat bgr = frameset.get_color_image();
-        const auto ts = std::chrono::duration_cast<std::chrono::nanoseconds>(frameset.get_color_timestamp());
+        // The recording container carries 8-bit BGR whole frames.
+        const cv::Mat bgr = hw::k4a_color_to_mat(color, hw::frame_format_t::bgr8, std::nullopt);
+        const auto ts = std::chrono::duration_cast<std::chrono::nanoseconds>(color.get_device_timestamp());
         if (!writer.write_frame(*stream, bgr, ts)) {
             spdlog::error("failed to write frame {}", frames);
             return 1;

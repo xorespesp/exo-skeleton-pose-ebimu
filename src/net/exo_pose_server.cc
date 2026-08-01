@@ -298,11 +298,17 @@ namespace net
                                 if (const auto e = o->exposure_us()) { exposure = *e; }
                                 if (const auto g = o->gain()) { gain = *g; }
 
-                                // The viewing plane is fixed when the server starts: it follows the
-                                // camera's physical placement, which a remote client cannot change.
+                                // The viewing plane, color format, and roi is fixed when the server starts.
+                                // it follows the camera's physical placement, which a remote client cannot change.
                                 const auto addr = app::source_address::try_parse(src);
                                 const bool ok = addr.has_value()
-                                    && _imp->pipeline.open_source(*addr, _imp->initial.view_plane, o->tag_size_m(), exposure, gain);
+                                    && _imp->pipeline.open_source(
+                                        *addr, _imp->initial.view_plane, 
+                                        o->tag_size_m(), 
+                                        exposure, gain,
+                                        _imp->initial.color_format, 
+                                        _imp->initial.color_roi
+                                    );
                                 ack = this->_serialize_ack(ok,
                                     !addr.has_value() ? "empty source" : (ok ? "source opened" : "open failed"), req);
                                 break;
@@ -412,7 +418,9 @@ namespace net
                 _imp->initial.view_plane,
                 _imp->initial.tag_size_m,
                 _imp->initial.exposure_us,
-                _imp->initial.gain
+                _imp->initial.gain,
+                _imp->initial.color_format,
+                _imp->initial.color_roi
             );
         }
 
@@ -437,7 +445,7 @@ namespace net
             {
                 const std::string frame = this->_serialize_pose_frame();
                 spdlog::trace("tx PoseFrame #{} ({} bytes) to {} client(s)",
-                    _imp->pipeline.current_frame_id(), frame.size(), _imp->client_count);
+                    _imp->pipeline.current_frame_seq(), frame.size(), _imp->client_count);
                 _imp->uws_loop.publish("pose", frame);
             }
             if (r.stream_ended)
@@ -483,8 +491,8 @@ namespace net
         }
 
         const auto joints_vec = b.CreateVector(joints);
-        const uint32_t frame_id = _imp->pipeline.current_frame_id();
-        const auto pose_frame = fb_proto::CreatePoseFrame(b, frame_id, _imp->pipeline.last_timestamp().count(), _imp->pipeline.has_rest_pose(), joints_vec);
+        const uint32_t frame_seq = _imp->pipeline.current_frame_seq();
+        const auto pose_frame = fb_proto::CreatePoseFrame(b, frame_seq, _imp->pipeline.last_timestamp().count(), _imp->pipeline.has_rest_pose(), joints_vec);
 
         b.Finish(fb_proto::CreateMessage(b, fb_proto::Payload_PoseFrame, pose_frame.Union(), kServerNotifyReqId));
         return std::string(std::bit_cast<const char*>(b.GetBufferPointer()), b.GetSize());

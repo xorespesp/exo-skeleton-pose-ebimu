@@ -1,6 +1,8 @@
 ﻿#pragma once
 #include <Eigen/Core>
 
+#include <cmath>
+
 namespace hw
 {
     // Pinhole intrinsics. SDK-agnostic POD; 
@@ -10,6 +12,19 @@ namespace hw
         float fx{ 0.0f }, fy{ 0.0f };  // focal length [px]
         float cx{ 0.0f }, cy{ 0.0f };  // principal point [px]
         int width{ 0 }, height{ 0 };
+
+        // (h_fov, v_fov) [deg]: 2*atan(extent / (2*focal)).
+        // Zero on an axis whose focal length is unset.
+        Eigen::Vector2f get_fov() const
+        {
+            constexpr double kPi = 3.14159265358979323846;
+            const auto deg = [](float focal, int extent) {
+                return (focal > 0.0f)
+                    ? static_cast<float>(2.0 * std::atan(extent / (2.0 * focal)) * 180.0 / kPi)
+                    : 0.0f;
+            };
+            return Eigen::Vector2f{ deg(fx, width), deg(fy, height) };
+        }
     };
 
     // Brown-Conrady (rational) distortion coefficients.

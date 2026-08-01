@@ -6,8 +6,9 @@
 
 #include <spdlog/spdlog.h>
 
-#include <algorithm>
 #include <exception>
+#include <format>
+#include <vector>
 
 namespace hw
 {
@@ -15,6 +16,8 @@ namespace hw
     {
         constexpr auto kIdlePollSleep = std::chrono::milliseconds{ 5 };
         constexpr float kFpsEmaAlpha = 0.1f; // weight of the newest sample
+
+        template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
     }
 
     sensor_frame_provider::~sensor_frame_provider()
@@ -41,67 +44,97 @@ namespace hw
         return static_cast<bool>(_source);
     }
 
-    bool sensor_frame_provider::open_device(
-        const uint32_t device_index,
-        const std::optional<int32_t> exposure_us, 
-        const std::optional<int32_t> gain) noexcept try
+    bool sensor_frame_provider::open(const source_config_t& config) noexcept try
     {
         this->close();
 
-        auto source = std::make_unique<k4a_device_capturer>();
-        if (!source->open(device_index, { exposure_us, gain })) { 
-            return false;
-        }
+        std::unique_ptr<sensor_frame_source> source = std::visit(overloaded{
+            [](const k4a_device_config& c) -> std::unique_ptr<sensor_frame_source> {
+                auto s = std::make_unique<k4a_device_capturer>();
+                if (!s->open(c.device_index, { c.exposure_us, c.gain }, c.color_format)) {
+                    return nullptr;
+                }
+                return s;
+            },
+            [](const vz_device_config&) -> std::unique_ptr<sensor_frame_source> {
+                spdlog::error("provider: the VZ backend is not supported yet");
+                return nullptr;
+            },
+            [](const recording_config& c) -> std::unique_ptr<sensor_frame_source> {
+                auto s = std::make_unique<io::mcap_record_player>();
+                if (!s->open(c.file)) { return nullptr; }
+                s->enable_auto_repeat(true);
+                return s;
+            },
+        }, config);
 
-        _install_source(std::move(source), nullptr, "device #" + std::to_string(device_index));
-        spdlog::info("provider opened: device #{}", device_index);
+        if (!source) { return false; }
+
+        // Every config kind carries a `color_roi`, so this stays generic.
+        const std::optional<roi_t> requested_roi = std::visit(
+            [](const auto& c) { return c.color_roi; }, 
+            config
+        );
+
+        this->_install_source(std::move(source), describe(config), requested_roi);
+        spdlog::info("provider opened: {} ({}, {})"
+            , _source_name
+            , frame_format_name(_color_format)
+            , _color_roi.has_value()
+                ? std::format("roi {}x{}+{}+{}", _color_roi->width, _color_roi->height, _color_roi->x, _color_roi->y)
+                : std::string{ "whole frame" }
+        );
         return true;
     }
     catch (const std::exception& e)
     {
-        spdlog::error("provider: failed to open device #{}: {}", device_index, e.what());
-        return false;
-    }
-
-    bool sensor_frame_provider::open_recording(const std::filesystem::path& recording_file) noexcept try
-    {
-        this->close();
-
-        auto recording = std::make_unique<io::mcap_record_player>();
-        if (!recording->open(recording_file)) { return false; }
-        recording->enable_auto_repeat(true);
-
-        record_player_source* player = recording.get();
-        _install_source(std::move(recording), player, recording_file.filename().string());
-        spdlog::info("provider opened: recording '{}'", recording_file.string());
-        return true;
-    }
-    catch (const std::exception& e)
-    {
-        spdlog::error("provider: failed to open recording '{}': {}", recording_file.string(), e.what());
+        spdlog::error("provider: failed to open {}: {}", describe(config), e.what());
         return false;
     }
 
     void sensor_frame_provider::_install_source(
         std::unique_ptr<sensor_frame_source> source,
-        record_player_source* player,
-        std::string source_name)
+        std::string source_name,
+        const std::optional<roi_t>& requested_roi)
     {
         // Cache metadata once; it stays constant while streaming.
         _calib = source->get_calibration();
-        _color_resolution = source->get_color_camera_resolution();
-        _color_fov = source->get_color_camera_fov();
+        _color_format = source->get_color_format();
+        _color_roi.reset();
+
+        if (requested_roi.has_value())
+        {
+            if (const std::optional<roi_t> granted = source->try_set_color_roi(*requested_roi);
+                granted.has_value())
+            {
+                _color_roi = granted;
+                apply_roi(_calib, *granted); // the delivered images are what the calibration describes
+            }
+            else
+            {
+                spdlog::warn("provider: ROI {}x{}+{}+{} was not applied to {}'s {}x{} frame"
+                    , requested_roi->width, requested_roi->height, requested_roi->x, requested_roi->y
+                    , source_name
+                    , _calib.color_resolution.x(), _calib.color_resolution.y()
+                );
+            }
+        }
+
+        // Copied from `_calib`, which the ROI above already adjusted, so these cannot disagree with it.
+        _color_resolution = _calib.color_resolution;
+        _color_fov = _calib.color_fov;
         _source_name = std::move(source_name);
 
-        _frame_id.store(0);
+        _frame_seq.store(0);
         _update_rate.store(0.0f);
         _paused.store(false);
         _need_repace.store(true);
 
         {
             std::scoped_lock lk{ _source_mtx };
+            // Non-null only for a recording: seeking is what `record_player_source` adds.
+            _player = dynamic_cast<record_player_source*>(source.get());
             _source = std::move(source);
-            _player = player;
         }
 
         _notify_sensor_stream_reset();
@@ -162,7 +195,7 @@ namespace hw
                 continue;
             }
 
-            std::unique_ptr<sensor_frameset> fs;
+            std::optional<sensor_frameset> fs;
             {
                 std::scoped_lock lk{ _source_mtx };
                 if (!_source) { break; }
@@ -171,11 +204,11 @@ namespace hw
 
             if (!_running.load()) { break; }
 
-            if (!fs)
+            if (!fs.has_value())
             {
                 if (_player)
                 {
-                    // nullptr from a recording means EOF (auto-repeat off).
+                    // A recording returns nothing at EOF (auto-repeat off)
                     spdlog::info("provider: end of recording stream");
                     _notify_sensor_stream_end();
                     _paused.store(true); // idle until close / seek / play
@@ -187,16 +220,14 @@ namespace hw
                 continue;
             }
 
-            if (!fs->has_color_image())
+            const std::shared_ptr<sensor_frame>& new_frame = fs->color_frame();
+            if (!new_frame)
             {
-                spdlog::warn("provider: frame has no color image, dropping");
+                spdlog::warn("provider: capture has no color image, dropping");
                 continue;
             }
 
-            const uint32_t id = _frame_id.fetch_add(1) + 1;
-            auto new_frame = std::make_shared<sensor_frame>(id);
-            new_frame->timestamp = fs->get_color_timestamp();
-            new_frame->color_image = fs->get_color_image().clone(); // deep-copy: the view outlives the frameset
+            _frame_seq.fetch_add(1);
 
             // EMA fps (wall-clock based)
             const auto now = std::chrono::steady_clock::now();
@@ -224,11 +255,11 @@ namespace hw
                 {
                     anchor_set = true;
                     anchor_wall = std::chrono::steady_clock::now();
-                    anchor_ts = new_frame->timestamp;
+                    anchor_ts = new_frame->timestamp();
                 }
                 else
                 {
-                    const double rel_us = static_cast<double>((new_frame->timestamp - anchor_ts).count()) / speed;
+                    const double rel_us = static_cast<double>((new_frame->timestamp() - anchor_ts).count()) / speed;
                     const auto target = anchor_wall + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                         std::chrono::duration<double, std::micro>{ rel_us });
                     std::this_thread::sleep_until(target);

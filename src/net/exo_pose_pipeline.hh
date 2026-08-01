@@ -2,6 +2,8 @@
 #include "source_address.hh"
 
 #include "hw/calibration.hh"
+#include "hw/frame_format.hh"
+#include "hw/roi.hh"
 #include "hw/sensor_frame_provider.hh"
 #include "io/frame_recorder.hh"
 #include "pose/frontal_pose_estimator.hh"
@@ -42,10 +44,12 @@ namespace net
         // --- source control -----------------------------------------------------------
         bool open_source(
             const app::source_address& source_addr, // camera device or recording file to stream
-            pose::view_plane_t view_plane,   // picks the estimator; a different one swaps it in, tuning fresh
-            double tag_size_m,               // printed black-square edge length [m]
-            std::optional<int32_t> exposure_us, // optional (nullopt: auto exposure)
-            std::optional<int32_t> gain         // optional (nullopt: auto gain)
+            pose::view_plane_t view_plane, // picks the estimator; a different one swaps it in, tuning fresh
+            double tag_size_m,             // printed black-square edge length [m]
+            std::optional<int32_t> exposure_us,  // optional (nullopt: auto exposure)
+            std::optional<int32_t> gain,       // optional (nullopt: auto gain)
+            hw::frame_format_t color_format,   // pixel layout to ask the source for
+            std::optional<hw::roi_t> color_roi // optional (nullopt: stream whole frames)
         );
         void close_source();
 
@@ -116,7 +120,10 @@ namespace net
         Eigen::Vector2i source_resolution() const;
         float source_fps() const;
         std::optional<hw::intrinsic_t> intrinsics() const; // color intrinsics of the open source (empty if none)
-        uint32_t current_frame_id() const;
+
+        // Position of the newest frame in the open source's stream; restarts on every open.
+        uint32_t current_frame_seq() const;
+
         std::chrono::microseconds last_timestamp() const { return _last_timestamp; }
 
         // --- recording playback (no-op without an open recording source) ---------------

@@ -1,22 +1,15 @@
 #include "k4a_frame_source.hh"
 
-#include "k4a_frameset.hh"
-
-#include <k4a/k4a.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/imgcodecs.hpp>
 
 #include <spdlog/spdlog.h>
 
-#include <cmath>
 #include <optional>
 #include <stdexcept>
 
 namespace hw
 {
-    namespace
-    {
-        constexpr double kPi = 3.14159265358979323846;
-    }
-
     // Copy the color camera parameters into the SDK-agnostic calibration_t.
     calibration_t k4a_to_calibration(const k4a_calibration_t& k4a_calib)
     {
@@ -32,16 +25,68 @@ namespace hw
             p.k1, p.k2, p.k3, p.k4, p.k5, p.k6, p.p1, p.p2
         };
         out.color_resolution = Eigen::Vector2i{ cc.resolution_width, cc.resolution_height };
-
-        const float h_fov = (p.fx > 0.0f)
-            ? static_cast<float>(2.0 * std::atan(cc.resolution_width / (2.0 * p.fx)) * 180.0 / kPi)
-            : 0.0f;
-        const float v_fov = (p.fy > 0.0f)
-            ? static_cast<float>(2.0 * std::atan(cc.resolution_height / (2.0 * p.fy)) * 180.0 / kPi)
-            : 0.0f;
-        out.color_fov = Eigen::Vector2f{ h_fov, v_fov };
+        out.color_fov = out.color_intr.get_fov();
 
         return out;
+    }
+
+    cv::Mat k4a_color_to_mat(
+        const k4a::image& color,
+        const frame_format_t format,
+        const std::optional<roi_t> roi)
+    {
+        if (!color.is_valid() || color.get_size() == 0) {
+            throw std::runtime_error{ "k4a_color_to_mat: color image is invalid" };
+        }
+
+        const bool want_gray = (format == frame_format_t::gray8);
+
+        // A view of `full` restricted to the ROI, or `full` itself when the whole frame is wanted.
+        const auto narrow = [&roi](const cv::Mat& full) {
+            return roi.has_value()
+                ? full(cv::Rect{ roi->x, roi->y, roi->width, roi->height })
+                : full;
+        };
+
+        cv::Mat out;
+        switch (color.get_format()) {
+        case K4A_IMAGE_FORMAT_COLOR_BGRA32: {
+            const cv::Mat bgra_view( // Zero-copy view over the k4a BGRA buffer
+                color.get_height_pixels(),
+                color.get_width_pixels(),
+                CV_8UC4,
+                const_cast<void*>(static_cast<const void*>(color.get_buffer())),
+                static_cast<size_t>(color.get_stride_bytes())
+            );
+            // Narrowing ahead of the conversion is the whole point: it reads and writes only
+            // the pixels that will be delivered, and `out` comes out owning them.
+            cv::cvtColor(narrow(bgra_view), out,
+                want_gray ? cv::COLOR_BGRA2GRAY : cv::COLOR_BGRA2BGR
+            );
+            break;
+        }
+        case K4A_IMAGE_FORMAT_COLOR_MJPG: {
+            const cv::Mat jpeg_view( // Zero-copy view of the k4a JPEG buffer
+                1,
+                static_cast<int>(color.get_size()),
+                CV_8UC1,
+                const_cast<void*>(static_cast<const void*>(color.get_buffer()))
+            );
+            // The decoder needs the whole frame, so here the ROI can only follow it.
+            const cv::Mat decoded = cv::imdecode(jpeg_view,
+                want_gray ? cv::IMREAD_GRAYSCALE : cv::IMREAD_COLOR
+            );
+            out = narrow(decoded);
+            break;
+        }
+        default:
+            throw std::runtime_error{
+                "k4a_color_to_mat: unsupported color image format (only MJPG / BGRA32)"
+            };
+        }
+
+        // The MJPG path can leave a view of the decoded frame, which dies here.
+        return out.isSubmatrix() ? out.clone() : out;
     }
 
     ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -54,8 +99,9 @@ namespace hw
     }
 
     bool k4a_device_capturer::open(
-        const uint32_t device_index, 
-        const color_controls& controls) noexcept try
+        const uint32_t device_index,
+        const color_controls& controls,
+        const frame_format_t color_format) noexcept try
     {
         std::scoped_lock lk{ _mtx };
         if (_device) { throw std::runtime_error{ "k4a_device_capturer: already opened" }; }
@@ -123,8 +169,13 @@ namespace hw
         _config = config;
         _calib = k4a_to_calibration(k4a_calib);
         _serialnum = std::move(serialnum);
+        _color_format = color_format;
+        _color_roi.reset();
 
-        spdlog::info("k4a device opened (S/N: {})", _serialnum.empty() ? "<unknown>" : _serialnum);
+        spdlog::info("k4a device opened (S/N: {}, {})"
+            , _serialnum.empty() ? "<unknown>" : _serialnum
+            , frame_format_name(_color_format)
+        );
         return true;
     }
     catch (const std::exception& e)
@@ -149,15 +200,30 @@ namespace hw
         }
     }
 
-    std::unique_ptr<sensor_frameset> k4a_device_capturer::fetch_next_sensor_frameset()
+    std::optional<roi_t> k4a_device_capturer::try_set_color_roi(const roi_t& roi)
     {
         std::scoped_lock lk{ _mtx };
-        if (!_device) { return nullptr; }
+
+        const roi_t clipped = clamp_roi(roi, 
+            _calib.color_resolution.x(), 
+            _calib.color_resolution.y()
+        );
+
+        if (clipped.is_empty()) { return std::nullopt; }
+
+        _color_roi = clipped;
+        return _color_roi;
+    }
+
+    std::optional<sensor_frameset> k4a_device_capturer::fetch_next_sensor_frameset()
+    {
+        std::scoped_lock lk{ _mtx };
+        if (!_device) { return std::nullopt; }
 
         k4a_capture_t capture_handle = nullptr;
         const k4a_wait_result_t wait_result = ::k4a_device_get_capture(
-            _device, 
-            &capture_handle, 
+            _device,
+            &capture_handle,
             1000 /* ms; finite so the polling thread can wake for join */
         );
 
@@ -165,13 +231,23 @@ namespace hw
             throw std::runtime_error{ "k4a_device_capturer: failed to get capture" };
         }
         if (wait_result == K4A_WAIT_RESULT_TIMEOUT) {
-            return nullptr; // provider retries
+            return std::nullopt; // provider retries
         }
 
-        k4a::capture capture{ capture_handle };
-        if (!capture.is_valid()) { return nullptr; }
+        const k4a::capture capture{ capture_handle };
+        if (!capture.is_valid()) { return std::nullopt; }
 
-        return std::make_unique<k4a_frameset>(std::move(capture));
+        const k4a::image color = capture.get_color_image();
+        if (!color.is_valid() || color.get_size() == 0) {
+            return sensor_frameset{ nullptr }; // a capture without colour; the provider drops it
+        }
+
+        // Make a new sensor frameset and return it. (deep copied)
+        return sensor_frameset{ std::make_shared<sensor_frame>(
+            k4a_color_to_mat(color, _color_format, _color_roi),
+            _color_format,
+            color.get_device_timestamp()
+        ) };
     }
 
 } // namespace hw

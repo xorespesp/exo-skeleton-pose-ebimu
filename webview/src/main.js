@@ -1,4 +1,4 @@
-﻿// Entry point: build the scene, load the rig, and wire a lil-gui panel for the
+// Entry point: build the scene, load the rig, and wire a lil-gui panel for the
 // connection and camera/rest-pose commands.
 
 import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
@@ -26,7 +26,7 @@ const ui = {
     // readouts
     source_name: '(none)',
     rest_pose: 'none',
-    frame_id: 0,
+    frame_seq: 0,
     euler_order: 'XYZ',
     joints: Object.fromEntries(BONE_BY_JOINT_ID.map((n) => [n, '-'])),
 };
@@ -83,7 +83,7 @@ client.onStatus = (st) => {
 };
 client.onPoseFrame = (frame) => {
     applyPoseFrame(bones, bindPose, frame);
-    ui.frame_id = frame.frameId();
+    ui.frame_seq = frame.frameSeq();
     for (let i = 0; i < frame.jointsLength(); i++) {
         const jp = frame.joints(i);
         const q = jp.localAnimRot(); // null when the joint is lost this frame
@@ -162,7 +162,7 @@ const cClear = rest.add(acts, 'clearRest').name('Clear');
 rest.add(ui, 'rest_pose').name('state').listen().disable();
 
 const joints = gui.addFolder('Joints (euler deg)').close();
-joints.add(ui, 'frame_id').name('frame').listen().disable();
+joints.add(ui, 'frame_seq').name('frame seq').listen().disable();
 joints.add(ui, 'euler_order', ['XYZ', 'XZY', 'YXZ', 'YZX', 'ZXY', 'ZYX']).name('euler order');
 for (const name of BONE_BY_JOINT_ID) {
     joints.add(ui.joints, name).listen().disable();

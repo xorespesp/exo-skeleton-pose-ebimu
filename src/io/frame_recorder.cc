@@ -85,8 +85,8 @@ namespace io
             // Encoded outside the lock, or the observer callback would block behind it on push.
             [[maybe_unused]] const bool succeeded = _writer.write_frame(
                 _stream_id,
-                frame->color_image,
-                std::chrono::duration_cast<std::chrono::nanoseconds>(frame->timestamp)
+                frame->color_image(),
+                std::chrono::duration_cast<std::chrono::nanoseconds>(frame->timestamp())
             );
         }
     }
@@ -94,7 +94,7 @@ namespace io
     void frame_recorder::on_sensor_frame_update(const std::shared_ptr<hw::sensor_frame>& new_sensor_frame)
     {
         if (!_is_started.load(std::memory_order_relaxed)) { return; }
-        if (!new_sensor_frame || new_sensor_frame->color_image.empty()) { return; }
+        if (!new_sensor_frame || new_sensor_frame->color_image().empty()) { return; }
 
         {
             std::scoped_lock lk{ _mtx };

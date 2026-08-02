@@ -1,5 +1,6 @@
 #pragma once
 #include "hw/calibration.hh"
+#include "hw/timestamp.hh"
 #include "pose/pose_estimator_base.hh"
 #include "pose/joints_def.hh"
 #include "pose/tag_detector.hh"
@@ -54,7 +55,7 @@ namespace gui
         // Append one frame. `detections` are the raw detections behind the current joint states.
         // Copies what it needs; holds no reference afterwards.
         void capture(
-            std::chrono::microseconds sensor_ts,
+            hw::timestamp_t sensor_ts,
             std::span<const pose::tag_detection_t> detections,
             const pose::pose_estimator_base& estimator,
             const trace_gates_t& gates
@@ -98,7 +99,7 @@ namespace gui
         struct frame_rec_t
         {
             std::uint64_t seq{ 0 }; // monotonic capture index (survives ring eviction; not the array position)
-            std::chrono::microseconds t{ 0 };
+            hw::timestamp_t t{}; // capture time of the frame these values were computed from
             std::vector<detection_rec_t> detections;
             std::array<joint_rec_t, pose::kNumJoints> joints{};
 

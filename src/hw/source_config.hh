@@ -2,6 +2,7 @@
 #include "calibration.hh"
 #include "frame_format.hh"
 #include "roi.hh"
+#include "source_backend.hh"
 
 #include <cstdint>
 #include <filesystem>
@@ -25,7 +26,7 @@ namespace hw
         std::optional<roi_t> color_roi;     // nullopt: the whole frame
     };
 
-    // Vieworks VZ-5MU-C79H00 camera, driven through the Galaxy layer of the VZSolutionSDK.
+    // Vieworks VZ-5MU-C79H00 camera.
     struct vz_device_config
     {
         std::string serial;                // empty: the first camera enumerated
@@ -50,7 +51,10 @@ namespace hw
 
     using source_config_t = std::variant<k4a_device_config, vz_device_config, recording_config>;
 
-    // Short label for a log line or the GUI, 
+    // Which backend this config selects.
+    source_backend_t get_source_backend(const source_config_t& config);
+
+    // Short label for a log line or the GUI,
     // e.g. "k4a device #0", "recording 'walk.mcap'".
     std::string describe(const source_config_t& config);
 

@@ -9,7 +9,7 @@
 namespace io
 {
     frame_recorder::frame_recorder(
-        const recording_options& options, 
+        const recording_options_t& options, 
         const size_t queue_depth)
         : _queue_depth{ std::max<size_t>(1, queue_depth) }
         , _writer{ options }
@@ -22,7 +22,7 @@ namespace io
 
     bool frame_recorder::start(
         const std::filesystem::path& path,
-        const camera_stream_info& camera) noexcept try
+        const camera_stream_info_t& camera) noexcept try
     {
         if (_is_started.load(std::memory_order_relaxed)) {
             throw std::runtime_error{ "frame_recorder: already started" };
@@ -73,7 +73,7 @@ namespace io
             std::shared_ptr<hw::sensor_frame> frame;
             {
                 std::unique_lock lk{ _mtx };
-                _queued.wait(lk, stop, [this] { return !_queue.empty(); });
+                _queue_cv.wait(lk, stop, [this] { return !_queue.empty(); });
 
                 // Empty here means the stop was requested and the queue is drained.
                 if (_queue.empty()) { return; }
@@ -86,7 +86,7 @@ namespace io
             [[maybe_unused]] const bool succeeded = _writer.write_frame(
                 _stream_id,
                 frame->color_image(),
-                std::chrono::duration_cast<std::chrono::nanoseconds>(frame->timestamp())
+                frame->timestamp()
             );
         }
     }
@@ -105,7 +105,7 @@ namespace io
             }
             _queue.push_back(new_sensor_frame);
         }
-        _queued.notify_one();
+        _queue_cv.notify_one();
     }
 
     void frame_recorder::on_sensor_stream_reset()
@@ -118,9 +118,9 @@ namespace io
         this->stop();
     }
 
-    recording_stats frame_recorder::stats() const noexcept
+    recording_stats_t frame_recorder::stats() const noexcept
     {
-        recording_stats stats = _writer.stats(); // safe to read while the worker writes
+        recording_stats_t stats = _writer.stats(); // safe to read while the worker writes
 
         std::scoped_lock lk{ _mtx };
         stats.frames_dropped = _frames_dropped;

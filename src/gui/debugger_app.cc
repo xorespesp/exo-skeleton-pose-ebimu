@@ -14,7 +14,12 @@
 #include <cmath>
 #include <filesystem>
 #include <format>
+#include <string>
 #include <vector>
+
+#ifdef _WIN32
+#  include <windows.h> // GetModuleFileNameW
+#endif
 
 namespace gui
 {
@@ -23,34 +28,69 @@ namespace gui
         // Codec picker entries, one per `io::kImageCodecs` row and in the same order.
         constexpr std::array<const char*, io::kImageCodecs.size()> kCodecLabels{
             "JPEG (compressed)",
-            "Raw BGR8 (lossless)",
+            "Raw (lossless)",
         };
 
-        // A recording is named after the moment it started, so successive takes never
-        // collide and are orderable by name.
-        std::string default_recording_name()
+        // The nearest `recordings` folder above the executable, else the executable's own directory.
+        // Anchored to the executable, so the same path comes out however the app is launched.
+        std::filesystem::path recordings_dir()
+        {
+            std::filesystem::path exe_dir;
+#ifdef _WIN32
+            std::wstring buf(MAX_PATH, L'\0');
+            for (;;) {
+                const DWORD written = ::GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+                if (written == 0) { break; }
+                if (written < buf.size()) {
+                    exe_dir = std::filesystem::path{ buf.substr(0, written) }.parent_path();
+                    break;
+                }
+                buf.resize(buf.size() * 2); // a filled buffer means the path was truncated
+            }
+#endif
+            if (exe_dir.empty()) { return std::filesystem::current_path(); }
+
+            std::error_code ec;
+            std::filesystem::path dir = exe_dir;
+            // Deep enough to clear a build tree's out/build/<preset>/, stopping at the root.
+            for (int level = 0; level < 6 && dir.has_relative_path(); ++level) {
+                if (const std::filesystem::path candidate = dir / "recordings";
+                    std::filesystem::is_directory(candidate, ec))
+                {
+                    return candidate;
+                }
+                dir = dir.parent_path();
+            }
+            return exe_dir;
+        }
+
+        // Local wall clock string for filename
+        std::string local_stamp()
         {
             const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
             try {
                 const std::chrono::zoned_time local{ std::chrono::current_zone(), now };
-                return std::format("recording_{:%Y%m%d_%H%M%S}.mcap", local);
+                return std::format("{:%y%m%d%H%M%S}", local);
             }
             catch (const std::exception&) {
-                return std::format("recording_{:%Y%m%d_%H%M%S}Z.mcap", now); // no time zone database
+                return std::format("{:%y%m%d%H%M%S}", now); // no time zone database; UTC instead
             }
         }
 
-        // A pose-trace dump is named after the moment it was written (same convention as recordings).
+        std::string default_recording_name(
+            const hw::source_backend_t backend,
+            const pose::view_plane_t view_plane)
+        {
+            return std::format("capture-{}-{}-{}.mcap"
+                , hw::source_backend_to_str(backend)
+                , pose::view_plane_name(view_plane)
+                , local_stamp()
+            );
+        }
+
         std::string default_trace_name()
         {
-            const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
-            try {
-                const std::chrono::zoned_time local{ std::chrono::current_zone(), now };
-                return std::format("pose_trace_{:%Y%m%d_%H%M%S}.json", local);
-            }
-            catch (const std::exception&) {
-                return std::format("pose_trace_{:%Y%m%d_%H%M%S}Z.json", now); // no time zone database
-            }
+            return std::format("pose_trace_{}.json", local_stamp());
         }
 
         // Map a rig-space position into the ImPlot3D plot frame, shared by every 3D view (raw + rig).
@@ -209,6 +249,7 @@ namespace gui
 
         _file_dialog.SetTitle("Open recording file");
         _file_dialog.SetTypeFilters({ ".mcap" });
+        _file_dialog.SetPwd(recordings_dir());
 
         _save_dialog.SetTitle("Save recording as");
         _save_dialog.SetTypeFilters({ ".mcap" });
@@ -415,12 +456,13 @@ namespace gui
     {
         // Pull the server's latest annotated frame + detections. The server owns and updates the
         // estimator; nothing to do until a new frame arrives.
-        std::chrono::microseconds ts{ 0 };
+        hw::timestamp_t ts{};
         if (!_server->pipeline().try_get_annotated_frame(_last_frame, _last_tag_detections, ts, _last_seq)) { return; }
 
         _frame_texture.value().update(_last_frame);
 
-        const double t_now = std::chrono::duration<double>{ ts }.count();
+        // The plot buffers rebase against their first sample, so an absolute value is fine here.
+        const double t_now = std::chrono::duration<double>{ ts.time_since_epoch() }.count();
         net::exo_pose_pipeline& pipe = _server->pipeline();
         const pose::pose_estimator_base* est = pipe.estimator();
         if (!est) { return; } // a frame arrived, so a source is open and so is its estimator
@@ -486,7 +528,11 @@ namespace gui
 
             if (ImGui::MenuItem("Start Recording...", nullptr, false, can_record))
             {
-                if (_ui.record_dlg_path.empty()) { _ui.record_dlg_path = default_recording_name(); }
+                if (_ui.record_dlg_path.empty()) {
+                    _ui.record_dlg_path = (
+                        recordings_dir() / default_recording_name(pipe.source_backend(), pipe.view_plane())
+                    ).string();
+                }
                 _ui.record_dlg_show = true;
             }
             if (ImGui::MenuItem("Stop Recording", nullptr, false, recording)) { this->_do_stop_recording(); }
@@ -1129,7 +1175,7 @@ namespace gui
 
         const size_t index = std::clamp<size_t>(
             static_cast<size_t>(_ui.record_dlg_codec), 0, io::kImageCodecs.size() - 1);
-        const io::recording_options options{
+        const io::recording_options_t options{
             .codec = io::kImageCodecs[index].codec,
             .encode = { .jpeg_quality = _ui.record_dlg_jpeg_quality },
         };
@@ -1175,7 +1221,7 @@ namespace gui
         const net::exo_pose_pipeline& pipe = _server->pipeline();
         if (!pipe.is_recording()) { return; }
 
-        const io::recording_stats stats = pipe.recording_stats();
+        const io::recording_stats_t stats = pipe.recording_stats();
         const double seconds = std::chrono::duration<double>{ stats.duration }.count();
         const double megabytes = static_cast<double>(stats.file_bytes) / (1024.0 * 1024.0);
 
@@ -1204,14 +1250,20 @@ namespace gui
         ImGui::SetNextWindowSize(ImVec2(460, 0), ImGuiCond_Appearing);
         if (ImGui::Begin("Start Recording", &_ui.record_dlg_show, ImGuiWindowFlags_NoCollapse))
         {
-            if (ImGui::Button("Browse...")) { _save_dialog.Open(); }
+            if (ImGui::Button("Browse...")) {
+                // Open on the proposed name, so browsing only has to change what differs.
+                const std::filesystem::path proposed{ _ui.record_dlg_path };
+                if (proposed.has_parent_path()) { _save_dialog.SetPwd(proposed.parent_path()); }
+                _save_dialog.SetInputName(proposed.filename().string());
+                _save_dialog.Open();
+            }
             ImGui::SameLine();
             ImGui::TextUnformatted(_ui.record_dlg_path.empty() ? "(no file selected)" : _ui.record_dlg_path.c_str());
 
             ImGui::Combo("Codec", &_ui.record_dlg_codec, kCodecLabels.data(), static_cast<int>(kCodecLabels.size()));
 
             const bool is_jpeg = (io::kImageCodecs[static_cast<size_t>(_ui.record_dlg_codec)].codec
-                == io::image_codec::jpeg);
+                == io::image_codec_t::jpeg);
 
             ImGui::BeginDisabled(!is_jpeg);
             ImGui::SliderInt("JPEG quality", &_ui.record_dlg_jpeg_quality, 1, 100);

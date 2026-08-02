@@ -1,4 +1,5 @@
 #pragma once
+#include "hw/clock_anchor.hh"
 #include "hw/sensor_frame_source.hh"
 
 #include <k4a/k4a.h>
@@ -69,6 +70,7 @@ namespace hw
         std::string _serialnum;
         frame_format_t _color_format{ frame_format_t::bgr8 };
         std::optional<roi_t> _color_roi; // nullopt: whole frames
+        clock_anchor_t _clock_anchor;    // maps the device clock onto Unix time
     };
 
 } // namespace hw

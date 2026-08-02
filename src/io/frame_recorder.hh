@@ -25,18 +25,18 @@ namespace io
     public:
         static constexpr size_t kDefaultQueueDepth = 8;
 
-        explicit frame_recorder(const recording_options& options = {}, size_t queue_depth = kDefaultQueueDepth);
+        explicit frame_recorder(const recording_options_t& options = {}, size_t queue_depth = kDefaultQueueDepth);
         ~frame_recorder() override;
 
         // Opens the file and registers one camera stream. 
         // Recording begins with the next observed frame.
-        [[nodiscard]] bool start(const std::filesystem::path& path, const camera_stream_info& camera) noexcept;
+        [[nodiscard]] bool start(const std::filesystem::path& path, const camera_stream_info_t& camera) noexcept;
 
         // Drains whatever is queued, then finalizes the file. Idempotent.
         void stop() noexcept;
 
         bool is_started() const noexcept { return _is_started.load(std::memory_order_relaxed); }
-        recording_stats stats() const noexcept;
+        recording_stats_t stats() const noexcept;
         const std::filesystem::path& path() const noexcept { return _writer.path(); }
 
         void on_sensor_frame_update(const std::shared_ptr<hw::sensor_frame>& new_sensor_frame) override;
@@ -53,7 +53,7 @@ namespace io
         stream_id_t _stream_id{ 0 };
 
         mutable std::mutex _mtx; // guards _queue and _frames_dropped (the writer is the worker's alone)
-        std::condition_variable_any _queued;
+        std::condition_variable_any _queue_cv;
         std::deque<std::shared_ptr<hw::sensor_frame>> _queue;
         uint64_t _frames_dropped{ 0 };
 

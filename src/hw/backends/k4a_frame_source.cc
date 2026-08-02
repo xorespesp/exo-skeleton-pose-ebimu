@@ -174,7 +174,7 @@ namespace hw
 
         spdlog::info("k4a device opened (S/N: {}, {})"
             , _serialnum.empty() ? "<unknown>" : _serialnum
-            , frame_format_name(_color_format)
+            , frame_format_to_str(_color_format)
         );
         return true;
     }
@@ -246,7 +246,7 @@ namespace hw
         return sensor_frameset{ std::make_shared<sensor_frame>(
             k4a_color_to_mat(color, _color_format, _color_roi),
             _color_format,
-            color.get_device_timestamp()
+            _clock_anchor.to_unix(color.get_device_timestamp())
         ) };
     }
 

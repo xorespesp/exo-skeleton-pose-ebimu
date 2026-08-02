@@ -28,8 +28,8 @@ namespace pose
         {
             std::array<dsp::OneEuroFilter, 3> pos_smoother{};
             std::optional<Eigen::Vector3d> last_pos_out; // last smoothed position (hold output)
-            std::chrono::microseconds last_seen{ 0 }; // time of the last fresh detection (hold origin)
-            std::chrono::microseconds last_step_time{ 0 }; // time of the last fresh filter step (dt source)
+            hw::timestamp_t last_seen{}; // time of the last fresh detection (hold origin)
+            hw::timestamp_t last_step_time{}; // time of the last fresh filter step (dt source)
         };
 
         std::array<joint_filter_state_t, kNumJoints> filter_states{}; // persists across frames
@@ -79,7 +79,7 @@ namespace pose
 
     void frontal_pose_estimator::update(
         const std::span<const tag_detection_t> tag_detections,
-        const std::chrono::microseconds sensor_timestamp)
+        const hw::timestamp_t sensor_timestamp)
     {
         const auto t = sensor_timestamp;
 

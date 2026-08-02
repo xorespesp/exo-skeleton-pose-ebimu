@@ -65,7 +65,7 @@ namespace net
         // Returns false if nothing new since `last_seq`, else copies out + advances it.
         bool try_get(
             std::vector<pose::tag_detection_t>& out_dets,
-            std::chrono::microseconds& out_timestamp,
+            hw::timestamp_t& out_timestamp,
             uint64_t& last_seq)
         {
             std::scoped_lock lk{ _mtx };
@@ -81,7 +81,7 @@ namespace net
         bool try_get_frame(
             cv::Mat& out_img,
             std::vector<pose::tag_detection_t>& out_dets,
-            std::chrono::microseconds& out_timestamp,
+            hw::timestamp_t& out_timestamp,
             uint64_t& last_seq)
         {
             std::scoped_lock lk{ _mtx };
@@ -179,7 +179,7 @@ namespace net
         std::mutex _mtx;
         cv::Mat _annotated; // annotated frame
         std::vector<pose::tag_detection_t> _detections;
-        std::chrono::microseconds _timestamp{ 0 }; // device timestamp of the latched frame
+        hw::timestamp_t _timestamp{}; // capture time of the latched frame
         uint64_t _seq{ 0 };
         std::atomic<bool> _stream_ended{ false }; // set by the worker thread on stream end
     };
@@ -265,7 +265,7 @@ namespace net
             , tag_size_m
             , exposure_us.has_value() ? std::format("{} us", exposure_us.value()) : "auto"
             , gain.has_value() ? std::format("{}", gain.value()) : "auto"
-            , hw::frame_format_name(color_format)
+            , hw::frame_format_to_str(color_format)
         );
 
         if (_provider) {
@@ -322,7 +322,7 @@ namespace net
 
     bool exo_pose_pipeline::start_recording(
         const std::filesystem::path& path,
-        const io::recording_options& options)
+        const io::recording_options_t& options)
     {
         _status_changed = true;
 
@@ -339,26 +339,21 @@ namespace net
             spdlog::warn("pipeline: already recording to '{}'", _recorder->path().string());
             return false;
         }
-        if (_provider->get_color_format() != hw::frame_format_t::bgr8) {
-            // The recording container carries 8-bit BGR frames only.
-            spdlog::error("pipeline: cannot record a {} stream; reopen the source as bgr8"
-                , hw::frame_format_name(_provider->get_color_format())
-            );
-            return false;
-        }
 
-        const io::camera_stream_info camera{
-            .id = "color0", // first color stream
+        const io::camera_stream_info_t color_stream_info{
+            .stream_name = "color0", // first color stream
             .calibration = _provider->get_calibration(),
+            .color_format = _provider->get_color_format(),
+            .source_backend = _provider->get_source_backend(),
+            .source_name = _provider->get_source_name(),
             .exposure_us = _exposure_us,
             .gain = _gain,
-            .source_name = _provider->get_source_name(),
         };
 
         // Start the recorder before it is subscribed, 
         // so the first frame it sees is one it can already write.
         auto recorder = std::make_shared<io::frame_recorder>(options);
-        if (!recorder->start(path, camera)) { return false; }
+        if (!recorder->start(path, color_stream_info)) { return false; }
 
         _provider->add_observer(recorder);
         _recorder = std::move(recorder);
@@ -376,7 +371,7 @@ namespace net
         if (_provider) { _provider->remove_observer(_recorder); }
         _recorder->stop();
 
-        const io::recording_stats stats = _recorder->stats();
+        const io::recording_stats_t stats = _recorder->stats();
         if (stats.frames_dropped > 0) {
             spdlog::warn("pipeline: {} frame(s) dropped while recording; the disk or the encoder could not keep up",
                 stats.frames_dropped);
@@ -392,9 +387,9 @@ namespace net
         return _recorder && _recorder->is_started();
     }
 
-    io::recording_stats exo_pose_pipeline::recording_stats() const
+    io::recording_stats_t exo_pose_pipeline::recording_stats() const
     {
-        return _recorder ? _recorder->stats() : io::recording_stats{};
+        return _recorder ? _recorder->stats() : io::recording_stats_t{};
     }
 
     std::filesystem::path exo_pose_pipeline::recording_path() const
@@ -477,9 +472,9 @@ namespace net
             else if (_sagittal) { _sagittal->update(_detections, _last_timestamp); }
             r.new_pose = true;
 
-            spdlog::trace("pipeline: frame #{} (t={:.3f} s) with {} tag(s)"
+            spdlog::trace("pipeline: frame #{} (t={:%H:%M:%S}) with {} tag(s)"
                 , this->current_frame_seq()
-                , std::chrono::duration<double>{ _last_timestamp }.count()
+                , _last_timestamp
                 , _detections.size()
             );
 
@@ -585,10 +580,15 @@ namespace net
     bool exo_pose_pipeline::try_get_annotated_frame(
         cv::Mat& out_img,
         std::vector<pose::tag_detection_t>& out_dets,
-        std::chrono::microseconds& out_ts,
+        hw::timestamp_t& out_ts,
         uint64_t& last_seq)
     {
         return _observer && _observer->try_get_frame(out_img, out_dets, out_ts, last_seq);
+    }
+
+    hw::source_backend_t exo_pose_pipeline::source_backend() const
+    {
+        return _provider ? _provider->get_source_backend() : hw::source_backend_t{};
     }
 
     std::string exo_pose_pipeline::source_name() const

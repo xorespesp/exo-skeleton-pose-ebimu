@@ -3,6 +3,7 @@
 #include "frame_format.hh"
 #include "roi.hh"
 #include "sensor_frameset.hh"
+#include "timestamp.hh"
 
 #include <chrono>
 #include <memory>
@@ -39,13 +40,13 @@ namespace hw
     // Recording playback backends.
     class record_player_source : public sensor_frame_source {
     public:
-        virtual std::chrono::microseconds get_recording_length() const = 0;
-        virtual std::chrono::microseconds get_first_record_timestamp() const = 0;
-        virtual std::chrono::microseconds get_last_record_timestamp() const = 0;
+        virtual std::chrono::nanoseconds get_recording_length() const = 0;
+        virtual timestamp_t get_first_record_timestamp() const = 0;
+        virtual timestamp_t get_last_record_timestamp() const = 0;
 
         virtual void seek_begin() = 0;
         virtual void seek_end() = 0;
-        virtual void seek_timestamp(std::chrono::microseconds offset) = 0;
+        virtual void seek_timestamp(timestamp_t timestamp) = 0;
 
         virtual bool auto_repeat_enabled() const = 0;
         virtual void enable_auto_repeat(bool enable) = 0;

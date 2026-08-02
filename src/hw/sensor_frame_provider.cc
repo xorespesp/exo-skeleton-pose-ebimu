@@ -76,10 +76,15 @@ namespace hw
             config
         );
 
-        this->_install_source(std::move(source), describe(config), requested_roi);
+        this->_install_source(
+            std::move(source),
+            hw::get_source_backend(config),
+            describe(config),
+            requested_roi
+        );
         spdlog::info("provider opened: {} ({}, {})"
             , _source_name
-            , frame_format_name(_color_format)
+            , frame_format_to_str(_color_format)
             , _color_roi.has_value()
                 ? std::format("roi {}x{}+{}+{}", _color_roi->width, _color_roi->height, _color_roi->x, _color_roi->y)
                 : std::string{ "whole frame" }
@@ -94,6 +99,7 @@ namespace hw
 
     void sensor_frame_provider::_install_source(
         std::unique_ptr<sensor_frame_source> source,
+        const source_backend_t source_backend,
         std::string source_name,
         const std::optional<roi_t>& requested_roi)
     {
@@ -123,6 +129,7 @@ namespace hw
         // Copied from `_calib`, which the ROI above already adjusted, so these cannot disagree with it.
         _color_resolution = _calib.color_resolution;
         _color_fov = _calib.color_fov;
+        _source_backend = source_backend;
         _source_name = std::move(source_name);
 
         _frame_seq.store(0);
@@ -180,7 +187,7 @@ namespace hw
         // Playback pacing anchor (recording playback only)
         bool anchor_set = false;
         std::chrono::steady_clock::time_point anchor_wall{};
-        std::chrono::microseconds anchor_ts{ 0 };
+        timestamp_t anchor_ts{};
 
         // Wall-clock reference for the fps EMA.
         bool have_last_wall = false;
@@ -246,7 +253,7 @@ namespace hw
 
             _notify_sensor_frame_update(new_frame);
 
-            // Pace playback to real-time * speed using device timestamps.
+            // Pace playback to real-time * speed from the timestamps the frames carry.
             if (_player)
             {
                 const float speed = (_speed.load() > 0.0f) ? _speed.load() : 1.0f;
@@ -259,9 +266,9 @@ namespace hw
                 }
                 else
                 {
-                    const double rel_us = static_cast<double>((new_frame->timestamp() - anchor_ts).count()) / speed;
+                    const double rel_ns = static_cast<double>((new_frame->timestamp() - anchor_ts).count()) / speed;
                     const auto target = anchor_wall + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                        std::chrono::duration<double, std::micro>{ rel_us });
+                        std::chrono::duration<double, std::nano>{ rel_ns });
                     std::this_thread::sleep_until(target);
                 }
             }
@@ -312,28 +319,28 @@ namespace hw
         if (_player) { _player->seek_end(); _need_repace.store(true); }
     }
 
-    void sensor_frame_provider::seek_recording_timeline(std::chrono::microseconds timestamp)
+    void sensor_frame_provider::seek_recording_timeline(const timestamp_t timestamp)
     {
         std::scoped_lock lk{ _source_mtx };
         if (_player) { _player->seek_timestamp(timestamp); _need_repace.store(true); }
     }
 
-    std::chrono::microseconds sensor_frame_provider::get_recording_length() const
+    std::chrono::nanoseconds sensor_frame_provider::get_recording_length() const
     {
         std::scoped_lock lk{ _source_mtx };
-        return _player ? _player->get_recording_length() : std::chrono::microseconds{ 0 };
+        return _player ? _player->get_recording_length() : std::chrono::nanoseconds{ 0 };
     }
 
-    std::chrono::microseconds sensor_frame_provider::get_first_record_timestamp() const
+    timestamp_t sensor_frame_provider::get_first_record_timestamp() const
     {
         std::scoped_lock lk{ _source_mtx };
-        return _player ? _player->get_first_record_timestamp() : std::chrono::microseconds{ 0 };
+        return _player ? _player->get_first_record_timestamp() : timestamp_t{};
     }
 
-    std::chrono::microseconds sensor_frame_provider::get_last_record_timestamp() const
+    timestamp_t sensor_frame_provider::get_last_record_timestamp() const
     {
         std::scoped_lock lk{ _source_mtx };
-        return _player ? _player->get_last_record_timestamp() : std::chrono::microseconds{ 0 };
+        return _player ? _player->get_last_record_timestamp() : timestamp_t{};
     }
 
     void sensor_frame_provider::set_update_speed(float factor)

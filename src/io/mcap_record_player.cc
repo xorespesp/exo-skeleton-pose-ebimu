@@ -6,14 +6,6 @@
 
 namespace io
 {
-    namespace
-    {
-        std::chrono::microseconds to_us(std::chrono::nanoseconds ns) noexcept
-        {
-            return std::chrono::duration_cast<std::chrono::microseconds>(ns);
-        }
-    } // namespace
-
     mcap_record_player::~mcap_record_player()
     {
         this->close();
@@ -28,21 +20,23 @@ namespace io
             throw std::runtime_error{ "mcap_record_player: failed to open recording" };
         }
 
-        const std::span<const recorded_camera_stream> streams = _reader.camera_streams();
+        const std::span<const recorded_camera_stream_t> streams = _reader.camera_streams();
         if (streams.size() > 1) {
             spdlog::warn("mcap_record_player: recording has {} camera streams, playing back '{}' only",
-                streams.size(), streams.front().id
+                streams.size(), streams.front().stream_name
             );
         }
 
         _stream_id = streams.front().stream_id;
         _calib = streams.front().calibration;
-        _first_ts = to_us(_reader.first_timestamp());
-        _last_ts = to_us(_reader.last_timestamp());
+        _color_format = streams.front().color_format;
+        _first_timestamp = _reader.first_timestamp();
+        _last_timestamp = _reader.last_timestamp();
         _opened = true;
 
-        spdlog::info("recording playback ready (length: {} ms)",
-            std::chrono::duration_cast<std::chrono::milliseconds>(_last_ts - _first_ts).count()
+        spdlog::info("recording playback ready ({}, length: {} ms)"
+            , hw::frame_format_to_str(_color_format)
+            , std::chrono::duration_cast<std::chrono::milliseconds>(_last_timestamp - _first_timestamp).count()
         );
         return true;
     }
@@ -73,7 +67,7 @@ namespace io
         std::scoped_lock lk{ _mtx };
         if (!_opened) { return std::nullopt; }
 
-        std::optional<recording_reader::frame> frame = _reader.fetch_next_frame(_stream_id);
+        std::optional<recording_reader::frame_t> frame = _reader.fetch_next_frame(_stream_id);
 
         if (!frame.has_value()) {
             if (!_auto_repeat) { return std::nullopt; } // EOF; the provider reports the stream end
@@ -82,15 +76,15 @@ namespace io
             if (!frame.has_value()) { return std::nullopt; }
         }
 
-        cv::Mat image = std::move(frame->bgr);
+        cv::Mat image = std::move(frame->image);
         if (_color_roi.has_value()) {
             image = image(cv::Rect{ _color_roi->x, _color_roi->y, _color_roi->width, _color_roi->height });
         }
 
         return hw::sensor_frameset{ std::make_shared<hw::sensor_frame>(
             std::move(image),
-            hw::frame_format_t::bgr8,
-            to_us(frame->timestamp)
+            _color_format,
+            frame->timestamp
         ) };
     }
 
@@ -121,10 +115,10 @@ namespace io
         if (_opened) { _reader.seek_timestamp(_stream_id, _reader.last_timestamp()); }
     }
 
-    void mcap_record_player::seek_timestamp(const std::chrono::microseconds offset)
+    void mcap_record_player::seek_timestamp(const hw::timestamp_t timestamp)
     {
         std::scoped_lock lk{ _mtx };
-        if (_opened) { _reader.seek_timestamp(_stream_id, std::chrono::duration_cast<std::chrono::nanoseconds>(offset)); }
+        if (_opened) { _reader.seek_timestamp(_stream_id, timestamp); }
     }
 
     bool mcap_record_player::auto_repeat_enabled() const

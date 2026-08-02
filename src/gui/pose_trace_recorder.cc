@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
+#include <format>
 #include <fstream>
 #include <utility>
 
@@ -40,7 +41,7 @@ namespace gui
     }
 
     void pose_trace_recorder::capture(
-        std::chrono::microseconds sensor_ts,
+        hw::timestamp_t sensor_ts,
         std::span<const pose::tag_detection_t> detections,
         const pose::pose_estimator_base& estimator,
         const trace_gates_t& gates)
@@ -151,8 +152,9 @@ namespace gui
         {
             json jf;
             jf["seq"] = f.seq;
-            jf["t_us"] = f.t.count();
-            jf["t_s"] = std::chrono::duration<double>{ f.t }.count();
+            jf["t_us"] = std::chrono::duration_cast<std::chrono::microseconds>(
+                f.t.time_since_epoch()).count();
+            jf["t_utc"] = std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::milliseconds>(f.t));
             jf["gates"] = {
                 { "has_rest_pose", f.has_rest_pose },
                 { "smoothing_enabled", f.smoothing_enabled },

@@ -1,5 +1,6 @@
 // Offline K4A .mkv recording -> our .mcap recording converter
 #include "hw/backends/k4a_frame_source.hh" // hw::k4a_to_calibration, hw::k4a_color_to_mat
+#include "hw/clock_anchor.hh"
 #include "io/recording_writer.hh"
 
 #include <k4a/k4a.hpp>
@@ -15,10 +16,10 @@
 
 namespace
 {
-    io::image_codec parse_codec(const std::string& name)
+    io::image_codec_t parse_codec(const std::string& name)
     {
-        if (const io::image_codec_desc* desc = io::find_image_codec(name)) { return desc->codec; }
-        throw std::invalid_argument{ "unknown codec '" + name + "' (expected jpeg or raw_bgr8)" };
+        if (const io::image_codec_desc_t* desc = io::find_image_codec(name)) { return desc->codec; }
+        throw std::invalid_argument{ "unknown codec '" + name + "' (expected jpeg or raw)" };
     }
 
     // RAII for the K4A playback handle: the loop below has several throwing exits.
@@ -42,8 +43,8 @@ int main(int argc, char** argv) try
 
     app.add_option("input", input_path, "K4A .mkv recording to read")->required();
     app.add_option("-o,--output", output_path, "Output .mcap path (default: input with .mcap extension)");
-    app.add_option("-c,--codec", codec_name, "Color codec: jpeg or raw_bgr8")->default_val("jpeg");
-    app.add_option("-q,--jpeg-quality", jpeg_quality, "JPEG quality 1-100 (ignored for raw_bgr8)")
+    app.add_option("-c,--codec", codec_name, "Color codec: jpeg or raw")->default_val("jpeg");
+    app.add_option("-q,--jpeg-quality", jpeg_quality, "JPEG quality 1-100 (ignored for raw)")
         ->default_val(90)->check(CLI::Range(1, 100));
     CLI11_PARSE(app, argc, argv);
 
@@ -57,7 +58,7 @@ int main(int argc, char** argv) try
         ? std::filesystem::path{ input }.replace_extension(".mcap")
         : std::filesystem::path{ output_path };
 
-    const io::image_codec codec = parse_codec(codec_name);
+    const io::image_codec_t codec = parse_codec(codec_name);
 
     // --- open the K4A recording -----------------------------------------------------------
     playback_handle playback;
@@ -74,8 +75,8 @@ int main(int argc, char** argv) try
         return 1;
     }
 
-    // Decode every color format (MJPG, NV12, ...) to a common one; k4a_color_to_mat turns that
-    // into BGR, matching what the live pipeline produces.
+    // Whatever the recording holds (MJPG, NV12, ...) is decoded to one format, 
+    // so the conversion below has a single input layout to work from.
     if (K4A_FAILED(::k4a_playback_set_color_conversion(playback.h, K4A_IMAGE_FORMAT_COLOR_BGRA32))) {
         spdlog::error("failed to set color conversion on the recording");
         return 1;
@@ -88,7 +89,7 @@ int main(int argc, char** argv) try
     }
 
     // --- open the output ------------------------------------------------------------------
-    io::recording_writer writer{ io::recording_options{
+    io::recording_writer writer{ io::recording_options_t{
         .codec = codec,
         .encode = { .jpeg_quality = jpeg_quality },
     } };
@@ -97,14 +98,16 @@ int main(int argc, char** argv) try
         return 1;
     }
 
-    const auto stream = writer.add_camera_stream(io::camera_stream_info{
-        .id = "color0",
+    const auto stream = writer.add_camera_stream(io::camera_stream_info_t{
+        .stream_name = "color0",
         .calibration = hw::k4a_to_calibration(k4a_calib),
+        .color_format = hw::frame_format_t::bgr8,
+        .source_backend = hw::source_backend_t::k4a,
+        .source_name = input.filename().string(),
         // K4A recordings do not expose the per-capture exposure/gain through this path,
         // so they are left unset rather than guessed.
         .exposure_us = std::nullopt,
         .gain = std::nullopt,
-        .source_name = input.filename().string(),
     });
     if (!stream.has_value()) {
         spdlog::error("failed to register the camera stream");
@@ -114,6 +117,11 @@ int main(int argc, char** argv) try
     spdlog::info("converting '{}' -> '{}' (codec: {})", input.string(), output.string(), codec_name);
 
     // --- transcode ------------------------------------------------------------------------
+    // A .mkv carries device timestamps and no wall clock, and the playback API exposes no
+    // capture date, so the frames are anchored at the moment of conversion. Their spacing is
+    // exact; their absolute times say when this file was made, matching `create_timestamp`.
+    hw::clock_anchor_t clock_anchor;
+
     uint64_t frames = 0;
     uint64_t skipped = 0;
     for (;;) {
@@ -129,9 +137,9 @@ int main(int argc, char** argv) try
         const k4a::image color = capture.get_color_image();
         if (!color.is_valid() || color.get_size() == 0) { ++skipped; continue; }
 
-        // The recording container carries 8-bit BGR whole frames.
+        // Whole frames, in the layout the stream was registered with.
         const cv::Mat bgr = hw::k4a_color_to_mat(color, hw::frame_format_t::bgr8, std::nullopt);
-        const auto ts = std::chrono::duration_cast<std::chrono::nanoseconds>(color.get_device_timestamp());
+        const auto ts = clock_anchor.to_unix(color.get_device_timestamp());
         if (!writer.write_frame(*stream, bgr, ts)) {
             spdlog::error("failed to write frame {}", frames);
             return 1;
@@ -142,7 +150,7 @@ int main(int argc, char** argv) try
 
     writer.close();
 
-    const io::recording_stats stats = writer.stats();
+    const io::recording_stats_t stats = writer.stats();
     spdlog::info("done: {} frames written ({} frames without color skipped), {:.1f} s, {:.1f} MB",
         stats.frames_written, skipped,
         std::chrono::duration<double>{ stats.duration }.count(),

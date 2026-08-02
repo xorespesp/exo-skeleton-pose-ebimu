@@ -298,8 +298,9 @@ namespace net
                                 if (const auto e = o->exposure_us()) { exposure = *e; }
                                 if (const auto g = o->gain()) { gain = *g; }
 
-                                // The viewing plane, color format, and roi is fixed when the server starts.
-                                // it follows the camera's physical placement, which a remote client cannot change.
+                                // The viewing plane, color format and ROI are fixed when the server starts:
+                                // they follow the camera's physical placement and its wiring,
+                                // which a remote client cannot change.
                                 const auto addr = app::source_address::try_parse(src);
                                 const bool ok = addr.has_value()
                                     && _imp->pipeline.open_source(
@@ -492,7 +493,9 @@ namespace net
 
         const auto joints_vec = b.CreateVector(joints);
         const uint32_t frame_seq = _imp->pipeline.current_frame_seq();
-        const auto pose_frame = fb_proto::CreatePoseFrame(b, frame_seq, _imp->pipeline.last_timestamp().count(), _imp->pipeline.has_rest_pose(), joints_vec);
+        const auto timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            _imp->pipeline.last_timestamp().time_since_epoch()).count();
+        const auto pose_frame = fb_proto::CreatePoseFrame(b, frame_seq, timestamp_us, _imp->pipeline.has_rest_pose(), joints_vec);
 
         b.Finish(fb_proto::CreateMessage(b, fb_proto::Payload_PoseFrame, pose_frame.Union(), kServerNotifyReqId));
         return std::string(std::bit_cast<const char*>(b.GetBufferPointer()), b.GetSize());

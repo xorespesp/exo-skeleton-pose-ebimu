@@ -4,6 +4,8 @@
 #include "tag_detector.hh"
 #include "dsp/one_euro_filter.hh"
 
+#include "hw/timestamp.hh"
+
 #include <Eigen/Geometry>
 
 #include <chrono>
@@ -87,7 +89,7 @@ namespace pose
         // Ingest one frame's detections and recompute every joint state.
         void update(
             std::span<const tag_detection_t> tag_detections,
-            std::chrono::microseconds sensor_timestamp // sensor timestamp of the frame
+            hw::timestamp_t sensor_timestamp // when the source captured the frame
         );
 
         // Latch the current per-joint image-plane points as the rest (bind) reference. Bone angles

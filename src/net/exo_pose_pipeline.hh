@@ -5,6 +5,7 @@
 #include "hw/frame_format.hh"
 #include "hw/roi.hh"
 #include "hw/sensor_frame_provider.hh"
+#include "hw/source_backend.hh"
 #include "io/frame_recorder.hh"
 #include "pose/frontal_pose_estimator.hh"
 #include "pose/sagittal_pose_estimator.hh"
@@ -57,13 +58,13 @@ namespace net
         bool is_source_recording() const;
 
         // --- recording ----------------------------------------------------------------
-        // Captures the live source's frames to recording file. 
+        // Captures the live source's frames to a recording file.
         // (Refused without an open live source)
-        bool start_recording(const std::filesystem::path& path, const io::recording_options& options);
+        bool start_recording(const std::filesystem::path& path, const io::recording_options_t& options);
         void stop_recording(); // drains what is queued, then finalizes the file
 
         bool is_recording() const;
-        io::recording_stats recording_stats() const;
+        io::recording_stats_t recording_stats() const;
         std::filesystem::path recording_path() const;
 
         // --- rest pose ----------------------------------------------------------------
@@ -111,11 +112,12 @@ namespace net
         bool try_get_annotated_frame(
             cv::Mat& out_img,
             std::vector<pose::tag_detection_t>& out_dets,
-            std::chrono::microseconds& out_ts,
+            hw::timestamp_t& out_ts,
             uint64_t& last_seq
         );
 
         // --- source metadata ----------------------------------------------------------
+        hw::source_backend_t source_backend() const;
         std::string source_name() const;
         Eigen::Vector2i source_resolution() const;
         float source_fps() const;
@@ -124,7 +126,7 @@ namespace net
         // Position of the newest frame in the open source's stream; restarts on every open.
         uint32_t current_frame_seq() const;
 
-        std::chrono::microseconds last_timestamp() const { return _last_timestamp; }
+        hw::timestamp_t last_timestamp() const { return _last_timestamp; }
 
         // --- recording playback (no-op without an open recording source) ---------------
         bool is_source_paused() const;
@@ -160,7 +162,7 @@ namespace net
         pose::pose_estimator_base* _active{ nullptr };
         std::vector<pose::tag_detection_t> _detections;
         uint64_t _last_seq{ 0 };
-        std::chrono::microseconds _last_timestamp{ 0 }; // device time of the latched frame
+        hw::timestamp_t _last_timestamp{}; // capture time of the latched frame
         bool _is_recording{ false }; // the open source is a recording file (vs a live camera)
         bool _status_changed{ false }; // a source/rest command changed the reported status; consumed by poll()
 

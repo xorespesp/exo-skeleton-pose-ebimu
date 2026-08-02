@@ -11,8 +11,8 @@ namespace io
 {
     namespace
     {
-        // Bumped when the layout of a recording changes in a way readers must know about.
-        constexpr std::string_view kFormatVersion{ "1" };
+        // Current Recording Format Version (YYMMDDRR)
+        constexpr std::string_view kFormatVersion{ "26080200" };
 
         // FlatBuffers is the message encoding for every channel we write.
         constexpr std::string_view kMessageEncoding{ "flatbuffer" };
@@ -27,19 +27,15 @@ namespace io
             return mcap::ByteArray{ first, first + bytes.size() };
         }
 
-        std::string to_metadata_value(std::optional<int32_t> value)
+        // ISO 8601 in UTC, e.g. "2026-08-02T14:22:07Z".
+        std::string now_iso8601()
         {
-            return value.has_value() ? std::to_string(*value) : std::string{ "auto" };
-        }
-
-        uint64_t unix_now_ns()
-        {
-            return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count());
+            return std::format("{:%FT%TZ}",
+                std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
         }
     } // namespace
 
-    recording_writer::recording_writer(const recording_options& options)
+    recording_writer::recording_writer(const recording_options_t& options)
         : _options{ options }
     { }
 
@@ -52,7 +48,7 @@ namespace io
     {
         if (_writer) { throw std::runtime_error{ "recording_writer: already opened" }; }
 
-        const image_codec_desc* codec = find_image_codec(_options.codec);
+        const image_codec_desc_t* codec = find_image_codec(_options.codec);
         if (!codec) { throw std::invalid_argument{ "recording_writer: unknown image codec" }; }
 
         mcap::McapWriterOptions options{ "" }; // no well-known profile; the schemas describe the messages
@@ -82,16 +78,14 @@ namespace io
             .name = "exo/recording",
             .metadata = {
                 { "format_version", std::string{ kFormatVersion } },
-                { "codec", std::string{ codec->id } },
-                { "jpeg_quality", std::to_string(_options.encode.jpeg_quality) },
-                { "started_unix_ns", std::to_string(unix_now_ns()) },
+                { "create_timestamp", now_iso8601() },
             },
         });
 
         _writer = std::move(writer);
         _path = path;
-        _image_schema = image_schema.id;
-        _calibration_schema = calibration_schema.id;
+        _image_schema_id = image_schema.id;
+        _calibration_schema_id = calibration_schema.id;
         _streams.clear();
         _frames_written.store(0, std::memory_order_relaxed);
         _payload_bytes.store(0, std::memory_order_relaxed);
@@ -106,48 +100,69 @@ namespace io
         return false;
     }
 
-    std::optional<stream_id_t> recording_writer::add_camera_stream(const camera_stream_info& info) noexcept try
+    std::optional<stream_id_t> recording_writer::add_camera_stream(const camera_stream_info_t& info) noexcept try
     {
         if (!_writer) { throw std::runtime_error{ "recording_writer: not opened" }; }
-        if (info.id.empty()) { throw std::invalid_argument{ "recording_writer: camera stream needs an id" }; }
+        if (info.stream_name.empty()) { throw std::invalid_argument{ "recording_writer: camera stream needs a name" }; }
 
         const bool duplicate = std::ranges::any_of(_streams,
-            [&info](const camera_stream& s) { return s.id == info.id; });
+            [&info](const camera_stream_t& s) { return s.stream_name == info.stream_name; }
+        );
+
         if (duplicate) {
             throw std::invalid_argument{ std::format(
-                "recording_writer: camera stream '{}' already registered", info.id) };
+                "recording_writer: camera stream '{}' already registered", info.stream_name) };
         }
 
-        const image_codec_desc* codec = find_image_codec(_options.codec);
+        const image_codec_desc_t* codec = find_image_codec(_options.codec);
         if (!codec) { throw std::invalid_argument{ "recording_writer: unknown image codec" }; }
 
-        // On the channel rather than only in the file metadata, so a reader picks a
-        // decoder per stream.
+        // Everything about this stream sits on its image channel: 
+        // how to decode it, what layout it carries, and which camera produced it.
+        mcap::KeyValueMap image_metadata{
+            { "codec", std::string{ codec->id } },
+            { "color_format", std::string{ hw::frame_format_to_str(info.color_format) } },
+            { "source_backend", std::string{ hw::source_backend_to_str(info.source_backend) } },
+            { "source_name", info.source_name },
+            { "exposure_us", encode_camera_setting(info.exposure_us) },
+            { "gain", encode_camera_setting(info.gain) },
+        };
+
+        // Written only for the codec it steers, so no reader has to wonder what it meant.
+        if (_options.codec == image_codec_t::jpeg) {
+            image_metadata.emplace("jpeg_quality", std::to_string(_options.encode.jpeg_quality));
+        }
+
         mcap::Channel image_channel{
-            std::format("/camera/{}/image", info.id), kMessageEncoding, _image_schema,
-            { { "codec", std::string{ codec->id } } }
+            /*topic*/std::format("/camera/{}/image", info.stream_name),
+            /*messageEncoding*/kMessageEncoding,
+            /*schemaId*/_image_schema_id,
+            /*metadata*/std::move(image_metadata)
         };
         _writer->addChannel(image_channel);
 
+        // NOTE: The calibration travels in the message itself, so the channel carries no metadata.
         mcap::Channel calibration_channel{
-            std::format("/camera/{}/calibration", info.id), kMessageEncoding, _calibration_schema,
-            {
-                { "source_name", info.source_name },
-                { "exposure_us", to_metadata_value(info.exposure_us) },
-                { "gain", to_metadata_value(info.gain) },
-            }
+            /*topic*/std::format("/camera/{}/calibration", info.stream_name),
+            /*messageEncoding*/kMessageEncoding,
+            /*schemaId*/_calibration_schema_id
         };
         _writer->addChannel(calibration_channel);
 
-        _streams.push_back(camera_stream{
-            .id = info.id,
-            .image_channel = image_channel.id,
-            .calibration_channel = calibration_channel.id,
-            .calibration_payload = encode_calibration(info.calibration, info.id),
+        _streams.push_back(camera_stream_t{
+            .stream_name = info.stream_name,
+            .color_format = info.color_format,
+            .image_channel_id = image_channel.id,
+            .calibration_channel_id = calibration_channel.id,
+            .calibration = info.calibration,
         });
 
-        spdlog::info("recording: camera stream '{}' registered ({}x{})",
-            info.id, info.calibration.color_resolution.x(), info.calibration.color_resolution.y());
+        spdlog::info("recording: camera stream '{}' registered ({}x{}, {})"
+            , info.stream_name
+            , info.calibration.color_resolution.x()
+            , info.calibration.color_resolution.y()
+            , hw::frame_format_to_str(info.color_format)
+        );
 
         return static_cast<stream_id_t>(_streams.size() - 1);
     }
@@ -159,32 +174,45 @@ namespace io
 
     bool recording_writer::write_frame(
         const stream_id_t stream_id,
-        const cv::Mat& bgr,
-        const std::chrono::nanoseconds device_timestamp) noexcept try
+        const cv::Mat& image,
+        const hw::timestamp_t timestamp) noexcept try
     {
         if (!_writer) { throw std::runtime_error{ "recording_writer: not opened" }; }
         if (stream_id >= _streams.size()) { throw std::invalid_argument{ "recording_writer: unknown camera stream" }; }
 
-        camera_stream& s = _streams[stream_id];
+        camera_stream_t& s = _streams[stream_id];
 
-        // The calibration rides the first frame's timestamp rather than time zero, so
-        // the recording's time range stays the range of its frames.
+        // Encoded on the first frame so it carries that frame's time,
+        // which keeps the recording's time range exactly the range of its frames.
         if (!s.calibration_written) {
-            this->_write_message(s.calibration_channel, 0, device_timestamp, s.calibration_payload);
+            const std::vector<std::byte> calibration_payload = encode_calibration(
+                s.calibration,
+                /*timestamp*/timestamp,
+                // The stream's name is also its coordinate frame, 
+                // so the calibration and the images below carry the same one and a viewer pairs them up.
+                /*coord_frame_id*/s.stream_name
+            );
+            this->_write_mcap_message(s.calibration_channel_id, 0/*msg_sequence*/, timestamp, calibration_payload);
             s.calibration_written = true;
         }
 
-        const std::vector<std::byte> payload = encode_frame(
-            _options.codec, bgr, device_timestamp, s.id, _options.encode);
-        this->_write_message(s.image_channel, s.sequence++, device_timestamp, payload);
+        const std::vector<std::byte> image_payload = encode_frame(
+            _options.codec, 
+            image, 
+            s.color_format, 
+            timestamp,
+            /*coord_frame_id*/s.stream_name,
+            _options.encode
+        );
+        this->_write_mcap_message(s.image_channel_id, s.next_image_sequence++, timestamp, image_payload);
 
         _frames_written.fetch_add(1, std::memory_order_relaxed);
-        _payload_bytes.fetch_add(payload.size(), std::memory_order_relaxed);
+        _payload_bytes.fetch_add(image_payload.size(), std::memory_order_relaxed);
         if (!_has_frames.load(std::memory_order_relaxed)) {
-            _first_timestamp_ns.store(device_timestamp.count(), std::memory_order_relaxed);
+            _first_timestamp.store(timestamp, std::memory_order_relaxed);
             _has_frames.store(true, std::memory_order_relaxed);
         }
-        _last_timestamp_ns.store(device_timestamp.count(), std::memory_order_relaxed);
+        _last_timestamp.store(timestamp, std::memory_order_relaxed);
 
         return true;
     }
@@ -194,23 +222,23 @@ namespace io
         return false;
     }
 
-    void recording_writer::_write_message(
-        const uint16_t channel,
-        const uint32_t sequence,
-        const std::chrono::nanoseconds timestamp,
-        const std::span<const std::byte> payload)
+    void recording_writer::_write_mcap_message(
+        const uint16_t channel_id,
+        const uint32_t msg_sequence,
+        const hw::timestamp_t timestamp,
+        const std::span<const std::byte> msg_payload)
     {
-        const auto time = static_cast<mcap::Timestamp>(timestamp.count());
+        const auto time = static_cast<mcap::Timestamp>(timestamp.time_since_epoch().count());
 
-        mcap::Message message{};
-        message.channelId = channel;
-        message.sequence = sequence;
-        message.logTime = time;
-        message.publishTime = time;
-        message.dataSize = payload.size();
-        message.data = payload.data();
+        mcap::Message mcap_msg{};
+        mcap_msg.channelId = channel_id;
+        mcap_msg.sequence = msg_sequence;
+        mcap_msg.logTime = time;
+        mcap_msg.publishTime = time;
+        mcap_msg.dataSize = msg_payload.size();
+        mcap_msg.data = msg_payload.data();
 
-        if (const mcap::Status status = _writer->write(message); !status.ok()) {
+        if (const mcap::Status status = _writer->write(mcap_msg); !status.ok()) {
             throw std::runtime_error{ std::format("failed to write message: {}", status.message) };
         }
     }
@@ -223,28 +251,29 @@ namespace io
         _writer.reset();
         _streams.clear();
 
-        const recording_stats s = this->stats();
-        spdlog::info("recording closed: {} ({} frames, {:.1f} s, {:.1f} MB)",
-            _path.string(),
-            s.frames_written,
-            std::chrono::duration<double>{ s.duration }.count(),
-            static_cast<double>(s.file_bytes) / (1024.0 * 1024.0));
+        const recording_stats_t final_stats = this->stats();
+        spdlog::info("recording closed: {} ({} frames, {:.1f} s, {:.1f} MB)"
+            , _path.string()
+            , final_stats.frames_written
+            , std::chrono::duration<double>{ final_stats.duration }.count()
+            , static_cast<double>(final_stats.file_bytes) / (1024.0 * 1024.0)
+        );
     }
 
-    recording_stats recording_writer::stats() const noexcept
+    recording_stats_t recording_writer::stats() const noexcept
     {
         std::error_code ec;
         const uint64_t size = _path.empty() ? 0u : std::filesystem::file_size(_path, ec);
 
-        const auto first = _first_timestamp_ns.load(std::memory_order_relaxed);
-        const auto last = _last_timestamp_ns.load(std::memory_order_relaxed);
+        const auto first = _first_timestamp.load(std::memory_order_relaxed);
+        const auto last = _last_timestamp.load(std::memory_order_relaxed);
         const bool has_frames = _has_frames.load(std::memory_order_relaxed);
 
-        return recording_stats{
+        return recording_stats_t{
             .frames_written = _frames_written.load(std::memory_order_relaxed),
             .payload_bytes = _payload_bytes.load(std::memory_order_relaxed),
             .file_bytes = ec ? 0u : size,
-            .duration = has_frames ? std::chrono::nanoseconds{ last - first } : std::chrono::nanoseconds{ 0 },
+            .duration = has_frames ? (last - first) : std::chrono::nanoseconds{ 0 },
         };
     }
 

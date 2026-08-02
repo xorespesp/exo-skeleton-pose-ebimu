@@ -38,6 +38,7 @@ namespace hw
         [[nodiscard]] bool open(const source_config_t& config) noexcept;
         void close();
 
+        source_backend_t get_source_backend() const { return _source_backend; }
         const std::string& get_source_name() const { return _source_name; }
 
         // Describes the images observers actually receive, not the raw sensor:
@@ -61,11 +62,11 @@ namespace hw
         // Recording sources only (no-op / 0 otherwise).
         void seek_recording_to_begin();
         void seek_recording_to_end();
-        void seek_recording_timeline(std::chrono::microseconds timestamp);
+        void seek_recording_timeline(timestamp_t timestamp);
 
-        std::chrono::microseconds get_recording_length() const;
-        std::chrono::microseconds get_first_record_timestamp() const;
-        std::chrono::microseconds get_last_record_timestamp() const;
+        std::chrono::nanoseconds get_recording_length() const;
+        timestamp_t get_first_record_timestamp() const;
+        timestamp_t get_last_record_timestamp() const;
 
         float get_update_speed() const { return _speed.load(); }
         void  set_update_speed(float factor);
@@ -76,6 +77,7 @@ namespace hw
     private:
         void _install_source(
             std::unique_ptr<sensor_frame_source> source,
+            source_backend_t source_backend,
             std::string source_name,
             const std::optional<roi_t>& requested_roi
         );
@@ -106,6 +108,7 @@ namespace hw
         calibration_t _calib{};
         Eigen::Vector2i _color_resolution{ Eigen::Vector2i::Zero() };
         Eigen::Vector2f _color_fov{ Eigen::Vector2f::Zero() };
+        source_backend_t _source_backend{};
         std::string _source_name;
         frame_format_t _color_format{};
         std::optional<roi_t> _color_roi; // ROI in force

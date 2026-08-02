@@ -23,21 +23,20 @@ namespace io
 
         const hw::calibration_t& get_calibration() const override { return _calib; }
 
-        // Recordings carry 8-bit BGR, so there is nothing here to request.
-        hw::frame_format_t get_color_format() const override { return hw::frame_format_t::bgr8; }
+        hw::frame_format_t get_color_format() const override { return _color_format; }
 
         // A recording holds whole frames, so this is a software crop.
         std::optional<hw::roi_t> try_set_color_roi(const hw::roi_t& roi) override;
 
         [[nodiscard]] std::optional<hw::sensor_frameset> fetch_next_sensor_frameset() override;
 
-        std::chrono::microseconds get_recording_length() const override { return _last_ts - _first_ts; }
-        std::chrono::microseconds get_first_record_timestamp() const override { return _first_ts; }
-        std::chrono::microseconds get_last_record_timestamp() const override { return _last_ts; }
+        std::chrono::nanoseconds get_recording_length() const override { return _last_timestamp - _first_timestamp; }
+        hw::timestamp_t get_first_record_timestamp() const override { return _first_timestamp; }
+        hw::timestamp_t get_last_record_timestamp() const override { return _last_timestamp; }
 
         void seek_begin() override;
         void seek_end() override;
-        void seek_timestamp(std::chrono::microseconds offset) override;
+        void seek_timestamp(hw::timestamp_t timestamp) override;
 
         bool auto_repeat_enabled() const override;
         void enable_auto_repeat(bool enable) override;
@@ -48,9 +47,10 @@ namespace io
         bool _opened{ false };
         stream_id_t _stream_id{ 0 }; // the camera stream being played back
         hw::calibration_t _calib{};
+        hw::frame_format_t _color_format{};
         std::optional<hw::roi_t> _color_roi; // nullopt: whole frames
-        std::chrono::microseconds _first_ts{ 0 };
-        std::chrono::microseconds _last_ts{ 0 };
+        hw::timestamp_t _first_timestamp{};
+        hw::timestamp_t _last_timestamp{};
         bool _auto_repeat{ false };
     };
 

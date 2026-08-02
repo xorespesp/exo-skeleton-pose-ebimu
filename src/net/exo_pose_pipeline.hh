@@ -49,7 +49,6 @@ namespace net
             double tag_size_m,             // printed black-square edge length [m]
             std::optional<int32_t> exposure_us,  // optional (nullopt: auto exposure)
             std::optional<int32_t> gain,       // optional (nullopt: auto gain)
-            hw::frame_format_t color_format,   // pixel layout to ask the source for
             std::optional<hw::roi_t> color_roi // optional (nullopt: stream whole frames)
         );
         void close_source();

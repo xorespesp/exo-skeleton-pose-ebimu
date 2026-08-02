@@ -36,7 +36,7 @@ namespace gui
         positions,     // per-joint position channels over time, in plot space (2D line subplot grid)
     };
 
-    enum class source_kind_t { device, recording };
+    enum class source_kind_t { k4a_device, vz_device, recording };
 
     // Debugger GUI for the pose server: starts/stops the WebSocket listener and drives the pose
     // pipeline (source open/close, rest-pose calibration) while visualizing the annotated frame
@@ -53,8 +53,8 @@ namespace gui
         void render_ui() override;
 
     private:
-        void _open_device(uint32_t index, pose::view_plane_t view_plane);
-        void _open_recording(const std::string& path, pose::view_plane_t view_plane);
+        // Hands the address to the pipeline and restarts the plots for the new source.
+        void _open_source(const app::source_address& address, pose::view_plane_t view_plane);
 
         void _do_open_source();
         void _do_close_source();
@@ -66,10 +66,7 @@ namespace gui
         void _render_menu_bar();
         void _render_control_panel();
 
-        // Estimator tuning, one function per viewing plane. The two estimators keep separate option
-        // types (their algorithms share no knobs), so the panels cannot be folded into one; the
-        // caller picks by asking the pipeline which options exist rather than testing the plane
-        // itself.
+        // Estimator tuning, one function per viewing plane.
         void _render_frontal_estimator_control(pose::frontal_pose_estimator::options_t& opt);
         void _render_sagittal_estimator_control(pose::sagittal_pose_estimator::options_t& opt);
         void _render_recording_status(); // live counters while a recording is being written
@@ -128,9 +125,9 @@ namespace gui
 
             // open-source dialog
             bool open_dlg_show{ false };
-            source_kind_t open_dlg_kind{ source_kind_t::device };
+            source_kind_t open_dlg_kind{ source_kind_t::k4a_device };
             pose::view_plane_t open_dlg_view_plane{ pose::view_plane_t::frontal };
-            int open_dlg_device{ 0 };
+            int open_dlg_device{ 0 }; // index within whichever camera backend is selected
             bool open_dlg_manual_exposure{ false };
             int open_dlg_exposure{ 8000 };
             bool open_dlg_manual_gain{ false };

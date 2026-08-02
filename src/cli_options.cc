@@ -13,18 +13,23 @@ namespace app
             { "sagittal", pose::view_plane_t::sagittal },
         };
 
-        const std::map<std::string, hw::frame_format_t> kFrameFormats{
-            { "bgr8",  hw::frame_format_t::bgr8  },
-            { "gray8", hw::frame_format_t::gray8 },
-        };
     } // namespace
 
     void add_source_options(CLI::App& app, source_options& o)
     {
-        auto* device = app.add_option_function<uint32_t>(
+        auto* device = app.add_option_function<std::string>(
             "-d,--device",
-            [&o](const uint32_t index) { o.source_addr = source_address::device(index); },
-            "Camera device index to open");
+            [&o](const std::string& text) {
+                const std::optional<source_address> addr = source_address::try_parse(text);
+                // A path parses fine but belongs to --input, so it is refused here rather than
+                // quietly opening a recording from the camera option.
+                if (!addr.has_value() || addr->is_recording()) {
+                    throw CLI::ValidationError(
+                        "--device", "expected k4a:<index> or vz:<index>");
+                }
+                o.source_addr = *addr;
+            },
+            "Camera to open: k4a:<index> | vz:<index>");
 
         auto* input = app.add_option_function<std::string>(
             "-i,--input",
@@ -43,10 +48,6 @@ namespace app
         app.add_option("-s,--tag-size", o.tag_size_m, "AprilTag black-square edge length [m]")->default_val(0.05);
         app.add_option("-e,--exposure-us", o.exposure_us, "Manual color exposure [us] (default: auto)");
         app.add_option("-g,--gain", o.gain, "Manual color gain (default: auto)");
-
-        app.add_option("--color-format", o.color_format, "Frame pixel layout: bgr8 | gray8")
-            ->transform(CLI::CheckedTransformer(kFrameFormats, CLI::ignore_case))
-            ->default_str("bgr8");
 
         // Four values rather than a parsed string, so CLI11 reports a malformed rectangle
         // rather than this code having to.

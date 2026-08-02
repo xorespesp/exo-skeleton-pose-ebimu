@@ -298,7 +298,7 @@ namespace net
                                 if (const auto e = o->exposure_us()) { exposure = *e; }
                                 if (const auto g = o->gain()) { gain = *g; }
 
-                                // The viewing plane, color format and ROI are fixed when the server starts:
+                                // The viewing plane and the ROI are fixed when the server starts:
                                 // they follow the camera's physical placement and its wiring,
                                 // which a remote client cannot change.
                                 const auto addr = app::source_address::try_parse(src);
@@ -307,11 +307,13 @@ namespace net
                                         *addr, _imp->initial.view_plane, 
                                         o->tag_size_m(), 
                                         exposure, gain,
-                                        _imp->initial.color_format, 
                                         _imp->initial.color_roi
                                     );
                                 ack = this->_serialize_ack(ok,
-                                    !addr.has_value() ? "empty source" : (ok ? "source opened" : "open failed"), req);
+                                    !addr.has_value()
+                                        ? "source must be k4a:<index>, vz:<index> or a recording path"
+                                        : (ok ? "source opened" : "open failed"),
+                                    req);
                                 break;
                             }
                             case fb_proto::Payload_CloseSourceStream:
@@ -420,7 +422,6 @@ namespace net
                 _imp->initial.tag_size_m,
                 _imp->initial.exposure_us,
                 _imp->initial.gain,
-                _imp->initial.color_format,
                 _imp->initial.color_roi
             );
         }

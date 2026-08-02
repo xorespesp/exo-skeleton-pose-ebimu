@@ -1,6 +1,7 @@
 #pragma once
 #include <opencv2/core.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -24,9 +25,6 @@ namespace vz
     // The SDK headers are confined to the .cc through a pimpl: the Galaxy API reports
     // failures by throwing, so every entry point here converts that into a bool plus
     // `last_err_msg()`, matching the noexcept/bool style the sensor backends use.
-    //
-    // Acquisition is pull-based (`IGXStream::GetImage`) on a worker thread that publishes
-    // the newest converted frame; the UI reads whatever is current without blocking.
 
     struct device_info_t
     {
@@ -79,6 +77,40 @@ namespace vz
     // Output format of each capture.
     enum class frame_format_t { bgr, gray };
 
+    // The capture clock
+    //
+    // Every capture carries a counter read off the camera's own clock. Neither SDK layer says
+    // what that counter counts in. Galaxy's `IImageData::GetTimeStamp()` is documented as "get
+    // the time stamp of the image" and nothing further; the Vieworks wrapper's
+    // `IMAGEDATA::_TimeStamp` carries no comment at all while its neighbours in the same struct
+    // do; and the package ships no manual.
+    //
+    // GenICam names the rate wherever it can vary. A GigE Vision camera answers
+    // `GevTimestampTickFrequency` or one of its spellings. This camera implements none of them,
+    // and that absence is the answer rather than a gap: USB3 Vision fixes the counter at one
+    // tick per nanosecond, which leaves no rate to name.
+    //
+    // So the rate comes from a node where one exists, and is taken as nanoseconds where none
+    // does. That assumption is then measured against the host clock over the opening captures
+    // of every stream, which on a VZ-5MU-C79H00 lands within a percent of 1 GHz.
+    //
+    // The measurement only ever confirms or contradicts. It is sampled around the transfer and
+    // carries scheduling noise, so adopting it would trade a rate that is exact by
+    // specification for one that is merely close, and that error would multiply into every
+    // interval. A rate off by orders of magnitude, on the other hand, cannot hide from it.
+    //
+    // The epoch is the camera's own, counting from power-up, so only differences between
+    // captures carry meaning. Lifting those onto a wall clock is `hw::clock_anchor_t`'s job.
+
+    // One capture taken by `grab_frame()`.
+    struct captured_frame_t
+    {
+        cv::Mat image; // in the configured `frame_format_t`
+
+        // Empty where the counter never advances, which leaves a consumer with arrival time as its only clock.
+        std::optional<std::chrono::nanoseconds> device_timestamp;
+    };
+
     struct stream_stats_t
     {
         uint64_t frames{ 0 };      // frames delivered with `GX_FRAME_STATUS_SUCCESS`
@@ -114,14 +146,17 @@ namespace vz
         void stop_stream();
         bool is_streaming() const;
 
-        // Selects what `latest_frame()` delivers.
-        // (safe to change while streaming; the worker picks it up on the next capture)
+        // Selects the layout every capture is converted into.
+        // (safe to change while streaming; the next capture picks it up)
         void set_frame_format(frame_format_t mode);
         frame_format_t frame_format() const;
 
-        // Newest capture in the configured format (8-bit BGR or 8-bit single channel);
-        // empty until the first one arrives.
-        cv::Mat latest_frame() const;
+        // Blocks until a capture arrives or `timeout_ms` passes. 
+        // Empty on timeout and on a frame the transport reported as partial.
+        //
+        // The only way frames leave this class, and one stream is being drained, so only one caller may sit in here at a time.
+        // Whoever needs the newest frame without waiting runs this on a thread of their own and keeps what it returns.
+        [[nodiscard]] std::optional<captured_frame_t> grab_frame(uint32_t timeout_ms);
 
         stream_stats_t stats() const;
 

@@ -1,7 +1,6 @@
 #pragma once
 #include "source_address.hh"
 
-#include "hw/frame_format.hh"
 #include "hw/roi.hh"
 #include "pose/view_plane.hh"
 
@@ -24,9 +23,6 @@ namespace app
 
         // Where the camera stands relative to the exo; picks the pose estimator.
         pose::view_plane_t view_plane{ pose::view_plane_t::frontal };
-
-        // Pixel layout to ask a camera for.
-        hw::frame_format_t color_format{};
 
         std::optional<hw::roi_t> color_roi; // nullopt: stream whole frames
     };

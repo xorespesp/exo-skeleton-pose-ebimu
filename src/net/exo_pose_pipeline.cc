@@ -43,6 +43,14 @@ namespace net
             }
             return s.empty() ? std::string{ "none" } : s;
         }
+
+        // The camera controls arrive as integers from the command line and the protocol alike;
+        // the VZ camera states its exposure and gain in fractional units.
+        std::optional<double> to_optional_double(const std::optional<int32_t> value)
+        {
+            if (!value.has_value()) { return std::nullopt; }
+            return static_cast<double>(*value);
+        }
     } // namespace
 
     // --- observer (worker thread) ------------------------------------------------
@@ -123,7 +131,23 @@ namespace net
                 // Intrinsics are what turn pose estimation on. Leaving them out when the estimator
                 // works off 2D tag centers skips the per-tag pose solve entirely, which is the bulk
                 // of the detector's cost.
-                if (_estimate_tag_pose) { opt.intrinsics = _provider.get_calibration().color_intr; }
+                //
+                // A source that carries no intrinsics reports them zeroed, and a zero focal length
+                // solves to nonsense instead of failing. Withholding them is the honest answer:
+                // the joints then read as untracked rather than as plausible wrong positions.
+                if (_estimate_tag_pose) {
+                    if (const hw::intrinsic_t& intr = _provider.get_calibration().color_intr;
+                        intr.fx > 0.0f && intr.fy > 0.0f)
+                    {
+                        opt.intrinsics = intr;
+                    }
+                    else
+                    {
+                        spdlog::warn("pipeline: '{}' reports no intrinsics, so tag poses cannot be "
+                                     "solved and the frontal estimator will track nothing",
+                            _provider.get_source_name());
+                    }
+                }
                 opt.tag_size_m = tuning.tag_size_m;
                 opt.quad_decimate = tuning.quad_decimate;
                 opt.quad_sigma = tuning.quad_sigma;
@@ -222,7 +246,6 @@ namespace net
         double tag_size_m,
         std::optional<int32_t> exposure_us,
         std::optional<int32_t> gain,
-        hw::frame_format_t color_format,
         std::optional<hw::roi_t> color_roi)
     {
         _status_changed = true; // opening a source changes the reported status (even on failure)
@@ -239,15 +262,24 @@ namespace net
         new_observer->set_tuning(_tuning);   // carry the current tuning into the new source
         new_provider->add_observer(new_observer);
 
-        // TODO: a device index can only mean the K4A camera. Reaching a second one needs the
-        // source address to name the backend (e.g. "k4a:0" / "vz:<serial>").
+        // tag detector only needs grayscale
+        constexpr auto kCameraColorFormat = hw::frame_format_t::gray8;
+
         hw::source_config_t source_config;
-        if (source_addr.is_device()) {
+        if (source_addr.is_k4a_device()) {
             source_config = hw::k4a_device_config{
-                .device_index = source_addr.device_index(),
+                .device_index = source_addr.k4a_device_index(),
                 .exposure_us = exposure_us,
                 .gain = gain,
-                .color_format = color_format,
+                .color_format = kCameraColorFormat,
+                .color_roi = color_roi,
+            };
+        } else if (source_addr.is_vz_device()) {
+            source_config = hw::vz_device_config{
+                .device_index = source_addr.vz_device_index(),
+                .exposure_us = to_optional_double(exposure_us),
+                .gain = to_optional_double(gain),
+                .color_format = kCameraColorFormat,
                 .color_roi = color_roi,
             };
         } else {
@@ -257,15 +289,14 @@ namespace net
             };
         }
 
-        const char* kind = source_addr.is_device() ? "device" : "recording";
-        spdlog::info("pipeline: opening {} '{}' ({} view, tag size {:.3f} m, exposure {}, gain {}, {})"
+        const char* kind = source_addr.is_recording() ? "recording" : "camera";
+        spdlog::info("pipeline: opening {} '{}' ({} view, tag size {:.3f} m, exposure {}, gain {})"
             , kind
             , source_addr.to_string()
             , pose::view_plane_name(view_plane)
             , tag_size_m
             , exposure_us.has_value() ? std::format("{} us", exposure_us.value()) : "auto"
             , gain.has_value() ? std::format("{}", gain.value()) : "auto"
-            , hw::frame_format_to_str(color_format)
         );
 
         if (_provider) {

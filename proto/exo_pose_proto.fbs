@@ -33,7 +33,9 @@ table Hello {
 }
 
 table OpenSourceStream {
-    source: string;            // source identifier (e.g. camera device index)
+    // What to open: "k4a:<index>" or "vz:<index>" for a camera,
+    // anything else a recording file path.
+    source: string;
     tag_size_m: double = 0.05; // marker's black square edge length, in meters
     exposure_us: int = null;   // color exposure time, in microseconds; optional (null == auto)
     gain: int = null;          // color sensor gain; optional (null == auto)

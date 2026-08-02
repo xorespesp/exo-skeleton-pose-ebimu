@@ -29,7 +29,7 @@ namespace hw
     // Vieworks VZ-5MU-C79H00 camera.
     struct vz_device_config
     {
-        std::string serial;                // empty: the first camera enumerated
+        uint32_t device_index{ 0 };        // position in the enumeration
         std::optional<double> exposure_us; // nullopt: leave the camera's current setting
         std::optional<double> gain;        // nullopt: leave the camera's current setting
 

@@ -3,7 +3,7 @@
 // Exercises the pieces a sensor backend needs (discovery, open, pull-based acquisition,
 // debayering, exposure/gain, ROI, GenICam node access) against a live camera.
 
-#include "vz_device.hh"
+#include "hw/backends/vz_device.hh"
 
 #include "gui/app_base.hh"
 #include "gui/app_renderer_sdl3.hh"
@@ -18,9 +18,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace
@@ -29,6 +31,59 @@ namespace
     constexpr const char* kIdentityNodes[] = {
         "DeviceVendorName", "DeviceModelName", "DeviceSerialNumber",
         "DeviceFirmwareVersion", "DeviceVersion", "DeviceUserID",
+    };
+
+    // Keeps the newest capture on hand for the render loop.
+    //
+    // `vz::device` hands frames out one blocking call at a time, so somebody has to wait on
+    // that call, and a loop that draws every frame cannot be the one. This drains the stream
+    // on its own thread and keeps only the latest, which is all a preview needs.
+    class frame_latch_t final
+    {
+    public:
+        ~frame_latch_t() { this->stop(); }
+
+        void start(vz::device& device)
+        {
+            this->stop();
+            _thread = std::jthread{ [this, &device](std::stop_token stop)
+            {
+                while (!stop.stop_requested())
+                {
+                    std::optional<vz::captured_frame_t> captured = device.grab_frame(kGrabTimeoutMs);
+                    if (!captured.has_value()) {
+                        // A timed-out grab has already waited out its share; a stream that is
+                        // gone would otherwise spin here.
+                        if (!device.is_streaming()) { break; }
+                        continue;
+                    }
+                    std::scoped_lock lk{ _mtx };
+                    _frame = std::move(captured->image);
+                }
+            } };
+        }
+
+        void stop()
+        {
+            _thread = {}; // requests the stop and joins
+
+            std::scoped_lock lk{ _mtx };
+            _frame.release();
+        }
+
+        // Empty until the first capture arrives.
+        cv::Mat latest() const
+        {
+            std::scoped_lock lk{ _mtx };
+            return _frame;
+        }
+
+    private:
+        static constexpr uint32_t kGrabTimeoutMs = 500;
+
+        mutable std::mutex _mtx;
+        cv::Mat _frame;
+        std::jthread _thread; // declared last: joined before the frame it writes goes away
     };
 
     class vzcam_test_app final : public gui::app_base<gui::app_renderer_sdl3>
@@ -46,6 +101,7 @@ namespace
             spdlog::info("vzcam-test ready: press Enumerate to discover cameras");
 
             this->app_base::run();
+            _grabber.stop();
             _dev.close();
             this->destroy();
             return 0;
@@ -127,8 +183,11 @@ namespace
         // Runs on the UI thread, so the reported rate is what one consumer would reach.
         void _update_detection()
         {
-            const cv::Mat frame = _dev.latest_frame();
-            if (frame.empty()) { _display.release(); return; }
+            const cv::Mat frame = _grabber.latest();
+            if (frame.empty()) {
+                _display.release();
+                return;
+            }
 
             const uint64_t seq = _dev.stats().frames;
 
@@ -171,7 +230,10 @@ namespace
         {
             // ROI nodes are locked while streaming, so bracket the write with stop/resume.
             const bool was_streaming = _dev.is_streaming();
-            if (was_streaming) { _dev.stop_stream(); }
+            if (was_streaming) {
+                _grabber.stop();
+                _dev.stop_stream();
+            }
 
             const bool ok = _dev.set_roi(roi);
             _roi_edit_valid = false;
@@ -180,7 +242,9 @@ namespace
                 spdlog::info("vz: ROI apply {} -> {}x{} @ {},{}",
                     ok ? "ok" : "partial", now->width, now->height, now->offset_x, now->offset_y);
             }
-            if (was_streaming) { (void)_dev.start_stream(); }
+            if (was_streaming && _dev.start_stream()) {
+                _grabber.start(_dev);
+            }
         }
 
         void _rebuild_detector()
@@ -395,7 +459,10 @@ namespace
 
                 ImGui::SameLine();
                 ImGui::BeginDisabled(!_dev.is_open());
-                if (ImGui::Button("Close")) { _dev.close(); }
+                if (ImGui::Button("Close")) {
+                    _grabber.stop();
+                    _dev.close();
+                }
                 ImGui::EndDisabled();
             }
 
@@ -409,11 +476,16 @@ namespace
             // ----- acquisition -----
             if (ImGui::CollapsingHeader("Acquisition", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::BeginDisabled(_dev.is_streaming());
-                if (ImGui::Button("Start")) { (void)_dev.start_stream(); }
+                if (ImGui::Button("Start")) {
+                    if (_dev.start_stream()) { _grabber.start(_dev); }
+                }
                 ImGui::EndDisabled();
                 ImGui::SameLine();
                 ImGui::BeginDisabled(!_dev.is_streaming());
-                if (ImGui::Button("Stop")) { _dev.stop_stream(); }
+                if (ImGui::Button("Stop")) {
+                    _grabber.stop();
+                    _dev.stop_stream();
+                }
                 ImGui::EndDisabled();
 
                 const vz::stream_stats_t s = _dev.stats();
@@ -656,6 +728,7 @@ namespace
 
     private:
         vz::device _dev;
+        frame_latch_t _grabber;
         std::vector<vz::device_info_t> _devices;
         int _selected{ -1 };
 

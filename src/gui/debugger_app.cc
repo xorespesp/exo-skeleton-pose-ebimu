@@ -233,13 +233,16 @@ namespace gui
         if (opt.gain.has_value()) { _ui.open_dlg_manual_gain = true; _ui.open_dlg_gain = opt.gain.value(); }
         _ui.open_dlg_view_plane = opt.view_plane; // command-line viewing plane seeds the dialog
 
-        // The dialog holds a value per kind so toggling does not discard what was typed;
-        // only fill the one the command line named.
+        // The camera index and the recording path sit side by side, so switching between them
+        // discards neither; only the one the command line named is filled.
         if (opt.source_addr.has_value())
         {
-            if (opt.source_addr->is_device()) {
-                _ui.open_dlg_device = static_cast<int>(opt.source_addr->device_index());
-                _ui.open_dlg_kind = source_kind_t::device;
+            if (opt.source_addr->is_k4a_device()) {
+                _ui.open_dlg_device = static_cast<int>(opt.source_addr->k4a_device_index());
+                _ui.open_dlg_kind = source_kind_t::k4a_device;
+            } else if (opt.source_addr->is_vz_device()) {
+                _ui.open_dlg_device = static_cast<int>(opt.source_addr->vz_device_index());
+                _ui.open_dlg_kind = source_kind_t::vz_device;
             } else {
                 _ui.open_dlg_recording = opt.source_addr->recording_path().string();
                 _ui.open_dlg_kind = source_kind_t::recording;
@@ -389,32 +392,17 @@ namespace gui
         }
     }
 
-    void debugger_app::_open_device(uint32_t index, pose::view_plane_t view_plane)
+    void debugger_app::_open_source(const app::source_address& address, pose::view_plane_t view_plane)
     {
-        _server->pipeline().open_source(
-            app::source_address::device(index),
-            view_plane,
-            _opt.tag_size_m,
-            _opt.exposure_us, 
-            _opt.gain,
-            _opt.color_format, 
-            _opt.color_roi
-        );
-        _last_seq = 0;
-        _pos_plot_bufs.clear(); // restart the positions-plot timeline for the new source
-        _raw_skel_positions = {};
-        _skel_plot_autofit_frames = kNumAutofitFrames; // re-fit the 3D box over the next frames of the new source
-    }
+        // A recording already carries the settings it was shot with; only a live camera takes them.
+        const bool live = address.is_device();
 
-    void debugger_app::_open_recording(const std::string& path, pose::view_plane_t view_plane)
-    {
         _server->pipeline().open_source(
-            app::source_address::recording(path),
+            address,
             view_plane,
             _opt.tag_size_m,
-            std::nullopt, 
-            std::nullopt,
-            _opt.color_format, 
+            live ? _opt.exposure_us : std::nullopt,
+            live ? _opt.gain : std::nullopt,
             _opt.color_roi
         );
         _last_seq = 0;
@@ -432,13 +420,18 @@ namespace gui
             if (_ui.open_dlg_recording.empty()) { spdlog::warn("no recording file selected"); return; }
             _opt.exposure_us.reset();
             _opt.gain.reset();
-            this->_open_recording(_ui.open_dlg_recording, _ui.open_dlg_view_plane);
+            this->_open_source(app::source_address::recording(_ui.open_dlg_recording), _ui.open_dlg_view_plane);
         }
         else
         {
             _opt.exposure_us = _ui.open_dlg_manual_exposure ? std::optional<int32_t>{ _ui.open_dlg_exposure } : std::nullopt;
             _opt.gain = _ui.open_dlg_manual_gain ? std::optional<int32_t>{ _ui.open_dlg_gain } : std::nullopt;
-            this->_open_device(static_cast<uint32_t>(_ui.open_dlg_device), _ui.open_dlg_view_plane);
+
+            const auto index = static_cast<uint32_t>(_ui.open_dlg_device);
+            const app::source_address address = (_ui.open_dlg_kind == source_kind_t::vz_device)
+                ? app::source_address::vz_device(index)
+                : app::source_address::k4a_device(index);
+            this->_open_source(address, _ui.open_dlg_view_plane);
         }
         _ui.open_dlg_show = false;
     }
@@ -1306,33 +1299,39 @@ namespace gui
             const auto kind_radio = [this](const char* label, source_kind_t val) {
                 if (ImGui::RadioButton(label, _ui.open_dlg_kind == val)) { _ui.open_dlg_kind = val; }
             };
-            kind_radio("Device", source_kind_t::device);
+            kind_radio("K4A camera", source_kind_t::k4a_device);
+            ImGui::SameLine();
+            kind_radio("VZ camera", source_kind_t::vz_device);
             ImGui::SameLine();
             kind_radio("Recording", source_kind_t::recording);
             ImGui::Separator();
 
-            if (_ui.open_dlg_kind == source_kind_t::device)
+            if (_ui.open_dlg_kind == source_kind_t::recording)
             {
+                if (ImGui::Button("Browse...")) { _file_dialog.Open(); }
+                ImGui::SameLine();
+                ImGui::TextUnformatted(_ui.open_dlg_recording.empty() ? "(no file selected)" : _ui.open_dlg_recording.c_str());
+            }
+            else
+            {
+                // Both backends name a camera by its position in their own enumeration, so one
+                // field serves either.
                 ImGui::InputInt("Device index", &_ui.open_dlg_device);
                 if (_ui.open_dlg_device < 0) { _ui.open_dlg_device = 0; }
+
                 ImGui::Checkbox("Manual exposure [us]", &_ui.open_dlg_manual_exposure);
                 if (_ui.open_dlg_manual_exposure)
                 {
-                    ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+                    ImGui::SameLine();
                     ImGui::InputInt("##exposure", &_ui.open_dlg_exposure);
                 }
                 ImGui::Checkbox("Manual gain", &_ui.open_dlg_manual_gain);
                 if (_ui.open_dlg_manual_gain)
                 {
-                    ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+                    ImGui::SameLine();
                     ImGui::InputInt("##gain", &_ui.open_dlg_gain);
+                    ImGui::SetItemTooltip("K4A: raw gain. VZ: gain in dB.");
                 }
-            }
-            else
-            {
-                if (ImGui::Button("Browse...")) { _file_dialog.Open(); }
-                ImGui::SameLine();
-                ImGui::TextUnformatted(_ui.open_dlg_recording.empty() ? "(no file selected)" : _ui.open_dlg_recording.c_str());
             }
 
             ImGui::Separator();

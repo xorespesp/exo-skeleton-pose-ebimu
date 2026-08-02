@@ -1,6 +1,9 @@
 #include "sensor_frame_provider.hh"
 
 #include "backends/k4a_frame_source.hh"
+#ifdef EXO_HAS_VZ_BACKEND
+#include "backends/vz_frame_source.hh"
+#endif
 
 #include "io/mcap_record_player.hh"
 
@@ -56,9 +59,15 @@ namespace hw
                 }
                 return s;
             },
-            [](const vz_device_config&) -> std::unique_ptr<sensor_frame_source> {
-                spdlog::error("provider: the VZ backend is not supported yet");
+            [](const vz_device_config& c) -> std::unique_ptr<sensor_frame_source> {
+#ifdef EXO_HAS_VZ_BACKEND
+                auto s = std::make_unique<vz_frame_source>();
+                if (!s->open(c)) { return nullptr; }
+                return s;
+#else
+                spdlog::error("provider: this build carries no VZ camera backend");
                 return nullptr;
+#endif
             },
             [](const recording_config& c) -> std::unique_ptr<sensor_frame_source> {
                 auto s = std::make_unique<io::mcap_record_player>();

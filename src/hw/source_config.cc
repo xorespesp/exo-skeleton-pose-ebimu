@@ -26,7 +26,7 @@ namespace hw
                 return std::format("k4a device #{}", c.device_index);
             },
             [](const vz_device_config& c) {
-                return std::format("vz device '{}'", c.serial.empty() ? "<first>" : c.serial);
+                return std::format("vz device #{}", c.device_index);
             },
             [](const recording_config& c) {
                 return std::format("recording '{}'", c.file.filename().string());

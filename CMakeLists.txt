@@ -244,16 +244,17 @@ target_link_libraries(${K4AMKV2MCAP_NAME} PRIVATE
 setup_orbbec_k4a_binaries(${K4AMKV2MCAP_NAME} INSTALL_PATH ${CMAKE_INSTALL_BINDIR})
 
 ########################################################################################
-# VZ camera test harness: exercises the Vieworks VZ camera through the Galaxy C++ API
+# Vieworks VZ camera, driven through the Galaxy C++ API
 #
-# Bring-up tool for the VZ backend, kept out of the app while the camera layer still
-# ships the K4A backend. Reuses the GUI shell (app_base / app_renderer_sdl3 /
-# frame_texture / log_console) so only the SDK-facing part is new.
+# The SDK-facing half lives in one static library. Its include path, import library and
+# warning suppression are properties of that target, so whatever links it needs to know
+# nothing about where the SDK sits.
 #
 # Built only where the SDK is installed; its location comes from the VZ_WIN64_SDK_PATH
-# environment variable the installer sets.
+# environment variable the installer sets. Everything else builds without it.
 ########################################################################################
 
+set(VZ_BACKEND_NAME exo-vz)
 set(VZCAM_TEST_NAME exo-vzcam-test)
 set(VZ_SDK_ROOT "$ENV{VZ_WIN64_SDK_PATH}")
 set(VZ_SDK_AVAILABLE FALSE)
@@ -264,9 +265,40 @@ endif()
 if (VZ_SDK_AVAILABLE)
     message(STATUS "VZSolutionSDK found: ${VZ_SDK_ROOT}")
 
+    add_library(${VZ_BACKEND_NAME} STATIC
+        "src/hw/backends/vz_device.hh"
+        "src/hw/backends/vz_device.cc"
+        "src/hw/backends/vz_frame_source.hh"
+        "src/hw/backends/vz_frame_source.cc"
+    )
+    target_include_directories(${VZ_BACKEND_NAME}
+        PUBLIC  "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        PRIVATE "${VZ_SDK_ROOT}/Development/inc"
+    )
+    target_compile_definitions(${VZ_BACKEND_NAME} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    # The SDK headers carry non-UTF-8 bytes in their comments, which floods C4828 on a
+    # UTF-8 build. Nothing here reads those comments, so silence it where they are included.
+    target_compile_options(${VZ_BACKEND_NAME} PRIVATE /wd4828)
+    target_link_libraries(${VZ_BACKEND_NAME}
+        PUBLIC  ${OpenCV_LIBS} # cv::Mat crosses the interface
+                Eigen3::Eigen  # so does calibration_t
+        PRIVATE spdlog::spdlog_header_only
+                "${VZ_SDK_ROOT}/Development/lib/x64/GxIAPICPPEx.lib"
+    )
+
+    # EXO_HAS_VZ_BACKEND is what lets the app build without the SDK: without it the provider
+    # compiles a branch that reports a VZ source as unavailable instead of opening one.
+    target_link_libraries(${TARGET_NAME} PRIVATE ${VZ_BACKEND_NAME})
+    target_compile_definitions(${TARGET_NAME} PRIVATE EXO_HAS_VZ_BACKEND)
+
+    ####################################################################################
+    # VZ camera test harness
+    #
+    # Bring-up tool for the camera: enumerate, stream, walk the GenICam nodes. Reuses the
+    # GUI shell (app_base / app_renderer_sdl3 / frame_texture / log_console) so only the
+    # camera panel is its own.
+    ####################################################################################
     add_executable(${VZCAM_TEST_NAME}
-        "tools/vzcam-test/vz_device.hh"
-        "tools/vzcam-test/vz_device.cc"
         "tools/vzcam-test/vzcam_test_app.cc"
 
         # reused GUI shell
@@ -282,14 +314,10 @@ if (VZ_SDK_AVAILABLE)
         "src/pose/tag_detector.hh"
         "src/pose/tag_detector.cc"
     )
-    target_include_directories(${VZCAM_TEST_NAME} PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/src"
-        "${VZ_SDK_ROOT}/Development/inc")
+    target_include_directories(${VZCAM_TEST_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_compile_definitions(${VZCAM_TEST_NAME} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-    # The SDK headers carry non-UTF-8 bytes in their comments, which floods C4828 on a
-    # UTF-8 build. Nothing here reads those comments, so silence it for this target only.
-    target_compile_options(${VZCAM_TEST_NAME} PRIVATE /wd4828)
     target_link_libraries(${VZCAM_TEST_NAME} PRIVATE
+        ${VZ_BACKEND_NAME}
         Eigen3::Eigen
         spdlog::spdlog_header_only
         apriltag::apriltag
@@ -297,10 +325,9 @@ if (VZ_SDK_AVAILABLE)
         imgui::imgui
         implot::implot
         implot3d::implot3d
-        "${VZ_SDK_ROOT}/Development/lib/x64/GxIAPICPPEx.lib"
     )
 else()
-    message(STATUS "VZSolutionSDK not found (VZ_WIN64_SDK_PATH unset or invalid); skipping ${VZCAM_TEST_NAME}")
+    message(STATUS "VZSolutionSDK not found (VZ_WIN64_SDK_PATH unset or invalid); skipping ${VZ_BACKEND_NAME} and ${VZCAM_TEST_NAME}")
 endif()
 
 ########################################################################################
@@ -319,10 +346,11 @@ message(STATUS "CMAKE_INSTALL_PREFIX: ${CMAKE_INSTALL_PREFIX}")
 install(TARGETS ${TARGET_NAME} ${K4AMKV2MCAP_NAME}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
-# The VZ harness is only meaningful on a machine that has the SDK installed: its Galaxy
-# runtime DLLs are reached through the PATH entries the SDK installer adds, and the GenICam
-# runtime additionally needs that installation's environment (GenTL producers, XML cache).
-# Bundling the DLLs alone would not make it run elsewhere, so only the executable is installed.
+# Anything reaching the VZ camera is only meaningful on a machine that has the SDK installed:
+# its Galaxy runtime DLLs are found through the PATH entries the SDK installer adds, and the
+# GenICam runtime additionally needs that installation's environment (GenTL producers, XML
+# cache). Bundling the DLLs alone would not make it run elsewhere, so only executables are
+# installed and the Galaxy runtime is left to the SDK (see PRE_EXCLUDE_REGEXES below).
 if (VZ_SDK_AVAILABLE)
     install(TARGETS ${VZCAM_TEST_NAME} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
@@ -342,8 +370,10 @@ install(TARGETS ${TARGET_NAME}
     RUNTIME_DEPENDENCY_SET ${TARGET_NAME}_runtime_deps
 )
 install(RUNTIME_DEPENDENCY_SET ${TARGET_NAME}_runtime_deps
+    # Matched against the dependency name lowercased, so these patterns must be lowercase too.
     PRE_EXCLUDE_REGEXES
         [[api-ms-]] [[ext-ms-]]            # Windows API set DLLs
+        [[^gxiapi]]                        # Galaxy runtime, left to the SDK installation
     POST_EXCLUDE_REGEXES
         [[.*[\\/]system32[\\/].*\.dll]]    # Windows system DLLs
         [[^/(lib|usr/lib|usr/lib64)/.*]]   # Linux system libs

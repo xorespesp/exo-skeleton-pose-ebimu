@@ -9,9 +9,9 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <mutex>
 #include <optional>
-#include <thread>
 
 namespace vz
 {
@@ -82,33 +82,167 @@ namespace vz
             return min + ((value - min) / inc) * inc;
         }
 
+        // The capture clock's tick rate, where a camera names it. 
+        // GenICam spells the node differently across transport layers, hence the list. =
+        // See `captured_frame_t`.
+        constexpr const char* kTickFrequencyNodes[]{
+            "TimestampTickFrequency",
+            "GevTimestampTickFrequency",
+            "DeviceTimestampTickFrequency",
+        };
+
+        // Taken where none of the nodes above answers, and checked by the probe below.
+        constexpr double kAssumedTicksPerSecond = 1.0e9;
+
+        // How long an interface scan may take. Long enough for a camera that is still coming
+        // up on the bus, short enough not to stall an open on a machine that has none.
+        constexpr uint32_t kEnumerateTimeoutMs = 500;
+
+        // Converts one capture into `format`. The SDK buffer is only read; the result owns its pixels.
+        cv::Mat convert_capture(CImageDataPointer& img, frame_format_t format)
+        {
+            const int w = static_cast<int>(img->GetWidth());
+            const int h = static_cast<int>(img->GetHeight());
+            const GX_PIXEL_FORMAT_ENTRY fmt = img->GetPixelFormat();
+            const int depth = pixel_format_bit_depth(fmt);
+
+            // Wraps the SDK buffer without copying; the conversion below owns its output.
+            cv::Mat raw(h, w, depth > 8 ? CV_16UC1 : CV_8UC1, img->GetBuffer());
+            cv::Mat raw8;
+            if (depth > 8) { raw.convertTo(raw8, CV_8U, 1.0 / (1 << (depth - 8))); }
+            else { raw8 = raw; }
+
+            const std::optional<bayer_conversion_codes_t> bayer_codes = try_get_bayer_conversion_codes(fmt);
+            const bool want_gray = (format == frame_format_t::gray);
+
+            cv::Mat out;
+            if (bayer_codes.has_value()) {
+                cv::cvtColor(raw8, out, want_gray ? bayer_codes->to_gray : bayer_codes->to_bgr);
+            } else if (raw8.channels() == 1) {
+                if (want_gray) { out = raw8.clone(); }
+                else { cv::cvtColor(raw8, out, cv::COLOR_GRAY2BGR); }
+            } else {
+                if (want_gray) { cv::cvtColor(raw8, out, cv::COLOR_BGR2GRAY); }
+                else { out = raw8.clone(); }
+            }
+            return out;
+        }
+
     } // namespace
 
     // ---------------------------------------------------------------------------------------
 
     struct device::impl_t
     {
-        CGXDevicePointer         dev;
-        CGXStreamPointer         stream;
+        CGXDevicePointer dev;
+        CGXStreamPointer stream;
         CGXFeatureControlPointer fc;
 
-        std::thread       worker;
         std::atomic<bool> running{ false };
 
-        mutable std::mutex frame_mtx;
-        cv::Mat            frame; // newest capture, in `format`
+        // Seconds per tick of the camera's capture clock, settled once when the stream starts.
+        // Zero only where the counter turns out to stand still, which leaves no clock to use.
+        double timestamp_seconds_per_tick{ 0.0 };
+        bool timestamp_rate_assumed{ false }; // no node named it, so the probe below checks it
+
         std::atomic<frame_format_t> format{ frame_format_t::bgr };
 
         mutable std::mutex stats_mtx;
-        stream_stats_t     stats;
+        stream_stats_t stats;
+        std::chrono::steady_clock::time_point last_frame_wall{}; // fps EMA reference
+        bool has_last_frame_wall{ false };
 
         mutable std::mutex err_msg_mtx;
-        std::string        err_msg;
+        std::string err_msg;
 
         void set_err_msg(const std::string& text)
         {
             std::scoped_lock lk{ err_msg_mtx };
             err_msg = text;
+        }
+
+        // Fold one delivered capture into the running counters.
+        void note_frame(int width, int height, double convert_ms)
+        {
+            const auto now = std::chrono::steady_clock::now();
+
+            std::scoped_lock lk{ stats_mtx };
+            ++stats.frames;
+            stats.width = static_cast<uint32_t>(width);
+            stats.height = static_cast<uint32_t>(height);
+            stats.convert_ms = stats.convert_ms * 0.9 + convert_ms * 0.1;
+
+            if (has_last_frame_wall) {
+                const double dt = std::chrono::duration<double>(now - last_frame_wall).count();
+                if (dt > 0.0 && dt < 5.0) {
+                    const double inst = 1.0 / dt;
+                    stats.fps = (stats.fps <= 0.0) ? inst : (stats.fps * 0.9 + inst * 0.1);
+                }
+            }
+            last_frame_wall = now;
+            has_last_frame_wall = true;
+        }
+
+        // The capture's own clock as a duration. Empty where no rate is in force or the
+        // counter reads zero, both of which mean there is no clock to hand out.
+        std::optional<std::chrono::nanoseconds> to_device_timestamp(uint64_t ticks) const
+        {
+            if (timestamp_seconds_per_tick <= 0.0 || ticks == 0) { return std::nullopt; }
+            return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::duration<double>{ static_cast<double>(ticks) * timestamp_seconds_per_tick }
+            );
+        }
+
+        // Checks an assumed tick rate against the host clock over the opening captures of a stream. 
+        // See `captured_frame_t` for why the measurement never becomes the rate.
+        struct timestamp_probe_t
+        {
+            static constexpr uint32_t kCaptures = 30;
+
+            // Wide enough to swallow the host clock's scheduling noise, narrow enough that a
+            // camera counting in anything but nanoseconds cannot slip through.
+            static constexpr double kTolerance = 0.05;
+
+            uint64_t first_ticks{ 0 };
+            std::chrono::steady_clock::time_point first_wall{};
+            uint32_t captures{ 0 };
+            bool done{ false };
+        };
+
+        timestamp_probe_t probe;
+
+        void probe_timestamp(uint64_t ticks)
+        {
+            if (probe.done || !timestamp_rate_assumed) { return; }
+
+            const auto now = std::chrono::steady_clock::now();
+            if (probe.captures == 0) {
+                probe.first_ticks = ticks;
+                probe.first_wall = now;
+            }
+            if (++probe.captures < timestamp_probe_t::kCaptures) { return; }
+            probe.done = true;
+
+            const double seconds = std::chrono::duration<double>(now - probe.first_wall).count();
+            if (ticks <= probe.first_ticks || seconds <= 0.0) {
+                // A counter that stands still would stamp every frame alike, which is worse
+                // than no clock at all: dropping it puts arrival time back in charge.
+                spdlog::warn("vz: the per-frame counter did not advance over {:.3f} s; falling "
+                             "back to arrival time", seconds);
+                timestamp_seconds_per_tick = 0.0;
+                return;
+            }
+
+            const double measured = static_cast<double>(ticks - probe.first_ticks) / seconds;
+            const double assumed = 1.0 / timestamp_seconds_per_tick;
+            const double error = std::abs(measured - assumed) / assumed;
+            if (error > timestamp_probe_t::kTolerance) {
+                spdlog::warn("vz: the per-frame counter runs at ~{:.4g} ticks/s, not the {:.4g} "
+                             "assumed; frame spacing is off by about {:.0f}%",
+                    measured, assumed, error * 100.0);
+                return;
+            }
+            spdlog::info("vz: per-frame counter measures ~{:.4g} ticks/s, as assumed", measured);
         }
     };
 
@@ -147,6 +281,13 @@ namespace vz
         if (this->is_open()) { this->close(); }
         try {
             sdk_runtime_t::ensure_init();
+
+            // `OpenDeviceBySN` looks the serial up in the factory's device list, which stays
+            // empty until an enumeration fills it. Refreshing here is what lets a caller that
+            // already knows the serial open the camera without discovering it first.
+            GxIAPICPP::gxdeviceinfo_vector infos;
+            IGXFactory::GetInstance().UpdateAllDeviceList(kEnumerateTimeoutMs, infos);
+
             _impl->dev = IGXFactory::GetInstance().OpenDeviceBySN(
                 serial.c_str(), GX_ACCESS_EXCLUSIVE);
             _impl->fc = _impl->dev->GetRemoteFeatureControl();
@@ -170,9 +311,6 @@ namespace vz
         catch (const CGalaxyException& e) { _impl->set_err_msg(make_exception_text(e)); }
         _impl->fc = CGXFeatureControlPointer{};
         _impl->dev = CGXDevicePointer{};
-
-        std::scoped_lock lk{ _impl->frame_mtx };
-        _impl->frame.release();
     }
 
     bool device::is_open() const { return !_impl->dev.IsNull(); }
@@ -188,85 +326,32 @@ namespace vz
                 std::scoped_lock lk{ _impl->stats_mtx };
                 _impl->stats = stream_stats_t{};
                 _impl->stats.payload_bytes = _impl->stream->GetPayloadSize();
+                _impl->has_last_frame_wall = false;
+            }
+            _impl->probe = impl_t::timestamp_probe_t{};
+
+            // What the per-frame counter has to be divided by to become a duration. Settled
+            // here rather than per frame: the rate is a property of the camera, not of a capture.
+            _impl->timestamp_seconds_per_tick = 0.0;
+            _impl->timestamp_rate_assumed = false;
+            for (const char* node : kTickFrequencyNodes) {
+                const std::optional<int_feature_t> f = this->read_int(node);
+                if (f.has_value() && f->value > 0) {
+                    _impl->timestamp_seconds_per_tick = 1.0 / static_cast<double>(f->value);
+                    spdlog::info("vz: capture clock runs at {} Hz (from '{}')", f->value, node);
+                    break;
+                }
+            }
+            if (_impl->timestamp_seconds_per_tick <= 0.0) {
+                _impl->timestamp_seconds_per_tick = 1.0 / kAssumedTicksPerSecond;
+                _impl->timestamp_rate_assumed = true;
+                spdlog::info("vz: the camera names no tick rate; reading the capture counter as "
+                             "nanoseconds and checking that against the host clock");
             }
 
             _impl->stream->StartGrab();
             _impl->fc->GetCommandFeature("AcquisitionStart")->Execute();
             _impl->running.store(true);
-
-            _impl->worker = std::thread([this] {
-                using clock = std::chrono::steady_clock;
-                auto last = clock::now();
-
-                while (_impl->running.load()) {
-                    CImageDataPointer img;
-                    try {
-                        img = _impl->stream->GetImage(500);
-                    }
-                    catch (const CGalaxyException&) {
-                        std::scoped_lock lk{ _impl->stats_mtx };
-                        ++_impl->stats.timeouts;
-                        continue;
-                    }
-                    if (img.IsNull()) { continue; }
-
-                    if (img->GetStatus() != GX_FRAME_STATUS_SUCCESS) {
-                        std::scoped_lock lk{ _impl->stats_mtx };
-                        ++_impl->stats.incomplete;
-                        continue;
-                    }
-
-                    const auto t0 = clock::now();
-                    const int w = static_cast<int>(img->GetWidth());
-                    const int h = static_cast<int>(img->GetHeight());
-                    const GX_PIXEL_FORMAT_ENTRY fmt = img->GetPixelFormat();
-                    const int depth = pixel_format_bit_depth(fmt);
-
-                    // Wraps the SDK buffer without copying; the conversion below owns its output.
-                    cv::Mat raw(h, w, depth > 8 ? CV_16UC1 : CV_8UC1, img->GetBuffer());
-                    cv::Mat raw8;
-                    if (depth > 8) { raw.convertTo(raw8, CV_8U, 1.0 / (1 << (depth - 8))); }
-                    else { raw8 = raw; }
-
-                    const std::optional<bayer_conversion_codes_t> bayer_codes = try_get_bayer_conversion_codes(fmt);
-                    const bool want_gray = _impl->format.load() == frame_format_t::gray;
-
-                    cv::Mat out;
-                    if (bayer_codes.has_value()) {
-                        cv::cvtColor(raw8, out, want_gray ? bayer_codes->to_gray : bayer_codes->to_bgr);
-                    } else if (raw8.channels() == 1) {
-                        if (want_gray) { out = raw8.clone(); }
-                        else { cv::cvtColor(raw8, out, cv::COLOR_GRAY2BGR); }
-                    } else {
-                        if (want_gray) { cv::cvtColor(raw8, out, cv::COLOR_BGR2GRAY); }
-                        else { out = raw8.clone(); }
-                    }
-
-                    const double convert_ms =
-                        std::chrono::duration<double, std::milli>(clock::now() - t0).count();
-
-                    {
-                        std::scoped_lock lk{ _impl->frame_mtx };
-                        _impl->frame = std::move(out);
-                    }
-                    {
-                        const auto now = clock::now();
-                        const double dt = std::chrono::duration<double>(now - last).count();
-                        last = now;
-
-                        std::scoped_lock lk{ _impl->stats_mtx };
-                        ++_impl->stats.frames;
-                        _impl->stats.width = static_cast<uint32_t>(w);
-                        _impl->stats.height = static_cast<uint32_t>(h);
-                        _impl->stats.convert_ms = _impl->stats.convert_ms * 0.9 + convert_ms * 0.1;
-                        if (dt > 0.0 && dt < 5.0) {
-                            const double inst = 1.0 / dt;
-                            _impl->stats.fps = (_impl->stats.fps <= 0.0)
-                                ? inst : (_impl->stats.fps * 0.9 + inst * 0.1);
-                        }
-                    }
-                }
-            });
 
             spdlog::info("vz: acquisition started (payload {} bytes)", this->stats().payload_bytes);
             return true;
@@ -286,24 +371,57 @@ namespace vz
             _impl->stream = CGXStreamPointer{};
             return;
         }
-        if (_impl->worker.joinable()) { _impl->worker.join(); }
 
         try {
             if (!_impl->fc.IsNull()) { _impl->fc->GetCommandFeature("AcquisitionStop")->Execute(); }
             if (!_impl->stream.IsNull()) { _impl->stream->StopGrab(); _impl->stream->Close(); }
             spdlog::info("vz: acquisition stopped");
+        } catch (const CGalaxyException& e) {
+            _impl->set_err_msg(make_exception_text(e));
         }
-        catch (const CGalaxyException& e) { _impl->set_err_msg(make_exception_text(e)); }
         _impl->stream = CGXStreamPointer{};
     }
 
     void device::set_frame_format(frame_format_t mode) { _impl->format.store(mode); }
     frame_format_t device::frame_format() const { return _impl->format.load(); }
 
-    cv::Mat device::latest_frame() const
+    std::optional<captured_frame_t> device::grab_frame(const uint32_t timeout_ms)
     {
-        std::scoped_lock lk{ _impl->frame_mtx };
-        return _impl->frame;
+        if (!_impl->running.load() || _impl->stream.IsNull()) { 
+            return std::nullopt;
+        }
+
+        CImageDataPointer img;
+        try {
+            img = _impl->stream->GetImage(timeout_ms);
+        } catch (const CGalaxyException&) {
+            std::scoped_lock lk{ _impl->stats_mtx };
+            ++_impl->stats.timeouts;
+            return std::nullopt;
+        }
+        if (img.IsNull()) {
+            return std::nullopt;
+        }
+
+        if (img->GetStatus() != GX_FRAME_STATUS_SUCCESS) {
+            std::scoped_lock lk{ _impl->stats_mtx };
+            ++_impl->stats.incomplete;
+            return std::nullopt;
+        }
+
+        const uint64_t ticks = img->GetTimeStamp();
+        _impl->probe_timestamp(ticks);
+
+        const auto t0 = std::chrono::steady_clock::now();
+        captured_frame_t out{
+            .image = convert_capture(img, _impl->format.load()),
+            .device_timestamp = _impl->to_device_timestamp(ticks),
+        };
+        const double convert_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+
+        _impl->note_frame(out.image.cols, out.image.rows, convert_ms);
+        return out;
     }
 
     stream_stats_t device::stats() const

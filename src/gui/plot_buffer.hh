@@ -61,11 +61,11 @@ namespace gui
 
     // Maps a plot value to its scalar type and a span over its contiguous channels.
     template <typename _Ty>
-    struct plot_traits;
+    struct plot_traits_t;
 
     // Eigen column vectors (Vector2/3/4 f/d, and any fixed Nx1).
     template <typename _Scalar, int _Rows>
-    struct plot_traits<Eigen::Matrix<_Scalar, _Rows, 1>>
+    struct plot_traits_t<Eigen::Matrix<_Scalar, _Rows, 1>>
     {
         using scalar_type = _Scalar;
         static std::span<const scalar_type> channels(const Eigen::Matrix<_Scalar, _Rows, 1>& v)
@@ -76,7 +76,7 @@ namespace gui
 
     // Eigen quaternions (Quaternionf/d), stored as (x, y, z, w).
     template <typename _Scalar>
-    struct plot_traits<Eigen::Quaternion<_Scalar>>
+    struct plot_traits_t<Eigen::Quaternion<_Scalar>>
     {
         using scalar_type = _Scalar;
         static std::span<const scalar_type> channels(const Eigen::Quaternion<_Scalar>& q)
@@ -87,7 +87,7 @@ namespace gui
 
     // A buffer's samples laid out for a strided line plot. `_Scalar` is the sample type (float/double).
     template <typename _Scalar>
-    struct plot_buffer_view
+    struct plot_buffer_view_t
     {
         const _Scalar* xs{ nullptr };  // time base, strided by `stride`
         std::span<const _Scalar> ys{}; // per-value channels; channel k plotted from ys.data() + k, strided by `stride`
@@ -104,7 +104,7 @@ namespace gui
     {
     public:
         using value_type = _Ty;
-        using scalar_type = typename plot_traits<_Ty>::scalar_type;
+        using scalar_type = typename plot_traits_t<_Ty>::scalar_type;
         using sample_type = std::pair<scalar_type, _Ty>; // (time since the first sample, value)
 
         // Set the current time; call once before each round of push().
@@ -128,7 +128,7 @@ namespace gui
         }
 
         // Strided view of buffer `i` (empty until the first push).
-        plot_buffer_view<scalar_type> view(std::size_t i) const
+        plot_buffer_view_t<scalar_type> view(std::size_t i) const
         {
             const auto& b = _bufs[i];
             const int count = static_cast<int>(b.data.size());
@@ -136,7 +136,7 @@ namespace gui
             const int newest = (b.offset + count - 1) % count;
             return {
                 &b.data[0].first,
-                plot_traits<value_type>::channels(b.data[0].second),
+                plot_traits_t<value_type>::channels(b.data[0].second),
                 count,
                 b.offset,
                 static_cast<int>(sizeof(sample_type)),

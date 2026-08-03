@@ -23,10 +23,10 @@ namespace
     }
 
     // RAII for the K4A playback handle: the loop below has several throwing exits.
-    struct playback_handle
+    struct playback_handle_t
     {
         k4a_playback_t h{ nullptr };
-        ~playback_handle() { if (h) { ::k4a_playback_close(h); } }
+        ~playback_handle_t() { if (h) { ::k4a_playback_close(h); } }
     };
 } // namespace
 
@@ -61,7 +61,7 @@ int main(int argc, char** argv) try
     const io::image_codec_t codec = parse_codec(codec_name);
 
     // --- open the K4A recording -----------------------------------------------------------
-    playback_handle playback;
+    playback_handle_t playback;
     if (K4A_FAILED(::k4a_playback_open(input.string().c_str(), &playback.h))) {
         spdlog::error("failed to open K4A recording: {}", input.string());
         return 1;

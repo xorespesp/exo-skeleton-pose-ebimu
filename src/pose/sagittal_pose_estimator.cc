@@ -124,8 +124,11 @@ namespace pose
         std::optional<leg_angles_t> angles; // this frame's angles; empty until rest + full chain
     };
 
-    sagittal_pose_estimator::sagittal_pose_estimator(const options_t& opt)
+    sagittal_pose_estimator::sagittal_pose_estimator(
+        const options_t& opt, 
+        double tag_size_m)
         : _opt{ opt }
+        , _tag_size_m{ tag_size_m }
         , _ctx{ std::make_unique<context_t>() }
     { }
 
@@ -229,7 +232,9 @@ namespace pose
             ++edge_px_count;
         }
         // No tags this frame: keep the last factor so held points stay where they were.
-        if (edge_px_count > 0) { _ctx->meters_per_pixel = _opt.tag_size_m / (edge_px_sum / edge_px_count); }
+        if (edge_px_count > 0) {
+            _ctx->meters_per_pixel = _tag_size_m / (edge_px_sum / edge_px_count);
+        }
 
         // ----- Pass 3: smooth + hold each joint's image-plane point -----
         for (const auto& def : get_joint_defs())

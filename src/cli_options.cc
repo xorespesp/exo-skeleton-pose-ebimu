@@ -1,6 +1,6 @@
 #include "cli_options.hh"
 
-#include <map>
+#include <format>
 #include <string>
 #include <vector>
 
@@ -8,15 +8,31 @@ namespace app
 {
     namespace
     {
-        const std::map<std::string, pose::view_plane_t> kViewPlanes{
-            { "frontal",  pose::view_plane_t::frontal  },
-            { "sagittal", pose::view_plane_t::sagittal },
-        };
+        // Option-group headings, which is what splits the two families in `--help`.
+        constexpr const char* kConfigGroup = "Config mode";
+        constexpr const char* kDirectGroup = "Direct mode";
 
     } // namespace
 
-    void add_source_options(CLI::App& app, source_options& o)
+    bool cli_options_t::has_direct_options() const
     {
+        return this->source.has_value()
+            || this->view_plane.has_value()
+            || this->tag_size_m.has_value()
+            || this->exposure_us.has_value()
+            || this->gain.has_value()
+            || this->roi.has_value()
+            || this->port.has_value();
+    }
+
+    void add_cli_options(CLI::App& app, cli_options_t& o)
+    {
+        auto* config = app.add_option("-c,--config", o.config_name,
+            "Installation config: a profile name (configs/<name>.json) or a file path")
+            ->group(kConfigGroup);
+
+        // Callbacks fire only when the option is present, which is what lets an omitted one stay
+        // omitted. Defaults live in `app_config_t` alone; a second copy here would always win.
         auto* device = app.add_option_function<std::string>(
             "-d,--device",
             [&o](const std::string& text) {
@@ -24,39 +40,118 @@ namespace app
                 // A path parses fine but belongs to --input, so it is refused here rather than
                 // quietly opening a recording from the camera option.
                 if (!addr.has_value() || addr->is_recording()) {
-                    throw CLI::ValidationError(
-                        "--device", "expected k4a:<index> or vz:<index>");
+                    throw CLI::ValidationError("--device", "expected k4a:<index> or vz:<index>");
                 }
-                o.source_addr = *addr;
+                o.source = *addr;
             },
-            "Camera to open: k4a:<index> | vz:<index>");
+            "Camera to open: k4a:<index> | vz:<index>")
+            ->group(kDirectGroup);
 
         auto* input = app.add_option_function<std::string>(
             "-i,--input",
-            [&o](const std::string& path) { o.source_addr = source_address::recording(path); },
-            "MCAP recording file path to open");
+            [&o](const std::string& path) { o.source = source_address::recording(path); },
+            "MCAP recording file path to open")
+            ->group(kDirectGroup);
 
         // A run opens one source; accepting both would silently drop one.
         device->excludes(input);
         input->excludes(device);
 
-        // Fixed for the process: a camera does not move between the two views mid-run.
-        app.add_option("--view-plane", o.view_plane, "Camera viewing plane: frontal | sagittal")
-            ->transform(CLI::CheckedTransformer(kViewPlanes, CLI::ignore_case))
-            ->default_str("frontal");
+        auto* plane = app.add_option_function<std::string>(
+            "--view-plane",
+            [&o](const std::string& name) {
+                const auto value = pose::view_plane_from_name(name);
+                if (!value.has_value()) {
+                    throw CLI::ValidationError("--view-plane", "expected frontal or sagittal");
+                }
+                o.view_plane = *value;
+            },
+            "Camera viewing plane: frontal | sagittal")
+            ->group(kDirectGroup);
 
-        app.add_option("-s,--tag-size", o.tag_size_m, "AprilTag black-square edge length [m]")->default_val(0.05);
-        app.add_option("-e,--exposure-us", o.exposure_us, "Manual color exposure [us] (default: auto)");
-        app.add_option("-g,--gain", o.gain, "Manual color gain (default: auto)");
+        auto* tag_size = app.add_option_function<double>(
+            "-s,--tag-size",
+            [&o](const double v) {
+                if (v <= 0.0) { throw CLI::ValidationError("--tag-size", "must be greater than zero"); }
+                o.tag_size_m = v;
+            },
+            "AprilTag black-square edge length [m]")
+            ->group(kDirectGroup);
+
+        auto* exposure = app.add_option_function<int32_t>(
+            "-e,--exposure-us",
+            [&o](const int32_t v) { o.exposure_us = v; },
+            "Manual color exposure [us] (default: auto)")
+            ->group(kDirectGroup);
+
+        auto* gain = app.add_option_function<int32_t>(
+            "-g,--gain",
+            [&o](const int32_t v) { o.gain = v; },
+            "Manual color gain (default: auto)")
+            ->group(kDirectGroup);
 
         // Four values rather than a parsed string, so CLI11 reports a malformed rectangle
         // rather than this code having to.
-        app.add_option_function<std::vector<int>>(
+        auto* roi = app.add_option_function<std::vector<int>>(
             "--roi",
-            [&o](const std::vector<int>& v) { o.color_roi = hw::roi_t{ v[0], v[1], v[2], v[3] }; },
+            [&o](const std::vector<int>& v) { o.roi = hw::roi_t{ v[0], v[1], v[2], v[3] }; },
             "Restrict frames to a region of the full frame: X Y WIDTH HEIGHT")
             ->expected(4)
-            ->type_name("X Y W H");
+            ->type_name("X Y W H")
+            ->group(kDirectGroup);
+
+        auto* port = app.add_option_function<uint16_t>(
+            "-p,--port",
+            [&o](const uint16_t v) { o.port = v; },
+            "WebSocket listen port")
+            ->group(kDirectGroup);
+
+        // A config file already says all of the above, so mixing the two would raise the
+        // question of which one won.
+        for (auto* direct : { device, input, plane, tag_size, exposure, gain, roi, port }) {
+            config->excludes(direct);
+            direct->excludes(config);
+        }
+
+        app.add_flag("--dump-config", o.dump_config,
+            "Print the resolved config as JSON and exit");
+    }
+
+    bool resolve_config(
+        const cli_options_t& o,
+        app_config_t& out,
+        std::filesystem::path& out_file,
+        std::string& err)
+    {
+        out_file.clear();
+        const bool named = !o.config_name.empty();
+
+        // The direct options describe a setup of their own, so a default profile does not join in.
+        if (!named && o.has_direct_options())
+        {
+            app_config_t cfg;
+            if (o.source.has_value())     { cfg.camera.source = *o.source; }
+            if (o.view_plane.has_value()) { cfg.pose.view_plane = *o.view_plane; }
+            if (o.exposure_us.has_value()){ cfg.camera.exposure_us = *o.exposure_us; }
+            if (o.gain.has_value())       { cfg.camera.gain = *o.gain; }
+            if (o.roi.has_value())        { cfg.camera.roi = *o.roi; }
+            if (o.tag_size_m.has_value()) { cfg.pose.tag_size_m = *o.tag_size_m; }
+            if (o.port.has_value())       { cfg.server.port = *o.port; }
+            out = std::move(cfg);
+            return true;
+        }
+
+        const std::optional<std::filesystem::path> path = find_config_file(o.config_name);
+
+        // Nothing named and no default profile on disk: the built-in defaults stand.
+        if (!path.has_value()) { out = app_config_t{}; return true; }
+
+        if (!load_config(*path, out, err)) {
+            err = std::format("config '{}': {}", path->string(), err);
+            return false;
+        }
+        out_file = *path;
+        return true;
     }
 
 } // namespace app

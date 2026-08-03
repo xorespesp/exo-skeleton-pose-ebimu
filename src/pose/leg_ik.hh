@@ -52,7 +52,7 @@ namespace pose
     }
 
     // Per-leg parent-relative rotations (each relative to its parent bone, from rest).
-    struct leg_ik_result
+    struct leg_ik_result_t
     {
         Eigen::Quaterniond hip{ Eigen::Quaterniond::Identity() };   // thigh swing (pelvis->knee bone)
         Eigen::Quaterniond knee{ Eigen::Quaterniond::Identity() };  // shin swing (knee->ankle bone)
@@ -62,7 +62,7 @@ namespace pose
     // Solve one leg's chain pelvis -> hip -> knee -> ankle -> foot. `*_rest` are the normalized rest
     // bone directions; `R_pelvis` is the root's world rotation (identity when the pelvis is a fixed
     // base). `hinge_axis_world`, if set, constrains every joint to 1 DOF about that common axis.
-    inline leg_ik_result solve_leg_ik(
+    inline leg_ik_result_t solve_leg_ik(
         const Eigen::Vector3d& hip,
         const Eigen::Vector3d& knee,
         const Eigen::Vector3d& ankle,
@@ -73,7 +73,7 @@ namespace pose
         const Eigen::Quaterniond& R_pelvis = Eigen::Quaterniond::Identity(),
         const std::optional<Eigen::Vector3d>& hinge_axis_world = std::nullopt)
     {
-        leg_ik_result r;
+        leg_ik_result_t r;
 
         r.hip = swing_local(hip, knee, thigh_rest, R_pelvis, hinge_axis_world);
         const Eigen::Quaterniond R_hip_world = (R_pelvis * r.hip).normalized();

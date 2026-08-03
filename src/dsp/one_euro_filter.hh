@@ -6,7 +6,7 @@
 
 namespace dsp
 {
-    struct one_euro_params
+    struct one_euro_params_t
     {
         double min_cutoff_hz = 1.0; // lower min_cutoff -> smoother at rest;
         double beta = 0.05; // higher beta -> less lag in motion;

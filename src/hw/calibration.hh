@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include <Eigen/Core>
 
 #include <cmath>
@@ -11,6 +11,8 @@ namespace hw
     {
         float fx{ 0.0f }, fy{ 0.0f };  // focal length [px]
         float cx{ 0.0f }, cy{ 0.0f };  // principal point [px]
+
+        // Resolution these values were calibrated at; they are only valid at this size.
         int width{ 0 }, height{ 0 };
 
         // (h_fov, v_fov) [deg]: 2*atan(extent / (2*focal)).
@@ -45,10 +47,9 @@ namespace hw
         intrinsic_t  color_intr;
         distortion_t color_dist;
 
+        // Size of the frames actually being delivered. 
+        // Its own field because a source knows this even when it has no intrinsics to report.
         Eigen::Vector2i color_resolution{ Eigen::Vector2i::Zero() }; // (width, height)
-
-        // (h_fov, v_fov) [deg], derived as 2*atan(width / (2*fx)).
-        Eigen::Vector2f color_fov{ Eigen::Vector2f::Zero() };
     };
 
 } // namespace hw

@@ -66,25 +66,28 @@ namespace pose
             // Smoothing and holding run on pixel coordinates, so the angles read off them are
             // smoothed too.
             bool enable_position_smoothing{ true }; // One Euro per image axis (hold still applies)
-            dsp::one_euro_params position_filter{};
+            dsp::one_euro_params_t position_filter{};
 
             // Joint occlusion policy (shared by the point track).
             millis_f64 max_hold{ 200.0 };  // hold a lost joint's last point up to this long (~6 frames @30fps)
             millis_f64 reset_gap{ 400.0 }; // beyond this gap, reseed the filter to the raw sample
             seconds_f64 dt_min{ 0.001 };   // dt clamp floor [s]
             seconds_f64 dt_max{ 0.100 };   // dt clamp ceiling [s] (avoids a jump after a long pause)
-
-            // --- metric approximation (reported positions only) ---
-            // Physical black-square edge length of the printed tag [m], matching the detector's.
-            // Scales reported positions into approximate meters; angles do not depend on it.
-            double tag_size_m{ 0.05 };
         };
 
-        explicit sagittal_pose_estimator(const options_t& opt = {});
+        explicit sagittal_pose_estimator(
+            const options_t& opt = {},
+            // NOTE: `tag_size_m` [m] scales the reported positions into approximate meters. 
+            //       the angles this estimator produces do not depend on it.
+            double tag_size_m = 0.05
+        );
         ~sagittal_pose_estimator() override;
 
         options_t& options() noexcept { return _opt; }
         const options_t& options() const noexcept { return _opt; }
+
+        void set_tag_size_m(double v) noexcept { _tag_size_m = v; }
+        double tag_size_m() const noexcept { return _tag_size_m; }
 
         // Ingest one frame's detections and recompute every joint state.
         void update(
@@ -132,6 +135,7 @@ namespace pose
         struct context_t;
 
         options_t _opt;
+        double _tag_size_m;
         std::unique_ptr<context_t> _ctx;
     };
 

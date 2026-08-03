@@ -10,7 +10,8 @@ Each lower-limb joint carries one AprilTag marker.
 > Generated from: https://shiqiliu-67.github.io/apriltag-generator/
 
 Print the sheet, cut the tags out, and stick one on each joint per the table below. 
-The black-square edge length is what the estimator needs, passed via `--tag-size` (default 0.05 m). 
+The black-square edge length is what the estimator needs (default 0.05 m): `marker.tag_size_m` in
+the installation config, or `--tag-size` when running without one.
 Measure your printed tags and set it to match.
 
 ## Tag to joint mapping

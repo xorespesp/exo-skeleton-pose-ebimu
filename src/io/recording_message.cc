@@ -363,7 +363,6 @@ namespace io
         }
 
         out.color_resolution = Eigen::Vector2i{ width, height };
-        out.color_fov = out.color_intr.get_fov();
 
         return out;
     }

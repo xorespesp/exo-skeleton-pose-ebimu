@@ -186,7 +186,7 @@ namespace pose
                 const Eigen::Vector3d shin_rest = ik_normalize(r_ankle.value() - r_knee.value());
                 const Eigen::Vector3d foot_rest = ik_normalize(r_foot.value() - r_ankle.value());
 
-                const leg_ik_result r = solve_leg_ik(
+                const leg_ik_result_t r = solve_leg_ik(
                     hip_pos.value(), knee_pos.value(), ankle_pos.value(), foot_pos.value(),
                     thigh_rest, shin_rest, foot_rest,
                     Eigen::Quaterniond::Identity(),

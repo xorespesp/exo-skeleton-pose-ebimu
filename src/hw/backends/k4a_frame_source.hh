@@ -37,7 +37,7 @@ namespace hw
     class k4a_device_capturer final : public sensor_frame_source {
     public:
         // Manual color controls; nullopt leaves the camera on auto.
-        struct color_controls {
+        struct color_controls_t {
             std::optional<int32_t> exposure_us; // manual exposure time [us]
             std::optional<int32_t> gain; // manual gain
         };
@@ -47,7 +47,7 @@ namespace hw
 
         [[nodiscard]] bool open(
             uint32_t device_index,
-            const color_controls& controls = {},
+            const color_controls_t& controls = {},
             frame_format_t color_format = frame_format_t::bgr8 // what delivered frames carry
         ) noexcept;
 

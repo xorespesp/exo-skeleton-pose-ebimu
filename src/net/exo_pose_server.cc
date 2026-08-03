@@ -156,26 +156,27 @@ namespace net
     } // namespace
 
     // --- implementation --------------------------------------------------------------
-    struct exo_pose_server::impl
+    struct exo_pose_server::impl_t
     {
-        uint16_t port;
-        app::source_options initial;
+        app::app_config_t config; // the installation this server serves
 
         uws_event_loop uws_loop;    // uWS loop + listener
         exo_pose_pipeline pipeline; // source + detection + estimator
         size_t client_count{ 0 };   // connected clients; source released when it hits 0
 
-        impl(uint16_t p, const app::source_options& in, bool annotate)
-            : port{ p }, initial{ in }, pipeline{ annotate }
+        impl_t(
+            const app::app_config_t& cfg, 
+            bool annotate)
+            : config{ cfg }
+            , pipeline{ annotate }
         { }
     };
 
     // --- exo_pose_server -------------------------------------------------------------
     exo_pose_server::exo_pose_server(
-        uint16_t port,
-        const app::source_options& initial,
+        const app::app_config_t& config, 
         bool annotate_frames)
-        : _imp{ std::make_unique<impl>(port, initial, annotate_frames) }
+        : _imp{ std::make_unique<impl_t>(config, annotate_frames) }
     { }
 
     exo_pose_server::~exo_pose_server() {
@@ -290,35 +291,25 @@ namespace net
 
                         switch (m->payload_type())
                         {
-                            case fb_proto::Payload_OpenSourceStream:
+                            case fb_proto::Payload_StartPoseStream:
                             {
-                                const auto* o = m->payload_as_OpenSourceStream();
-                                const std::string src = o->source() ? o->source()->str() : std::string{};
-                                std::optional<int32_t> exposure, gain;
-                                if (const auto e = o->exposure_us()) { exposure = *e; }
-                                if (const auto g = o->gain()) { gain = *g; }
-
-                                // The viewing plane and the ROI are fixed when the server starts:
-                                // they follow the camera's physical placement and its wiring,
-                                // which a remote client cannot change.
-                                const auto addr = app::source_address::try_parse(src);
-                                const bool ok = addr.has_value()
-                                    && _imp->pipeline.open_source(
-                                        *addr, _imp->initial.view_plane, 
-                                        o->tag_size_m(), 
-                                        exposure, gain,
-                                        _imp->initial.color_roi
-                                    );
+                                // Re-opening would rebuild the provider and drop a captured rest pose.
+                                if (_imp->pipeline.is_source_open()) {
+                                    ack = this->_serialize_ack(true, "already streaming", req);
+                                    break;
+                                }
+                                // What to open is the installation's business, not the client's.
+                                const bool ok = _imp->pipeline.open_source(_imp->config);
                                 ack = this->_serialize_ack(ok,
-                                    !addr.has_value()
-                                        ? "source must be k4a:<index>, vz:<index> or a recording path"
-                                        : (ok ? "source opened" : "open failed"),
+                                    !_imp->config.camera.source.has_value()
+                                        ? "the server is configured with no source"
+                                        : (ok ? "streaming" : "the configured source failed to open"),
                                     req);
                                 break;
                             }
-                            case fb_proto::Payload_CloseSourceStream:
+                            case fb_proto::Payload_StopPoseStream:
                                 _imp->pipeline.close_source();
-                                ack = this->_serialize_ack(true, "source closed", req);
+                                ack = this->_serialize_ack(true, "stopped", req);
                                 break;
                             case fb_proto::Payload_CalibrateRestPose:
                             {
@@ -368,7 +359,7 @@ namespace net
 
         using namespace std::chrono_literals;
         const bool ok = _imp->uws_loop.start_listening(
-            _imp->port,
+            _imp->config.server.port,
             on_configure,
             on_tick,
             8ms // ~120 Hz pipeline tick
@@ -376,10 +367,9 @@ namespace net
 
         if (ok) {
             spdlog::info("pose server listening on ws://localhost:{} (protocol version {})",
-                _imp->port, static_cast<uint32_t>(fb_proto::ProtocolVersion_Current));
-        }
-        else {
-            spdlog::error("failed to listen on port {} (already in use?)", _imp->port);
+                _imp->config.server.port, static_cast<uint32_t>(fb_proto::ProtocolVersion_Current));
+        } else {
+            spdlog::error("failed to listen on port {} (already in use?)", _imp->config.server.port);
         }
         return ok;
     }
@@ -412,18 +402,13 @@ namespace net
             return -1;
         }
 
-        // Optional: auto-open the source named on the command line, device or recording alike.
-        if (_imp->initial.source_addr.has_value())
-        {
-            spdlog::info("auto-opening the source given on the command line");
-            _imp->pipeline.open_source(
-                *_imp->initial.source_addr,
-                _imp->initial.view_plane,
-                _imp->initial.tag_size_m,
-                _imp->initial.exposure_us,
-                _imp->initial.gain,
-                _imp->initial.color_roi
-            );
+        // The configured source comes up with the server, device or recording alike.
+        if (_imp->config.camera.source.has_value()) {
+            spdlog::info("auto-opening the configured source");
+            _imp->pipeline.open_source(_imp->config);
+        } else {
+            // Said now rather than left for the first client to discover as a failed open.
+            spdlog::warn("no source is configured; pose data cannot flow until one is");
         }
 
         // Blocks while the listen socket + timer keep the loop alive.
@@ -438,7 +423,7 @@ namespace net
         // poll() consumes the pipeline's per-step signals; broadcast each while the listener is up.
         // A status change (from a client command or a GUI action) is dropped while stopped, since
         // there are no subscribers; a client receives the current status once its handshake completes.
-        const exo_pose_pipeline::poll_result r = _imp->pipeline.poll();
+        const exo_pose_pipeline::poll_result_t r = _imp->pipeline.poll();
         if (_imp->uws_loop.is_listening())
         {
             // Pose frames go out at source rate, so they are logged at trace; the two rare
@@ -506,17 +491,28 @@ namespace net
     {
         fb::FlatBufferBuilder b;
 
-        const bool opened = _imp->pipeline.is_source_open();
-        const auto name = b.CreateString(opened ? _imp->pipeline.source_name() : std::string{});
+        const bool is_streaming = _imp->pipeline.is_source_open();
+        const auto source_name_str = b.CreateString(is_streaming ? _imp->pipeline.source_name() : std::string{});
+
+        const std::string_view source_backend_sv = is_streaming
+            ? hw::source_backend_to_str(_imp->pipeline.source_backend())
+            : std::string_view{};
+
+        const auto source_backend_str = b.CreateString(
+            source_backend_sv.data(), source_backend_sv.size());
+
         int32_t w = 0, h = 0;
-        if (opened)
-        {
+        if (is_streaming) {
             const auto res = _imp->pipeline.source_resolution();
             w = res.x(); h = res.y();
         }
 
-        const auto status = fb_proto::CreateServerStatus(
-            b, opened, name, w, h, _imp->pipeline.has_rest_pose()
+        const auto status = fb_proto::CreateServerStatus(b, 
+            is_streaming, 
+            source_name_str, 
+            source_backend_str, 
+            w, h, 
+            _imp->pipeline.has_rest_pose()
         );
 
         b.Finish(fb_proto::CreateMessage(b, fb_proto::Payload_ServerStatus, status.Union(), req_id));

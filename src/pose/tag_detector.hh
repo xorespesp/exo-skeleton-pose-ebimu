@@ -12,6 +12,7 @@
 #include <optional>
 #include <ranges>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace pose
@@ -68,49 +69,54 @@ namespace pose
             homography,
         };
 
-        // TODO: make the tag family selectable (currently fixed to tagStandard41h12).
+        // Tuning options for the detector. (JSON serializable)
         struct options_t {
-            std::optional<hw::intrinsic_t> intrinsics; // Must be set to estimate pose (and axes); leave empty for 2D-only detection.
-            double tag_size_m{ 0.05 };   // black square edge length [m]
             float quad_decimate{ 2.0f }; // 1.0 = full resolution (best corner accuracy)
             float quad_sigma{ 0.0f };    // Gaussian blur sigma for quad detection (0 = none)
-            size_t num_threads{ 4 };     // detection worker threads
             bool refine_edges{ true };   // align quad edges to image gradients (better accuracy)
-            size_t num_iters{ 20 };      // orthogonal-iteration count (default = 50)
+            int num_iters{ 20 };         // orthogonal-iteration steps per tag
+            int num_threads{ 4 };        // detection worker threads
             pose_method_t pose_method{ pose_method_t::orthogonal_iteration }; // tag->camera pose estimator
-            tag_pose_candidate_selector_fn pose_selector{ selectors::min_error }; // pose-candidate selection policy
         };
 
-        explicit tag_detector(const options_t& opt = {});
+        // TODO: make the tag family selectable (currently fixed to tagStandard41h12).
+        explicit tag_detector(
+            const options_t& opt = {},
+            double tag_size_m = 0.05,
+            std::optional<hw::intrinsic_t> intrinsics = std::nullopt,
+            tag_pose_candidate_selector_fn pose_selector = selectors::min_error
+        );
         ~tag_detector();
 
         tag_detector(const tag_detector&) = delete;
         tag_detector& operator=(const tag_detector&) = delete;
 
-        // Accepts BGR / BGRA / grayscale. Fills pose + axes when intrinsics are configured.
+        // Accepts BGR / BGRA / grayscale. Fills pose + axes when intrinsics were supplied.
         std::vector<tag_detection_t> detect(const cv::Mat& image);
 
     private:
         struct context_t;
 
         options_t _opt;
+        double _tag_size_m;
+        std::optional<hw::intrinsic_t> _intrinsics;
+        tag_pose_candidate_selector_fn _pose_selector;
         std::unique_ptr<context_t> _ctx;
     };
 
-    // Live-tunable detector settings the debugger edits while a source streams; the pose pipeline
-    // rebuilds its detector when any of these change. A subset of tag_detector::options_t: intrinsics
-    // come from the open source and the pose selector is fixed, so they are not tunable here.
-    // (num_iters / num_threads kept as int for direct use with integer sliders.)
-    struct tag_tuning_t
+    constexpr std::string_view pose_method_to_str(tag_detector::pose_method_t m)
     {
-        double tag_size_m{ 0.05 };
-        float quad_decimate{ 2.0f };
-        float quad_sigma{ 0.0f };
-        bool refine_edges{ true };
-        int num_iters{ 20 };
-        int num_threads{ 4 };
-        tag_detector::pose_method_t pose_method{ tag_detector::pose_method_t::orthogonal_iteration };
-    };
+        return (m == tag_detector::pose_method_t::homography) ? "homography" : "orthogonal_iteration";
+    }
+
+    // nullopt if `str` names neither method.
+    constexpr std::optional<tag_detector::pose_method_t> pose_method_from_str(std::string_view str)
+    {
+        using m_t = tag_detector::pose_method_t;
+        if (str == pose_method_to_str(m_t::orthogonal_iteration)) { return m_t::orthogonal_iteration; }
+        if (str == pose_method_to_str(m_t::homography)) { return m_t::homography; }
+        return std::nullopt;
+    }
 
     // Draw tag outlines, ids, and 3D axes (when present).
     void draw_tag_detections(

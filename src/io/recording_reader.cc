@@ -85,13 +85,13 @@ namespace io
 
     // The iterator holds a reference to the view, so neither may outlive the other and
     // the view must not move once the iterator exists. Bundling them enforces that.
-    struct recording_reader::playback_cursor
+    struct recording_reader::playback_cursor_t
     {
         mcap::LinearMessageView view;
         mcap::LinearMessageView::Iterator it;
         mcap::LinearMessageView::Iterator end;
 
-        playback_cursor(
+        playback_cursor_t(
             mcap::McapReader& reader, 
             const mcap::ReadMessageOptions& options)
             : view{ reader.readMessages(log_problem, options) }
@@ -277,7 +277,7 @@ namespace io
     {
         if (!_opened || stream_id >= _cursors.size()) { return std::nullopt; }
 
-        playback_cursor* cursor = _cursors[stream_id].get();
+        playback_cursor_t* cursor = _cursors[stream_id].get();
         if (!cursor) { return std::nullopt; }
 
         const recorded_camera_stream_t& cam = _streams[stream_id]; // parallel to _cursors; index already checked
@@ -323,7 +323,7 @@ namespace io
             return t == topic;
         };
 
-        _cursors[stream_id] = std::make_unique<playback_cursor>(*_reader, options);
+        _cursors[stream_id] = std::make_unique<playback_cursor_t>(*_reader, options);
     }
 
 } // namespace io

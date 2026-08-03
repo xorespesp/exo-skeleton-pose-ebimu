@@ -52,14 +52,14 @@ namespace hw
         this->close();
 
         std::unique_ptr<sensor_frame_source> source = std::visit(overloaded{
-            [](const k4a_device_config& c) -> std::unique_ptr<sensor_frame_source> {
+            [](const k4a_device_config_t& c) -> std::unique_ptr<sensor_frame_source> {
                 auto s = std::make_unique<k4a_device_capturer>();
                 if (!s->open(c.device_index, { c.exposure_us, c.gain }, c.color_format)) {
                     return nullptr;
                 }
                 return s;
             },
-            [](const vz_device_config& c) -> std::unique_ptr<sensor_frame_source> {
+            [](const vz_device_config_t& c) -> std::unique_ptr<sensor_frame_source> {
 #ifdef EXO_HAS_VZ_BACKEND
                 auto s = std::make_unique<vz_frame_source>();
                 if (!s->open(c)) { return nullptr; }
@@ -69,7 +69,7 @@ namespace hw
                 return nullptr;
 #endif
             },
-            [](const recording_config& c) -> std::unique_ptr<sensor_frame_source> {
+            [](const recording_config_t& c) -> std::unique_ptr<sensor_frame_source> {
                 auto s = std::make_unique<io::mcap_record_player>();
                 if (!s->open(c.file)) { return nullptr; }
                 s->enable_auto_repeat(true);
@@ -135,9 +135,8 @@ namespace hw
             }
         }
 
-        // Copied from `_calib`, which the ROI above already adjusted, so these cannot disagree with it.
+        // Copied from `_calib`, which the ROI above already adjusted, so it cannot disagree with it.
         _color_resolution = _calib.color_resolution;
-        _color_fov = _calib.color_fov;
         _source_backend = source_backend;
         _source_name = std::move(source_name);
 

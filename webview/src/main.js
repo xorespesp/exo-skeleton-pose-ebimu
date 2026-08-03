@@ -16,13 +16,6 @@ startRenderLoop();
 const ui = {
     url: 'ws://localhost:9002',
     connection: 'disconnected',
-    // Open options
-    source: '0', // device index or recording path
-    tag_size_m: 0.05,
-    manual_exposure: false,
-    exposure_us: 8000,
-    manual_gain: false,
-    gain: 0,
     // readouts
     source_name: '(none)',
     rest_pose: 'none',
@@ -76,8 +69,10 @@ client.onSourceEnded = (ev) => {
     console.log(`source ended: is_error=${ev.isError()} "${ev.message()}"`);
 };
 client.onStatus = (st) => {
-    opened = st.isStreamOpened();
-    ui.source_name = opened ? `${st.sourceName()} (${st.width()}x${st.height()})` : '(none)';
+    opened = st.isStreaming();
+    ui.source_name = opened
+        ? `${st.sourceName()} [${st.sourceBackend()}] (${st.width()}x${st.height()})`
+        : '(none)';
     ui.rest_pose = st.hasRestPose() ? 'calibrated' : 'none';
     refresh();
 };
@@ -105,17 +100,8 @@ function doConnect() {
     refresh();
 }
 function doDisconnect() { client.disconnect(); }
-function doOpen() {
-    pending = true;
-    client.sendOpen({
-        source: ui.source,
-        tagSizeM: ui.tag_size_m,
-        exposureUs: ui.manual_exposure ? ui.exposure_us : null,
-        gain: ui.manual_gain ? ui.gain : null,
-    });
-    refresh();
-}
-function doClose() { pending = true; client.sendClose(); refresh(); }
+function doOpen() { pending = true; client.sendStart(); refresh(); }
+function doClose() { pending = true; client.sendStop(); refresh(); }
 function doCalibrate() { pending = true; client.sendCalibrateRestPose(); refresh(); }
 function doClearRest() { pending = true; client.sendClearRestPose(); refresh(); }
 
@@ -145,16 +131,10 @@ const cConnect = gui.add(acts, 'connect').name('Connect');
 const cDisconnect = gui.add(acts, 'disconnect').name('Disconnect');
 gui.add(ui, 'connection').name('status').listen().disable();
 
-const src = gui.addFolder('Source');
-src.add(ui, 'source').name('index or path');
-src.add(ui, 'tag_size_m').name('tag size [m]').min(0.01).max(0.5).step(0.001);
-src.add(ui, 'manual_exposure').name('manual exposure').onChange(refresh);
-const cExposure = src.add(ui, 'exposure_us').name('exposure [us]').min(100).max(100000).step(100);
-src.add(ui, 'manual_gain').name('manual gain').onChange(refresh);
-const cGain = src.add(ui, 'gain').name('gain').min(0).max(255).step(1);
-const cOpen = src.add(acts, 'open').name('Open');
-const cClose = src.add(acts, 'close').name('Close');
-src.add(ui, 'source_name').name('opened').listen().disable();
+const src = gui.addFolder('Pose Stream');
+const cOpen = src.add(acts, 'open').name('Start');
+const cClose = src.add(acts, 'close').name('Stop');
+src.add(ui, 'source_name').name('source').listen().disable();
 
 const rest = gui.addFolder('Rest Pose');
 const cCalibrate = rest.add(acts, 'calibrate').name('Calibrate');
@@ -173,8 +153,6 @@ function refresh() {
     model.visible = opened; // only show the rig while a source is streaming
     cConnect.enable(!connected && !connecting);
     cDisconnect.enable(connected);
-    cExposure.enable(ui.manual_exposure);
-    cGain.enable(ui.manual_gain);
     cOpen.enable(connected && !opened && !pending);
     cClose.enable(connected && opened && !pending);
     cCalibrate.enable(connected && opened && !pending);

@@ -1,9 +1,9 @@
-﻿// WebSocket client for the exo-skeleton-pose protocol. (exo_pose_proto.fbs)
+// WebSocket client for the exo-skeleton-pose protocol. (exo_pose_proto.fbs)
 
 import * as flatbuffers from 'flatbuffers';
 import {
     Message, Payload, ProtocolVersion,
-    Hello, OpenSourceStream, CloseSourceStream, CalibrateRestPose, ClearRestPose, GetServerStatus,
+    Hello, StartPoseStream, StopPoseStream, CalibrateRestPose, ClearRestPose, GetServerStatus,
     PoseFrame, ServerStatus, SourceStreamEnded, Ack,
 } from './generated/exo/proto.js';
 
@@ -65,22 +65,16 @@ export class PoseClient {
 
     // --- commands (client -> server) ---------------------------------------------
 
-    // opts: { source, tagSizeM?, exposureUs?, gain? }. Null exposure/gain == auto.
-    sendOpen({ source, tagSizeM = 0.05, exposureUs = null, gain = null }) {
-        const b = new flatbuffers.Builder(256);
-        const srcOff = b.createString(source);
-        OpenSourceStream.startOpenSourceStream(b);
-        OpenSourceStream.addSource(b, srcOff);
-        OpenSourceStream.addTagSizeM(b, tagSizeM);
-        if (exposureUs !== null) { OpenSourceStream.addExposureUs(b, exposureUs); }
-        if (gain !== null) { OpenSourceStream.addGain(b, gain); }
-        this._send(b, Payload.OpenSourceStream, OpenSourceStream.endOpenSourceStream(b));
+    sendStart() {
+        const b = new flatbuffers.Builder(64);
+        StartPoseStream.startStartPoseStream(b);
+        this._send(b, Payload.StartPoseStream, StartPoseStream.endStartPoseStream(b));
     }
 
-    sendClose() {
+    sendStop() {
         const b = new flatbuffers.Builder(64);
-        CloseSourceStream.startCloseSourceStream(b);
-        this._send(b, Payload.CloseSourceStream, CloseSourceStream.endCloseSourceStream(b));
+        StopPoseStream.startStopPoseStream(b);
+        this._send(b, Payload.StopPoseStream, StopPoseStream.endStopPoseStream(b));
     }
 
     sendCalibrateRestPose() {

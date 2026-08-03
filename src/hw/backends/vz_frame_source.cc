@@ -42,7 +42,7 @@ namespace hw
         this->close();
     }
 
-    bool vz_frame_source::open(const vz_device_config& config) noexcept try
+    bool vz_frame_source::open(const vz_device_config_t& config) noexcept try
     {
         std::scoped_lock lk{ _mtx };
 
@@ -125,7 +125,6 @@ namespace hw
             else {
                 _calib.color_intr = intr;
                 if (config.color_dist.has_value()) { _calib.color_dist = *config.color_dist; }
-                _calib.color_fov = _calib.color_intr.get_fov();
             }
         }
 

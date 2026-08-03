@@ -4,7 +4,7 @@
 #include "frame_texture.hh"
 #include "log_console.hh"
 #include "pose_trace_recorder.hh"
-#include "cli_options.hh"
+#include "app_config.hh"
 
 #include "io/recording_writer.hh"
 #include "pose/tag_detector.hh"
@@ -21,6 +21,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -44,7 +45,7 @@ namespace gui
     class debugger_app final : public app_base<app_renderer_sdl3>
     {
     public:
-        debugger_app(const app::source_options& opt, uint16_t port);
+        explicit debugger_app(const app::app_config_t& config);
         ~debugger_app();
 
         int run(); // create window, loop, destroy
@@ -58,6 +59,8 @@ namespace gui
 
         void _do_open_source();
         void _do_close_source();
+
+        void _do_save_config(const std::filesystem::path& path);
         void _do_start_recording();
         void _do_stop_recording();
         void _update_pose_frame();
@@ -133,6 +136,7 @@ namespace gui
             bool open_dlg_manual_gain{ false };
             int open_dlg_gain{ 0 };
             std::string open_dlg_recording;
+            std::string open_dlg_intrinsics; // calibration file for a camera that reports none
 
             // record dialog
             bool record_dlg_show{ false };
@@ -145,12 +149,14 @@ namespace gui
             int trace_capacity{ 600 }; // ring length [frames]
         };
 
-        app::source_options _opt;
+        app::app_config_t _config;
         std::unique_ptr<net::exo_pose_server> _server;
 
         std::optional<frame_texture> _frame_texture;
         ImGui::FileBrowser _file_dialog;
         ImGui::FileBrowser _save_dialog{ ImGuiFileBrowserFlags_EnterNewFilename | ImGuiFileBrowserFlags_CreateNewDir };
+        ImGui::FileBrowser _config_dialog{ ImGuiFileBrowserFlags_EnterNewFilename | ImGuiFileBrowserFlags_CreateNewDir };
+        ImGui::FileBrowser _intrinsics_dialog;
         log_console _log_console;
 
         // last frame pulled from the pipeline: annotated image, its tag detections, and its sequence number

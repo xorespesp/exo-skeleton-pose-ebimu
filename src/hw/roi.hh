@@ -38,7 +38,6 @@ namespace hw
         calib.color_intr.height = roi.height;
 
         calib.color_resolution = Eigen::Vector2i{ roi.width, roi.height };
-        calib.color_fov = calib.color_intr.get_fov();
     }
 
 } // namespace hw

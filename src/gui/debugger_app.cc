@@ -17,10 +17,6 @@
 #include <string>
 #include <vector>
 
-#ifdef _WIN32
-#  include <windows.h> // GetModuleFileNameW
-#endif
-
 namespace gui
 {
     namespace
@@ -30,39 +26,6 @@ namespace gui
             "JPEG (compressed)",
             "Raw (lossless)",
         };
-
-        // The nearest `recordings` folder above the executable, else the executable's own directory.
-        // Anchored to the executable, so the same path comes out however the app is launched.
-        std::filesystem::path recordings_dir()
-        {
-            std::filesystem::path exe_dir;
-#ifdef _WIN32
-            std::wstring buf(MAX_PATH, L'\0');
-            for (;;) {
-                const DWORD written = ::GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
-                if (written == 0) { break; }
-                if (written < buf.size()) {
-                    exe_dir = std::filesystem::path{ buf.substr(0, written) }.parent_path();
-                    break;
-                }
-                buf.resize(buf.size() * 2); // a filled buffer means the path was truncated
-            }
-#endif
-            if (exe_dir.empty()) { return std::filesystem::current_path(); }
-
-            std::error_code ec;
-            std::filesystem::path dir = exe_dir;
-            // Deep enough to clear a build tree's out/build/<preset>/, stopping at the root.
-            for (int level = 0; level < 6 && dir.has_relative_path(); ++level) {
-                if (const std::filesystem::path candidate = dir / "recordings";
-                    std::filesystem::is_directory(candidate, ec))
-                {
-                    return candidate;
-                }
-                dir = dir.parent_path();
-            }
-            return exe_dir;
-        }
 
         // Local wall clock string for filename
         std::string local_stamp()
@@ -191,7 +154,7 @@ namespace gui
         template <typename _Scalar>
         void draw_plot_lines(
             const char* title,
-            const plot_buffer_view<_Scalar>& v,
+            const plot_buffer_view_t<_Scalar>& v,
             float window,
             float y_lo,
             float y_hi,
@@ -225,26 +188,28 @@ namespace gui
 
     } // namespace
 
-    debugger_app::debugger_app(const app::source_options& opt, uint16_t port)
-        : _opt{ opt }
-        , _server{ std::make_unique<net::exo_pose_server>(port, opt, /*annotate_frames*/ true) }
+    debugger_app::debugger_app(const app::app_config_t& config)
+        : _config{ config }
+        , _server{ std::make_unique<net::exo_pose_server>(config, /*annotate_frames*/true) }
     {
-        if (opt.exposure_us.has_value()) { _ui.open_dlg_manual_exposure = true; _ui.open_dlg_exposure = opt.exposure_us.value(); }
-        if (opt.gain.has_value()) { _ui.open_dlg_manual_gain = true; _ui.open_dlg_gain = opt.gain.value(); }
-        _ui.open_dlg_view_plane = opt.view_plane; // command-line viewing plane seeds the dialog
+        const app::camera_config_t& cam = config.camera;
+        if (cam.exposure_us.has_value()) { _ui.open_dlg_manual_exposure = true; _ui.open_dlg_exposure = *cam.exposure_us; }
+        if (cam.gain.has_value()) { _ui.open_dlg_manual_gain = true; _ui.open_dlg_gain = *cam.gain; }
+        _ui.open_dlg_view_plane = config.pose.view_plane; // the config's viewing plane seeds the dialog
+        _ui.open_dlg_intrinsics = cam.intrinsics_file;
 
-        // The camera index and the recording path sit side by side, so switching between them
-        // discards neither; only the one the command line named is filled.
-        if (opt.source_addr.has_value())
+        // The camera index and the recording path sit side by side, so switching between them discards neither;
+        // only the one the config named is filled.
+        if (cam.source.has_value())
         {
-            if (opt.source_addr->is_k4a_device()) {
-                _ui.open_dlg_device = static_cast<int>(opt.source_addr->k4a_device_index());
+            if (cam.source->is_k4a_device()) {
+                _ui.open_dlg_device = static_cast<int>(cam.source->k4a_device_index());
                 _ui.open_dlg_kind = source_kind_t::k4a_device;
-            } else if (opt.source_addr->is_vz_device()) {
-                _ui.open_dlg_device = static_cast<int>(opt.source_addr->vz_device_index());
+            } else if (cam.source->is_vz_device()) {
+                _ui.open_dlg_device = static_cast<int>(cam.source->vz_device_index());
                 _ui.open_dlg_kind = source_kind_t::vz_device;
             } else {
-                _ui.open_dlg_recording = opt.source_addr->recording_path().string();
+                _ui.open_dlg_recording = cam.source->recording_path().string();
                 _ui.open_dlg_kind = source_kind_t::recording;
             }
         }
@@ -252,10 +217,17 @@ namespace gui
 
         _file_dialog.SetTitle("Open recording file");
         _file_dialog.SetTypeFilters({ ".mcap" });
-        _file_dialog.SetPwd(recordings_dir());
+        _file_dialog.SetPwd(app::project_dir("recordings"));
 
         _save_dialog.SetTitle("Save recording as");
         _save_dialog.SetTypeFilters({ ".mcap" });
+
+        _config_dialog.SetTitle("Save config as");
+        _config_dialog.SetTypeFilters({ ".json" });
+
+        _intrinsics_dialog.SetTitle("Open camera calibration");
+        _intrinsics_dialog.SetTypeFilters({ ".yml", ".yaml", ".xml" });
+        _intrinsics_dialog.SetPwd(app::project_dir("configs"));
 
         // Mirror spdlog output into the in-GUI console. Registered on the main thread before any
         // capture worker exists, so appending to the sink list is race-free. Captures every severity;
@@ -390,21 +362,35 @@ namespace gui
             _ui.record_dlg_path = _save_dialog.GetSelected().string();
             _save_dialog.ClearSelected();
         }
+
+        _config_dialog.Display();
+        if (_config_dialog.HasSelected())
+        {
+            this->_do_save_config(_config_dialog.GetSelected());
+            _config_dialog.ClearSelected();
+        }
+
+        _intrinsics_dialog.Display();
+        if (_intrinsics_dialog.HasSelected())
+        {
+            _ui.open_dlg_intrinsics = _intrinsics_dialog.GetSelected().string();
+            _intrinsics_dialog.ClearSelected();
+        }
     }
 
     void debugger_app::_open_source(const app::source_address& address, pose::view_plane_t view_plane)
     {
-        // A recording already carries the settings it was shot with; only a live camera takes them.
-        const bool live = address.is_device();
+        // The dialog's choices become the session's, so a re-open and a saved config both carry them.
+        _config.camera.source = address;
+        _config.pose.view_plane = view_plane;
 
-        _server->pipeline().open_source(
-            address,
-            view_plane,
-            _opt.tag_size_m,
-            live ? _opt.exposure_us : std::nullopt,
-            live ? _opt.gain : std::nullopt,
-            _opt.color_roi
-        );
+        // A recording already carries the settings it was shot with; only a live camera takes them.
+        if (address.is_recording()) {
+            _config.camera.exposure_us.reset();
+            _config.camera.gain.reset();
+        }
+
+        _server->pipeline().open_source(_config);
         _last_seq = 0;
         _pos_plot_bufs.clear(); // restart the positions-plot timeline for the new source
         _raw_skel_positions = {};
@@ -413,19 +399,16 @@ namespace gui
 
     void debugger_app::_do_open_source()
     {
-        _opt.view_plane = _ui.open_dlg_view_plane; // the dialog's choice becomes the session default
-
         if (_ui.open_dlg_kind == source_kind_t::recording)
         {
             if (_ui.open_dlg_recording.empty()) { spdlog::warn("no recording file selected"); return; }
-            _opt.exposure_us.reset();
-            _opt.gain.reset();
             this->_open_source(app::source_address::recording(_ui.open_dlg_recording), _ui.open_dlg_view_plane);
         }
         else
         {
-            _opt.exposure_us = _ui.open_dlg_manual_exposure ? std::optional<int32_t>{ _ui.open_dlg_exposure } : std::nullopt;
-            _opt.gain = _ui.open_dlg_manual_gain ? std::optional<int32_t>{ _ui.open_dlg_gain } : std::nullopt;
+            _config.camera.exposure_us = _ui.open_dlg_manual_exposure ? std::optional<int32_t>{ _ui.open_dlg_exposure } : std::nullopt;
+            _config.camera.gain = _ui.open_dlg_manual_gain ? std::optional<int32_t>{ _ui.open_dlg_gain } : std::nullopt;
+            _config.camera.intrinsics_file = _ui.open_dlg_intrinsics;
 
             const auto index = static_cast<uint32_t>(_ui.open_dlg_device);
             const app::source_address address = (_ui.open_dlg_kind == source_kind_t::vz_device)
@@ -434,6 +417,28 @@ namespace gui
             this->_open_source(address, _ui.open_dlg_view_plane);
         }
         _ui.open_dlg_show = false;
+    }
+
+    void debugger_app::_do_save_config(const std::filesystem::path& path)
+    {
+        // A save gathers the config from two places. `camera` and `server` are already in `_config`,
+        // put there by the open dialog. The detector and estimator settings are not: the control
+        // panel edits them on the pipeline, so `_config`'s copies are stale and the live ones are
+        // read back.
+        net::exo_pose_pipeline& pipe = _server->pipeline();
+
+        _config.pose.detector = pipe.detector_options();
+        _config.pose.tag_size_m = pipe.tag_size_m();
+        if (const auto* o = pipe.frontal_options())  { _config.pose.frontal = *o; }
+        if (const auto* o = pipe.sagittal_options()) { _config.pose.sagittal = *o; }
+
+        std::string err;
+        if (!app::save_config(_config, path, err)) {
+            spdlog::error("config: {}", err);
+            return;
+        }
+
+        spdlog::info("config: saved to '{}'", path.string());
     }
 
     void debugger_app::_do_close_source()
@@ -523,7 +528,7 @@ namespace gui
             {
                 if (_ui.record_dlg_path.empty()) {
                     _ui.record_dlg_path = (
-                        recordings_dir() / default_recording_name(pipe.source_backend(), pipe.view_plane())
+                        app::project_dir("recordings") / default_recording_name(pipe.source_backend(), pipe.view_plane())
                     ).string();
                 }
                 _ui.record_dlg_show = true;
@@ -650,25 +655,28 @@ namespace gui
         // Control section
         if (ImGui::CollapsingHeader("Control", ImGuiTreeNodeFlags_DefaultOpen))
         {
-            // ----- AprilTag detection tuning (live; the worker rebuilds the detector on change) -----
-            ImGui::SeparatorText("AprilTag Detection");
+            // ----- Tag detection tuning (live; the worker rebuilds the detector on change) -----
+            ImGui::SeparatorText("Tag Detection");
             {
-                const bool solves_tag_pose = (pipe.view_plane() == pose::view_plane_t::frontal);
-
-                // Edit a copy of the current tuning, push it back only when something changed.
-                pose::tag_tuning_t t = pipe.tag_tuning();
-                bool changed = false;
-
+                double tag_size_m = pipe.tag_size_m();
                 const double tag_min = 0.005, tag_max = 1.0;
-                changed |= ImGui::DragScalar("Tag size [m]", ImGuiDataType_Double, &t.tag_size_m,
-                    0.001f, &tag_min, &tag_max, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+                if (ImGui::DragScalar("Tag size [m]", ImGuiDataType_Double, &tag_size_m,
+                        0.001f, &tag_min, &tag_max, "%.3f", ImGuiSliderFlags_AlwaysClamp))
+                {
+                    pipe.set_tag_size_m(tag_size_m);
+                }
                 ImGui::SetItemTooltip("Real black-square edge length of the printed tag [m].\n"
                                       "Fixes the metric scale of every estimated 3D position; must match the tag.\n"
                                       "Higher: estimated depth and the whole skeleton scale up.\n"
                                       "Lower: they scale down.");
 
+                // Edit a copy of the current options, push it back only when something changed.
+                pose::tag_detector::options_t t = pipe.detector_options();
+                bool changed = false;
+
                 // A sagittal run works off 2D tag centers, so the detector never solves a tag pose
                 // and these two knobs have nothing to act on.
+                const bool solves_tag_pose = (pipe.view_plane() == pose::view_plane_t::frontal);
                 ImGui::BeginDisabled(!solves_tag_pose);
                 const char* const methods[] = { "Orthogonal iteration", "Homography (closed form)" };
                 int mi = (t.pose_method == pose::tag_detector::pose_method_t::homography) ? 1 : 0;
@@ -712,7 +720,9 @@ namespace gui
                                       "Higher: faster detection on multi-core CPUs.\n"
                                       "Lower: fewer cores used.");
 
-                if (changed) { pipe.set_tag_tuning(t); } // worker rebuilds the detector next frame
+                if (changed) {
+                    pipe.set_detector_options(t); // worker rebuilds the detector next frame
+                }
 
                 ImGui::TextDisabled("Applies live to an open source; rebuilds the detector.");
             }
@@ -749,6 +759,20 @@ namespace gui
                 ImGui::SetItemTooltip("Write the buffered frames to dumps/pose_trace_*.json");
                 ImGui::SameLine();
                 if (ImGui::Button("Clear Trace")) { _trace.clear(); }
+            }
+
+            // ----- Installation config -----
+            // The panel renders only with a source open, so what is written here is the tuning that is actually running.
+            ImGui::SeparatorText("Config");
+            {
+                if (ImGui::Button("Save Config As..."))
+                {
+                    _config_dialog.SetPwd(app::project_dir("configs"));
+                    _config_dialog.SetInputName("default.json");
+                    _config_dialog.Open();
+                }
+                ImGui::SetItemTooltip("Write the open source, its camera settings, and the tuning\n"
+                                      "above to a config a headless run can be started from.");
             }
         }
     }
@@ -1195,7 +1219,7 @@ namespace gui
         const net::exo_pose_pipeline& pipe = _server->pipeline();
 
         std::error_code ec;
-        const std::filesystem::path dir{ "dumps" };
+        const std::filesystem::path dir = app::project_dir("dumps");
         std::filesystem::create_directories(dir, ec); // best-effort; write_json reports a real failure
         const std::filesystem::path path = dir / default_trace_name();
 
@@ -1331,6 +1355,21 @@ namespace gui
                     ImGui::SameLine();
                     ImGui::InputInt("##gain", &_ui.open_dlg_gain);
                     ImGui::SetItemTooltip("K4A: raw gain. VZ: gain in dB.");
+                }
+
+                if (_ui.open_dlg_kind == source_kind_t::vz_device)
+                {
+                    ImGui::TextUnformatted("Calibration");
+                    if (ImGui::Button("Browse...##intr")) { _intrinsics_dialog.Open(); }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Clear##intr")) { _ui.open_dlg_intrinsics.clear(); }
+                    ImGui::SameLine();
+                    ImGui::TextWrapped("%s", _ui.open_dlg_intrinsics.empty()
+                        ? "(none: tag poses will not be solved)"
+                        : _ui.open_dlg_intrinsics.c_str());
+                    ImGui::SetItemTooltip(
+                        "OpenCV FileStorage (.yml/.xml) from a chessboard calibration.\n"
+                        "Must have been measured at the camera's own frame size.");
                 }
             }
 

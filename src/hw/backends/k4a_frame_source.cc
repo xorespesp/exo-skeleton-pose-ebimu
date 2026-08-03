@@ -25,7 +25,6 @@ namespace hw
             p.k1, p.k2, p.k3, p.k4, p.k5, p.k6, p.p1, p.p2
         };
         out.color_resolution = Eigen::Vector2i{ cc.resolution_width, cc.resolution_height };
-        out.color_fov = out.color_intr.get_fov();
 
         return out;
     }
@@ -100,7 +99,7 @@ namespace hw
 
     bool k4a_device_capturer::open(
         const uint32_t device_index,
-        const color_controls& controls,
+        const color_controls_t& controls,
         const frame_format_t color_format) noexcept try
     {
         std::scoped_lock lk{ _mtx };

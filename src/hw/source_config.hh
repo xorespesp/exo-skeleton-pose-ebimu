@@ -16,7 +16,7 @@ namespace hw
     // Every config carries `color_roi`, which the provider reads generically.
 
     // Orbbec K4A Wrapper camera.
-    struct k4a_device_config
+    struct k4a_device_config_t
     {
         uint32_t device_index{ 0 };
         std::optional<int32_t> exposure_us; // nullopt: auto exposure
@@ -27,7 +27,7 @@ namespace hw
     };
 
     // Vieworks VZ-5MU-C79H00 camera.
-    struct vz_device_config
+    struct vz_device_config_t
     {
         uint32_t device_index{ 0 };        // position in the enumeration
         std::optional<double> exposure_us; // nullopt: leave the camera's current setting
@@ -43,13 +43,13 @@ namespace hw
     };
 
     // One of our own recordings, played back in place of a camera.
-    struct recording_config
+    struct recording_config_t
     {
         std::filesystem::path file;
         std::optional<roi_t> color_roi; // nullopt: the whole frame
     };
 
-    using source_config_t = std::variant<k4a_device_config, vz_device_config, recording_config>;
+    using source_config_t = std::variant<k4a_device_config_t, vz_device_config_t, recording_config_t>;
 
     // Which backend this config selects.
     source_backend_t get_source_backend(const source_config_t& config);

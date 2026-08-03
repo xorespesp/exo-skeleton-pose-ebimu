@@ -19,7 +19,7 @@ namespace hw
         ~vz_frame_source() override;
 
         // Configures the camera and leaves it idle; acquisition begins with the first fetch.
-        [[nodiscard]] bool open(const vz_device_config& config) noexcept;
+        [[nodiscard]] bool open(const vz_device_config_t& config) noexcept;
 
         bool is_valid() const override;
         void close() override;

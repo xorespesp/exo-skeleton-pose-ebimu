@@ -37,7 +37,7 @@ namespace pose
         {
             // --- position track (rig-space 3D points) ---
             bool enable_position_smoothing{ true }; // One Euro per axis (hold still applies)
-            dsp::one_euro_params position_filter{};
+            dsp::one_euro_params_t position_filter{};
 
             // Joint occlusion policy (shared by the point track).
             millis_f64 max_hold{ 200.0 };  // hold a lost joint's last point up to this long (~6 frames @30fps)

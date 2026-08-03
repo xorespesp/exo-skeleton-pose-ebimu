@@ -250,12 +250,7 @@ namespace
         void _rebuild_detector()
         {
             // No intrinsics -> 2D-only detection, all the overlay needs.
-            pose::tag_detector::options_t opt{};
-            opt.quad_decimate = _tune.quad_decimate;
-            opt.quad_sigma = _tune.quad_sigma;
-            opt.refine_edges = _tune.refine_edges;
-            opt.num_threads = static_cast<size_t>(_tune.num_threads);
-            _detector.emplace(opt);
+            _detector.emplace(_detector_opt);
             _detect_ms = 0.0;
             _detect_fps = 0.0;
             _redetect = true;
@@ -517,13 +512,13 @@ namespace
 
                 ImGui::BeginDisabled(!_detect_enabled);
                 bool changed = false;
-                changed |= ImGui::SliderFloat("quad_decimate", &_tune.quad_decimate, 1.0f, 4.0f, "%.1f");
-                changed |= ImGui::SliderFloat("quad_sigma", &_tune.quad_sigma, 0.0f, 2.0f, "%.2f");
-                changed |= ImGui::Checkbox("refine_edges", &_tune.refine_edges);
-                changed |= ImGui::SliderInt("num_threads", &_tune.num_threads, 1, 16);
+                changed |= ImGui::SliderFloat("quad_decimate", &_detector_opt.quad_decimate, 1.0f, 4.0f, "%.1f");
+                changed |= ImGui::SliderFloat("quad_sigma", &_detector_opt.quad_sigma, 0.0f, 2.0f, "%.2f");
+                changed |= ImGui::Checkbox("refine_edges", &_detector_opt.refine_edges);
+                changed |= ImGui::SliderInt("num_threads", &_detector_opt.num_threads, 1, 16);
                 if (changed) { this->_rebuild_detector(); }
                 if (ImGui::Button("Reset params")) {
-                    _tune = pose::tag_tuning_t{};
+                    _detector_opt = pose::tag_detector::options_t{};
                     this->_rebuild_detector();
                 }
                 ImGui::EndDisabled();
@@ -737,7 +732,7 @@ namespace
 
         // tag detection: annotated copy shown in the preview, plus its cost counters
         std::optional<pose::tag_detector> _detector;
-        pose::tag_tuning_t _tune{};
+        pose::tag_detector::options_t _detector_opt{};
         std::vector<pose::tag_detection_t> _detections;
         cv::Mat _display;                        // frame as drawn (annotated when detection is on)
         uint64_t _last_seq{ UINT64_MAX };        // stream frame counter the overlay was built from

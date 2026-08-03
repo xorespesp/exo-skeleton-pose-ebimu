@@ -81,11 +81,11 @@ namespace io
     private:
         // A message view paired with its iterator: the iterator points into the view, so the
         // two live and die together and a seek replaces both. One per stream.
-        struct playback_cursor;
+        struct playback_cursor_t;
 
         std::unique_ptr<mcap::McapReader> _reader;
         std::vector<recorded_camera_stream_t> _streams;
-        std::vector<std::unique_ptr<playback_cursor>> _cursors; // parallel to _streams
+        std::vector<std::unique_ptr<playback_cursor_t>> _cursors; // parallel to _streams
 
         hw::timestamp_t _first_timestamp{};
         hw::timestamp_t _last_timestamp{};

@@ -22,6 +22,8 @@ target_sources(${TARGET_NAME} PRIVATE
     "src/main.cc"
     "src/source_address.hh"
     "src/source_address.cc"
+    "src/app_config.hh"
+    "src/app_config.cc"
     "src/cli_options.hh"
     "src/cli_options.cc"
 
@@ -57,6 +59,8 @@ target_sources(${TARGET_NAME} PRIVATE
     "src/io/recording_reader.cc"
     "src/io/frame_recorder.hh"
     "src/io/frame_recorder.cc"
+    "src/io/calibration_io.hh"
+    "src/io/calibration_io.cc"
 
     # dsp
     "src/dsp/one_euro_filter.hh"

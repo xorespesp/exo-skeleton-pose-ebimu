@@ -1,4 +1,5 @@
 #pragma once
+#include "app_config.hh"
 #include "source_address.hh"
 
 #include "hw/calibration.hh"
@@ -43,14 +44,7 @@ namespace net
         exo_pose_pipeline& operator=(const exo_pose_pipeline&) = delete;
 
         // --- source control -----------------------------------------------------------
-        bool open_source(
-            const app::source_address& source_addr, // camera device or recording file to stream
-            pose::view_plane_t view_plane, // picks the estimator; a different one swaps it in, tuning fresh
-            double tag_size_m,             // printed black-square edge length [m]
-            std::optional<int32_t> exposure_us,  // optional (nullopt: auto exposure)
-            std::optional<int32_t> gain,       // optional (nullopt: auto gain)
-            std::optional<hw::roi_t> color_roi // optional (nullopt: stream whole frames)
-        );
+        bool open_source(const app::app_config_t& config);
         void close_source();
 
         bool is_source_open() const;
@@ -92,20 +86,26 @@ namespace net
         // The sagittal estimator's readouts (tracked leg, joint angles); null in a frontal run.
         const pose::sagittal_pose_estimator* sagittal_estimator() const;
 
-        // --- tag detection tuning (tag size, decimation, pose method, ...), live -------
-        // Persisted across source reopens; the detection worker rebuilds on the next frame.
-        void set_tag_tuning(const pose::tag_tuning_t& tuning);
-        pose::tag_tuning_t tag_tuning() const;
+        // --- detection settings, live -------------------------------------------------
+        // Both take effect on the next frame, when the detection worker rebuilds. 
+        // Opening a source installs the config's values over whatever was set here.
+
+        void set_detector_options(const pose::tag_detector::options_t& opt);
+        pose::tag_detector::options_t detector_options() const;
+
+        // Printed black-square edge length [m]. Reaches the detector and the sagittal estimator, which both scale by it.
+        void set_tag_size_m(double v);
+        double tag_size_m() const;
 
         // --- stepping -----------------------------------------------------------------
         // Advance one step: pull the newest latched detections and recompute joint states.
         // Each flag reports something that happened this step and is cleared once returned.
-        struct poll_result { 
+        struct poll_result_t { 
             bool new_pose{ false }; 
             bool stream_ended{ false }; 
             bool status_changed{ false };
         };
-        poll_result poll();
+        poll_result_t poll();
 
         // Latest annotated frame for display; false if nothing new since `last_seq`.
         bool try_get_annotated_frame(
@@ -141,8 +141,8 @@ namespace net
         void _log_periodic_stats();
         void _reset_frame_log_state();
 
-        // Build the estimator for `view_plane` when it differs from the active one, and point
-        // _active at it. A no-op when unchanged, so reopening a source keeps its tuning.
+        // Build the estimator for `view_plane` when it differs from the active one, and point _active at it. 
+        // A no-op when unchanged, leaving the existing estimator in place.
         void _select_estimator(pose::view_plane_t view_plane);
 
     private:
@@ -150,7 +150,8 @@ namespace net
 
         std::shared_ptr<hw::sensor_frame_provider> _provider;
         std::shared_ptr<pose_frame_observer> _observer;
-        pose::tag_tuning_t _tuning{}; // detector tuning, applied to each observer (persists across reopens)
+        pose::tag_detector::options_t _detector_options{}; // applied to each observer
+        double _tag_size_m{ 0.05 };
         std::shared_ptr<io::frame_recorder> _recorder; // non-null only while recording
 
         // At most one estimator is engaged at a time and _active points at it, so the readers of

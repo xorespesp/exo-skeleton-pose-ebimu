@@ -47,15 +47,22 @@ namespace pose
         };
     };
 
-    tag_detector::tag_detector(const options_t& opt)
+    tag_detector::tag_detector(
+        const options_t& opt,
+        double tag_size_m,
+        std::optional<hw::intrinsic_t> intrinsics,
+        tag_pose_candidate_selector_fn pose_selector)
         : _opt{ opt }
+        , _tag_size_m{ tag_size_m }
+        , _intrinsics{ std::move(intrinsics) }
+        , _pose_selector{ std::move(pose_selector) }
         , _ctx{ std::make_unique<context_t>() }
     {
         ::apriltag_detector_add_family(_ctx->detector.get(), _ctx->family.get());
 
         _ctx->detector->quad_decimate = _opt.quad_decimate;
         _ctx->detector->quad_sigma = _opt.quad_sigma;
-        _ctx->detector->nthreads = static_cast<int>(_opt.num_threads);
+        _ctx->detector->nthreads = _opt.num_threads;
         _ctx->detector->refine_edges = _opt.refine_edges;
     }
 
@@ -91,12 +98,12 @@ namespace pose
                 det.corners[k] = { static_cast<float>(d->p[k][0]), static_cast<float>(d->p[k][1]) };
             }
 
-            if (!_opt.intrinsics.has_value()) { continue; }
+            if (!_intrinsics.has_value()) { continue; }
 
-            const hw::intrinsic_t& intr = _opt.intrinsics.value();
-            ::apriltag_detection_info_t info{ d, _opt.tag_size_m, intr.fx, intr.fy, intr.cx, intr.cy };
+            const hw::intrinsic_t& intr = _intrinsics.value();
+            ::apriltag_detection_info_t info{ d, _tag_size_m, intr.fx, intr.fy, intr.cx, intr.cy };
 
-            const double len = _opt.tag_size_m * 0.5;
+            const double len = _tag_size_m * 0.5;
             const auto make_tag_pose = [&intr, len](const ::apriltag_pose_t& p, double err) {
                 const Eigen::Isometry3d tf = to_isometry(p);
                 return tag_pose_t{
@@ -135,7 +142,7 @@ namespace pose
                     &info,
                     &err1, &p1,
                     &err2, &p2,
-                    static_cast<int>(_opt.num_iters)
+                    _opt.num_iters
                 );
 
                 // NOTE: Orthogonal iteration always returns solution 1; the second exists only when a
@@ -164,8 +171,8 @@ namespace pose
             det.num_pose_candidates = static_cast<int>(num_pose_cands);
 
             const std::span<const tag_pose_t> pose_cands_span{ pose_cands_buff.data(), num_pose_cands };
-            const tag_pose_t* const selected_pose = _opt.pose_selector
-                ? _opt.pose_selector(det.id, pose_cands_span)
+            const tag_pose_t* const selected_pose = _pose_selector
+                ? _pose_selector(det.id, pose_cands_span)
                 : selectors::min_error(det.id, pose_cands_span);
 
             if (selected_pose != nullptr) {

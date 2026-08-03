@@ -1,5 +1,5 @@
-﻿#pragma once
-#include "cli_options.hh"
+#pragma once
+#include "app_config.hh"
 
 #include <cstdint>
 #include <memory>
@@ -21,7 +21,10 @@ namespace net
     class exo_pose_server final
     {
     public:
-        exo_pose_server(uint16_t port, const app::source_options& initial, bool annotate_frames = false);
+        explicit exo_pose_server(
+            const app::app_config_t& config, 
+            bool annotate_frames = false // draws detections onto the frames the pipeline hands out.
+        );
         ~exo_pose_server();
 
         exo_pose_server(const exo_pose_server&) = delete;
@@ -66,8 +69,8 @@ namespace net
         ) const;
 
     private:
-        struct impl;
-        std::unique_ptr<impl> _imp;
+        struct impl_t;
+        std::unique_ptr<impl_t> _imp;
     };
 
 } // namespace net

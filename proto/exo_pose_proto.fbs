@@ -8,16 +8,16 @@
 namespace exo.proto;
 
 // Current version of this schema
-enum ProtocolVersion : uint { Current = 26072900 } // YYMMDDrr
+enum ProtocolVersion : uint { Current = 26080200 } // YYMMDDrr
 
 // Lower-limb joints id. (pose::joint_id_t)
 enum JointId : ubyte {
-    Pelvis = 0, 
-    RKnee, 
-    LKnee, 
-    RAnkle, 
-    LAnkle, 
-    RFoot, 
+    Pelvis = 0,
+    RKnee,
+    LKnee,
+    RAnkle,
+    LAnkle,
+    RFoot,
     LFoot
 }
 
@@ -32,15 +32,11 @@ table Hello {
     proto_version: uint;
 }
 
-table OpenSourceStream {
-    // What to open: "k4a:<index>" or "vz:<index>" for a camera,
-    // anything else a recording file path.
-    source: string;
-    tag_size_m: double = 0.05; // marker's black square edge length, in meters
-    exposure_us: int = null;   // color exposure time, in microseconds; optional (null == auto)
-    gain: int = null;          // color sensor gain; optional (null == auto)
-}
-table CloseSourceStream {}
+// Starts the source the server's config names; PoseFrames follow.
+// Idempotent, so a call while already streaming disturbs no captured rest pose.
+table StartPoseStream {}
+table StopPoseStream {} // release the source; PoseFrames stop
+
 table CalibrateRestPose {} // latch the current pose as the rest (bind) reference
 table ClearRestPose {}     // drop the captured rest pose
 table GetServerStatus {}   // request the current ServerStatus (reply a ServerStatus, no Ack)
@@ -66,9 +62,11 @@ table PoseFrame {
 }
 
 // Current server state, pushed after the handshake, on change, or on GetServerStatus request.
+// The server picks the source; `source_name` labels it, `source_backend` is what to branch on.
 table ServerStatus {
-    is_stream_opened: bool;
-    source_name: string;
+    is_streaming: bool;
+    source_name: string;    // NOTE: empty while not streaming
+    source_backend: string; // NOTE: empty while not streaming
     width: int;  // color frame width, in pixels
     height: int; // color frame height, in pixels
     has_rest_pose: bool;
@@ -85,8 +83,8 @@ table SourceStreamEnded {
 table Ack { ok: bool; message: string; }
 
 union Payload {
-    Hello, OpenSourceStream, CloseSourceStream, CalibrateRestPose, ClearRestPose, GetServerStatus, // client -> server
-    PoseFrame, ServerStatus, SourceStreamEnded, Ack                                                // server -> client
+    Hello, StartPoseStream, StopPoseStream, CalibrateRestPose, ClearRestPose, GetServerStatus, // client -> server
+    PoseFrame, ServerStatus, SourceStreamEnded, Ack                                            // server -> client
 }
 
 // request id lets a client match a reply to its command: 

@@ -19,7 +19,8 @@ namespace app
     {
         using json = nlohmann::ordered_json;
 
-        // Bumped when a key changes meaning rather than merely appearing.
+        // Bumped on any change to the field lists below. Every key they name is required, so a
+        // key added, renamed or dropped makes files written for the previous version unreadable.
         constexpr int kConfigVersion = 1;
 
         // Deep enough to clear a build tree's out/build/<preset>/, stopping at the filesystem root.

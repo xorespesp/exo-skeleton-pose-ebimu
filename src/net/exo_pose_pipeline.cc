@@ -150,7 +150,7 @@ namespace net
                 std::optional<hw::intrinsic_t> intrinsics;
                 if (_estimate_tag_pose)
                 {
-                    if (const hw::intrinsic_t& intr = _provider.get_calibration().color_intr;
+                    if (const hw::intrinsic_t& intr = _provider.get_calibration().intrinsic;
                         intr.fx > 0.0f && intr.fy > 0.0f) {
                         intrinsics = intr;
                     } else {
@@ -305,11 +305,11 @@ namespace net
                 hw::intrinsic_t intr{};
                 hw::distortion_t dist{};
                 if (std::string err; io::load_camera_calibration(path, intr, dist, err)) {
-                    vz.color_intr = intr;
-                    vz.color_dist = dist;
+                    vz.intrinsic = intr;
+                    vz.distortion = dist;
                     spdlog::info("pipeline: read intrinsics from '{}' ({}x{})"
                         , path.string()
-                        , intr.width, intr.height
+                        , intr.calib_resolution.x(), intr.calib_resolution.y()
                     );
                 } else {
                     // frontal estimator will not solve tag poses, but the sagittal estimator still works off 2D tag centers
@@ -370,7 +370,7 @@ namespace net
         _active->reset_tracking();  // and its position filters/held points must not carry over
         this->_reset_frame_log_state();
 
-        const auto res = _provider->get_color_camera_resolution();
+        const auto res = _provider->get_color_frame_resolution();
         spdlog::info("pipeline: {} '{}' opened ({}x{} color, {} estimator); rest pose cleared, awaiting first frame",
             kind, _provider->get_source_name(), res.x(), res.y(), pose::view_plane_name(_view_plane));
         return true;
@@ -680,7 +680,7 @@ namespace net
 
     Eigen::Vector2i exo_pose_pipeline::source_resolution() const
     {
-        return _provider ? _provider->get_color_camera_resolution() : Eigen::Vector2i::Zero();
+        return _provider ? _provider->get_color_frame_resolution() : Eigen::Vector2i::Zero();
     }
 
     float exo_pose_pipeline::source_fps() const
@@ -693,7 +693,7 @@ namespace net
         // Color intrinsics of the open source; lets a diagnostic dump reproject
         // corners independently of whatever the pipeline computed.
         if (!_provider || !_provider->is_opened()) { return std::nullopt; }
-        return _provider->get_calibration().color_intr;
+        return _provider->get_calibration().intrinsic;
     }
 
     void exo_pose_pipeline::set_detector_options(const pose::tag_detector::options_t& opt)

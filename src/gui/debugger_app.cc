@@ -421,10 +421,10 @@ namespace gui
 
     void debugger_app::_do_save_config(const std::filesystem::path& path)
     {
-        // A save gathers the config from two places. `camera` and `server` are already in `_config`,
-        // put there by the open dialog. The detector and estimator settings are not: the control
-        // panel edits them on the pipeline, so `_config`'s copies are stale and the live ones are
-        // read back.
+        // A save gathers the config from two places. `server` stands as loaded, and the open
+        // dialog already wrote `camera` and the viewing plane into `_config`. The tag size and the
+        // tuning below did not go there: the control panel edits them on the pipeline, so the live
+        // values are read back.
         net::exo_pose_pipeline& pipe = _server->pipeline();
 
         _config.pose.detector = pipe.detector_options();

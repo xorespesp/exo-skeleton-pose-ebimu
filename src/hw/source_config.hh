@@ -38,8 +38,8 @@ namespace hw
 
         // The VZ camera reports no intrinsics of its own, so a calibration measured off-line is supplied here. 
         // NOTE: Left empty, tag poses cannot be solved; the estimators that work off 2D tag centers do not need them.
-        std::optional<intrinsic_t>  color_intr;
-        std::optional<distortion_t> color_dist; // empty alongside intrinsics: no distortion
+        std::optional<intrinsic_t>  intrinsic;
+        std::optional<distortion_t> distortion; // empty alongside intrinsics: no distortion
     };
 
     // One of our own recordings, played back in place of a camera.

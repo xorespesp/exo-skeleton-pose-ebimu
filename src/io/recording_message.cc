@@ -286,8 +286,8 @@ namespace io
         const hw::timestamp_t timestamp,
         const std::string_view coord_frame_id)
     {
-        const hw::intrinsic_t& intr = calibration.color_intr;
-        const hw::distortion_t& dist = calibration.color_dist;
+        const hw::intrinsic_t& intr = calibration.intrinsic;
+        const hw::distortion_t& dist = calibration.distortion;
 
         // OpenCV's coefficient order, which is what "rational_polynomial" means.
         const std::vector<double> d{
@@ -316,8 +316,8 @@ namespace io
 
         builder.Finish(foxglove::CreateCameraCalibration(
             builder, &time, coord_frame,
-            static_cast<uint32_t>(calibration.color_resolution.x()),
-            static_cast<uint32_t>(calibration.color_resolution.y()),
+            static_cast<uint32_t>(calibration.frame_resolution.x()),
+            static_cast<uint32_t>(calibration.frame_resolution.y()),
             model, d_vec, k_vec, r_vec, p_vec));
         return to_bytes(builder);
     }
@@ -340,13 +340,12 @@ namespace io
         const auto height = static_cast<int>(calib->height());
 
         hw::calibration_t out{};
-        out.color_intr = hw::intrinsic_t{
+        out.intrinsic = hw::intrinsic_t{
             .fx = static_cast<float>(k->Get(0)),
             .fy = static_cast<float>(k->Get(4)),
             .cx = static_cast<float>(k->Get(2)),
             .cy = static_cast<float>(k->Get(5)),
-            .width = width,
-            .height = height,
+            .calib_resolution = Eigen::Vector2i{ width, height },
         };
 
         // Absent or shorter coefficient vectors leave the remaining terms at zero,
@@ -355,14 +354,14 @@ namespace io
             const auto at = [d](const uint32_t i) {
                 return (i < d->size()) ? static_cast<float>(d->Get(i)) : 0.0f;
             };
-            out.color_dist = hw::distortion_t{
+            out.distortion = hw::distortion_t{
                 .k1 = at(0), .k2 = at(1), .k3 = at(4),
                 .k4 = at(5), .k5 = at(6), .k6 = at(7),
                 .p1 = at(2), .p2 = at(3),
             };
         }
 
-        out.color_resolution = Eigen::Vector2i{ width, height };
+        out.frame_resolution = Eigen::Vector2i{ width, height };
 
         return out;
     }

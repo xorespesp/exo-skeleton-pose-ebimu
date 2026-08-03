@@ -5,7 +5,7 @@
 
 namespace hw
 {
-    // Pinhole intrinsics. SDK-agnostic POD; 
+    // Pinhole intrinsics. SDK-agnostic value type;
     // backends copy their native intrinsics (e.g. OBCameraIntrinsic, k4a) into this.
     struct intrinsic_t
     {
@@ -13,7 +13,7 @@ namespace hw
         float cx{ 0.0f }, cy{ 0.0f };  // principal point [px]
 
         // Resolution these values were calibrated at; they are only valid at this size.
-        int width{ 0 }, height{ 0 };
+        Eigen::Vector2i calib_resolution{ Eigen::Vector2i::Zero() }; // (width, height)
 
         // (h_fov, v_fov) [deg]: 2*atan(extent / (2*focal)).
         // Zero on an axis whose focal length is unset.
@@ -25,7 +25,10 @@ namespace hw
                     ? static_cast<float>(2.0 * std::atan(extent / (2.0 * focal)) * 180.0 / kPi)
                     : 0.0f;
             };
-            return Eigen::Vector2f{ deg(fx, width), deg(fy, height) };
+            return Eigen::Vector2f{
+                deg(fx, calib_resolution.x()),
+                deg(fy, calib_resolution.y())
+            };
         }
     };
 
@@ -44,12 +47,12 @@ namespace hw
     // Per-device calibration, filled once at source open.
     struct calibration_t
     {
-        intrinsic_t  color_intr;
-        distortion_t color_dist;
+        intrinsic_t  intrinsic;
+        distortion_t distortion;
 
-        // Size of the frames actually being delivered. 
+        // Size of the frames actually being delivered.
         // Its own field because a source knows this even when it has no intrinsics to report.
-        Eigen::Vector2i color_resolution{ Eigen::Vector2i::Zero() }; // (width, height)
+        Eigen::Vector2i frame_resolution{ Eigen::Vector2i::Zero() }; // (width, height)
     };
 
 } // namespace hw

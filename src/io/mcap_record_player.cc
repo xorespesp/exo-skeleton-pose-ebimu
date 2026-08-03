@@ -93,8 +93,8 @@ namespace io
         std::scoped_lock lk{ _mtx };
 
         const hw::roi_t clipped = hw::clamp_roi(roi,
-            _calib.color_resolution.x(),
-            _calib.color_resolution.y()
+            _calib.frame_resolution.x(),
+            _calib.frame_resolution.y()
         );
 
         if (clipped.is_empty()) { return std::nullopt; }

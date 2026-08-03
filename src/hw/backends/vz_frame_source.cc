@@ -106,25 +106,25 @@ namespace hw
         }
 
         _calib = calibration_t{};
-        _calib.color_resolution = Eigen::Vector2i{ width, height };
+        _calib.frame_resolution = Eigen::Vector2i{ width, height };
 
         // The camera carries no intrinsics of its own, so they arrive measured off-line. A set
         // measured on a different frame size would project plausibly and wrongly, which is the
         // hardest failure to notice, so it is refused rather than rescaled.
-        if (config.color_intr.has_value()) {
-            const intrinsic_t& intr = *config.color_intr;
-            if (intr.width != width || intr.height != height) {
+        if (config.intrinsic.has_value()) {
+            const intrinsic_t& intr = *config.intrinsic;
+            if (intr.calib_resolution != _calib.frame_resolution) {
                 spdlog::error("vz: the supplied intrinsics were measured on {}x{} but the sensor "
                               "is {}x{}; running without them"
-                    , intr.width
-                    , intr.height
+                    , intr.calib_resolution.x()
+                    , intr.calib_resolution.y()
                     , width
                     , height
                 );
             }
             else {
-                _calib.color_intr = intr;
-                if (config.color_dist.has_value()) { _calib.color_dist = *config.color_dist; }
+                _calib.intrinsic = intr;
+                if (config.distortion.has_value()) { _calib.distortion = *config.distortion; }
             }
         }
 
@@ -133,7 +133,7 @@ namespace hw
             , width
             , height
             , frame_format_to_str(_color_format)
-            , _calib.color_intr.fx > 0.0f ? "supplied" : "absent"
+            , _calib.intrinsic.fx > 0.0f ? "supplied" : "absent"
         );
         return true;
     }
@@ -160,7 +160,7 @@ namespace hw
         std::scoped_lock lk{ _mtx };
         if (!_device.is_open()) { return std::nullopt; }
 
-        const roi_t fitted = clamp_roi(roi, _calib.color_resolution.x(), _calib.color_resolution.y());
+        const roi_t fitted = clamp_roi(roi, _calib.frame_resolution.x(), _calib.frame_resolution.y());
         if (fitted.is_empty()) {
             spdlog::warn("vz: the requested ROI leaves nothing of the frame");
             return std::nullopt;

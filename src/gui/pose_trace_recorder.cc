@@ -113,15 +113,16 @@ namespace gui
 
         root["source"] = {
             { "name", source_name },
-            { "width", source_resolution.x() },
-            { "height", source_resolution.y() },
+            { "frame_width", source_resolution.x() },
+            { "frame_height", source_resolution.y() },
             { "fps", source_fps },
         };
         if (intrinsics.has_value()) {
             const auto& k = intrinsics.value();
             root["intrinsics"] = {
                 { "fx", k.fx }, { "fy", k.fy }, { "cx", k.cx }, { "cy", k.cy },
-                { "width", k.width }, { "height", k.height },
+                { "calib_width", k.calib_resolution.x() },
+                { "calib_height", k.calib_resolution.y() },
             };
         } else {
             root["intrinsics"] = nullptr;

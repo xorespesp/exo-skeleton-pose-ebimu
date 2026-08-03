@@ -130,13 +130,13 @@ namespace hw
                 spdlog::warn("provider: ROI {}x{}+{}+{} was not applied to {}'s {}x{} frame"
                     , requested_roi->width, requested_roi->height, requested_roi->x, requested_roi->y
                     , source_name
-                    , _calib.color_resolution.x(), _calib.color_resolution.y()
+                    , _calib.frame_resolution.x(), _calib.frame_resolution.y()
                 );
             }
         }
 
         // Copied from `_calib`, which the ROI above already adjusted, so it cannot disagree with it.
-        _color_resolution = _calib.color_resolution;
+        _color_frame_resolution = _calib.frame_resolution;
         _source_backend = source_backend;
         _source_name = std::move(source_name);
 

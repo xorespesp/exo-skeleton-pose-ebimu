@@ -17,14 +17,14 @@ namespace hw
         const auto& p = cc.intrinsics.parameters.param; // {cx,cy,fx,fy,k1..k6,codx,cody,p2,p1,...}
 
         calibration_t out{};
-        out.color_intr = intrinsic_t{
+        out.intrinsic = intrinsic_t{
             p.fx, p.fy, p.cx, p.cy,
-            cc.resolution_width, cc.resolution_height
+            Eigen::Vector2i{ cc.resolution_width, cc.resolution_height }
         };
-        out.color_dist = distortion_t{
+        out.distortion = distortion_t{
             p.k1, p.k2, p.k3, p.k4, p.k5, p.k6, p.p1, p.p2
         };
-        out.color_resolution = Eigen::Vector2i{ cc.resolution_width, cc.resolution_height };
+        out.frame_resolution = Eigen::Vector2i{ cc.resolution_width, cc.resolution_height };
 
         return out;
     }
@@ -203,9 +203,9 @@ namespace hw
     {
         std::scoped_lock lk{ _mtx };
 
-        const roi_t clipped = clamp_roi(roi, 
-            _calib.color_resolution.x(), 
-            _calib.color_resolution.y()
+        const roi_t clipped = clamp_roi(roi,
+            _calib.frame_resolution.x(),
+            _calib.frame_resolution.y()
         );
 
         if (clipped.is_empty()) { return std::nullopt; }

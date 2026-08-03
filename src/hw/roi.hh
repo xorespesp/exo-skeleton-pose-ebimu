@@ -32,12 +32,11 @@ namespace hw
     // over untouched.
     inline void apply_roi(calibration_t& calib, const roi_t& roi)
     {
-        calib.color_intr.cx -= static_cast<float>(roi.x);
-        calib.color_intr.cy -= static_cast<float>(roi.y);
-        calib.color_intr.width = roi.width;
-        calib.color_intr.height = roi.height;
+        calib.intrinsic.cx -= static_cast<float>(roi.x);
+        calib.intrinsic.cy -= static_cast<float>(roi.y);
+        calib.intrinsic.calib_resolution = Eigen::Vector2i{ roi.width, roi.height };
 
-        calib.color_resolution = Eigen::Vector2i{ roi.width, roi.height };
+        calib.frame_resolution = Eigen::Vector2i{ roi.width, roi.height };
     }
 
 } // namespace hw

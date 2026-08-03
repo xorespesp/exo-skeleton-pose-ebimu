@@ -79,8 +79,7 @@ namespace io
         parsed.fy = static_cast<float>(camera_matrix.at<double>(1, 1));
         parsed.cx = static_cast<float>(camera_matrix.at<double>(0, 2));
         parsed.cy = static_cast<float>(camera_matrix.at<double>(1, 2));
-        parsed.width = width;
-        parsed.height = height;
+        parsed.calib_resolution = Eigen::Vector2i{ width, height };
 
         // A zero focal length would reach the pose solver as a valid-looking set and produce
         // garbage, so it is caught where the file is read rather than where it is used.

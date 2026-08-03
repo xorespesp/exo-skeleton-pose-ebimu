@@ -44,7 +44,7 @@ namespace hw
         // Describes the images observers actually receive, not the raw sensor:
         // an ROI shifts the principal point and shrinks the resolution these report.
         const calibration_t& get_calibration() const { return _calib; }
-        Eigen::Vector2i get_color_camera_resolution() const { return _color_resolution; }
+        Eigen::Vector2i get_color_frame_resolution() const { return _color_frame_resolution; }
         frame_format_t get_color_format() const { return _color_format; }
         std::optional<roi_t> get_color_roi() const { return _color_roi; } // nullopt: whole frames
 
@@ -105,7 +105,7 @@ namespace hw
 
         // Cached at open(); immutable while streaming.
         calibration_t _calib{};
-        Eigen::Vector2i _color_resolution{ Eigen::Vector2i::Zero() };
+        Eigen::Vector2i _color_frame_resolution{ Eigen::Vector2i::Zero() };
         source_backend_t _source_backend{};
         std::string _source_name;
         frame_format_t _color_format{};

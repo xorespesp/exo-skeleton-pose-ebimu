@@ -500,7 +500,7 @@ namespace
             }
 
             // ----- apriltag -----
-            if (ImGui::CollapsingHeader("AprilTag detection", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::CollapsingHeader("Tag detection", ImGuiTreeNodeFlags_DefaultOpen)) {
                 // One channel is enough, so enabling detection puts the camera in gray output.
                 if (ImGui::Checkbox("Enable", &_detect_enabled)) {
                     _dev.set_frame_format(_detect_enabled ? vz::frame_format_t::gray

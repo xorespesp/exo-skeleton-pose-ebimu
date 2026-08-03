@@ -159,8 +159,8 @@ namespace io
 
         spdlog::info("recording: camera stream '{}' registered ({}x{}, {})"
             , info.stream_name
-            , info.calibration.color_resolution.x()
-            , info.calibration.color_resolution.y()
+            , info.calibration.frame_resolution.x()
+            , info.calibration.frame_resolution.y()
             , hw::frame_format_to_str(info.color_format)
         );
 

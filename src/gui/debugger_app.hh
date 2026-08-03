@@ -10,6 +10,7 @@
 #include "pose/tag_detector.hh"
 #include "pose/frontal_pose_estimator.hh"
 #include "pose/sagittal_pose_estimator.hh"
+#include "pose/hinge_angle.hh"
 #include "pose/view_plane.hh"
 #include "plot_buffer.hh"
 
@@ -35,6 +36,16 @@ namespace gui
         raw_skeleton,  // measured per-joint 3D positions + bones, with the forward-kinematics overlay
         rig_skeleton,  // fixed-length T-pose leg rig driven purely by the per-joint `local_anim_rot`
         positions,     // per-joint position channels over time, in plot space (2D line subplot grid)
+        sagittal_angles,  // per-joint flexion over time: the measured angle against the one `local_anim_rot` carries
+    };
+
+    // Controls shared by the plot modes that lay one subplot out per joint (`positions`, `sagittal_angles`).
+    struct grid_plot_ui_t
+    {
+        bool autosize{ true };    // pack subplots to fill the panel
+        float size_px{ 150.0f };  // manual subplot cell size [px], DPI-scaled at use
+        bool lock{ false };       // force the default range (live), else mouse-adjustable
+        bool sync{ true };        // share one Y range across all subplots
     };
 
     enum class source_kind_t { k4a_device, vz_device, recording };
@@ -77,6 +88,7 @@ namespace gui
         void _render_raw_skeleton_plot();  // raw_skeleton: measured 3D positions + bones (+ FK overlay)
         void _render_rig_skeleton_plot();  // rig_skeleton: fixed-length T-pose rig driven by `local_anim_rot`
         void _render_positions_plot();     // positions: per-joint positions over time (2D subplot grid)
+        void _render_sagittal_angles_plot();  // sagittal_angles: per-joint flexion over time (2D subplot grid)
 
         // Shared 3D skeleton renderer: one front-facing, equal-scaled, data-fitted plot drawing the
         // per-joint display-space positions as bones + spheres + labels, with an optional second
@@ -109,11 +121,12 @@ namespace gui
             bool camera_fullscreen{ false };
             plot_type_t plot_type{ plot_type_t::raw_skeleton };
 
-            // positions plot (2D subplot grid) controls
-            bool pos_plot_autosize{ true };   // pack subplots to fill the panel
-            float pos_plot_size_px{ 150.0f }; // manual subplot cell size [px], DPI-scaled at use
-            bool pos_plot_lock{ false };      // force the default range (live), else mouse-adjustable
-            bool pos_plot_sync{ true };       // share one Y range across all subplots
+            // 2D subplot-grid controls, one set per grid mode so each keeps its own framing
+            grid_plot_ui_t pos_grid{};   // positions
+            grid_plot_ui_t angle_grid{}; // sagittal_angles
+            // Which flexion the sagittal-angles grid draws: each joint's turn from its parent bone, or
+            // its own bone's turn in the rig frame. Both are recorded, so this only picks the view.
+            bool angle_plot_relative{ true };
 
             // raw_skeleton plot style
             float raw_skel_point_size{ 7.5f };                          // joint sphere size [px]
@@ -172,10 +185,17 @@ namespace gui
         std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints> _raw_skel_positions{};
         // per-joint position history (display space) for the positions plot
         plot_buffer<Eigen::Vector3f, pose::kNumJoints> _pos_plot_bufs;
+        // per-joint flexion history [deg] for the sagittal-angles plot, two pairs of (estimator's
+        // measured angle, the angle read back out of `local_anim_rot`): 
+        // channels 0-1 hold the turn from the parent bone, 
+        // channels 2-3 the bone's own turn in the rig frame
+        plot_buffer<Eigen::Vector4f, pose::kNumJoints> _angle_plot_bufs;
         int _skel_plot_autofit_frames{ 30 }; // frames left to auto-fit the 3D box (after a source/view change), then free zoom
-        // positions plot (2D subplot grid) range controls
+        // 2D subplot-grid range controls, one pair per grid mode
         bool _pos_plot_reset{ false };   // one-shot: force the default range on the next frame
         double _pos_plot_sync_y[2]{ 0.0, 0.0 }; // shared Y range link for "Sync Plots"
+        bool _angle_plot_reset{ false };
+        double _angle_plot_sync_y[2]{ 0.0, 0.0 };
     };
 
 } // namespace gui

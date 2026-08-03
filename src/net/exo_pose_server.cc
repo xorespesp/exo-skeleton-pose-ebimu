@@ -471,9 +471,16 @@ namespace net
             fb_proto::Quat fb_local_anim_rot;
             if (st.local_anim_rot.has_value()) { fb_local_anim_rot = to_fb_quat(st.local_anim_rot.value()); }
 
+            // The same joint's flexion as signed angles, which a client can log or plot directly.
+            const auto to_fb_angle = [](const std::optional<double>& a) {
+                return a.has_value() ? fb::Optional<double>{ a.value() } : fb::nullopt;
+            };
+
             joints.push_back(fb_proto::CreateJointPose(
                 b, static_cast<fb_proto::JointId>(def.joint_id),
-                st.local_anim_rot.has_value() ? &fb_local_anim_rot : nullptr
+                st.local_anim_rot.has_value() ? &fb_local_anim_rot : nullptr,
+                to_fb_angle(st.local_sagittal_angle),
+                to_fb_angle(st.absolute_sagittal_angle)
             ));
         }
 

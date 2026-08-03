@@ -19,6 +19,7 @@ namespace gui
 
         json opt_v3_json(const std::optional<Eigen::Vector3d>& v) { return v.has_value() ? v3_json(v.value()) : json(nullptr); }
         json opt_q_json(const std::optional<Eigen::Quaterniond>& q) { return q.has_value() ? q_json(q.value()) : json(nullptr); }
+        json opt_num_json(const std::optional<double>& d) { return d.has_value() ? json(d.value()) : json(nullptr); }
 
         // Chosen camera-space position of a detection: the selected pose translation, else candidate[0].
         std::optional<Eigen::Vector3d> detection_position(const pose::tag_detection_t& det)
@@ -86,6 +87,8 @@ namespace gui
             jr.raw_position = st.raw_position;
             jr.position = st.position;
             jr.local_anim_rot = st.local_anim_rot;
+            jr.local_sagittal_angle = st.local_sagittal_angle;
+            jr.absolute_sagittal_angle = st.absolute_sagittal_angle;
             f.rest_position[ji] = estimator.get_rest_position(def.joint_id);
         }
 
@@ -102,13 +105,17 @@ namespace gui
         pose::view_plane_t view_plane) const
     {
         json root;
-        root["schema"] = "exo-pose-trace/v4";
+        root["schema"] = "exo-pose-trace/v5";
         root["notes"] = "Joint positions are [x,y,z] in meters, rig frame (X to the exo's left, Y down, "
                         "Z behind it; the frame of a camera facing it head-on). A sagittal run "
                         "approximates them from the image plane, so they lie on x = 0. "
                         "Detection positions are tag->camera translations and exist only when the "
                         "detector solved a tag pose. Quaternions are [w,x,y,z]. local_anim_rot is the "
-                        "per-joint animation rotation (parent-relative, vs the captured rest).";
+                        "per-joint animation rotation (parent-relative, vs the captured rest). The "
+                        "two angles are the same joint's flexion about the lateral axis in radians, "
+                        "signed by the right-hand rule about rig +X and likewise vs the captured "
+                        "rest: local_sagittal_angle is the turn from the parent bone, "
+                        "absolute_sagittal_angle this bone's own turn in the rig frame.";
         root["view_plane"] = std::string{ pose::view_plane_name(view_plane) };
 
         root["source"] = {
@@ -194,6 +201,8 @@ namespace gui
                 jj["raw_position"] = opt_v3_json(jr.raw_position);
                 jj["position"] = opt_v3_json(jr.position);
                 jj["local_anim_rot"] = opt_q_json(jr.local_anim_rot);
+                jj["local_sagittal_angle"] = opt_num_json(jr.local_sagittal_angle);
+                jj["absolute_sagittal_angle"] = opt_num_json(jr.absolute_sagittal_angle);
                 joints[joint_name(i)] = std::move(jj);
             }
             jf["joints"] = std::move(joints);

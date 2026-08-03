@@ -13,11 +13,26 @@ namespace pose
     using seconds_f64 = std::chrono::duration<double>;
 
     // Per-joint result of one estimation step. Positions are in rig space (see joints_def.hh).
+    //
+    // The rotation and both angles express motion measured from the captured rest pose: they read
+    // identity and zero while the exo holds the pose that was captured, and grow as it leaves it.
+    // The two angles are flexion in the exo's sagittal plane [rad], signed by the right-hand rule
+    // about the rig's lateral axis.
     struct joint_state_t
     {
         std::optional<Eigen::Vector3d> raw_position;      // raw position this frame (fresh detection)
         std::optional<Eigen::Vector3d> position;          // smoothed + held position (drives the skeleton)
-        std::optional<Eigen::Quaterniond> local_anim_rot; // parent-relative rotation vs the captured rest (drives the rig)
+        std::optional<Eigen::Quaterniond> local_anim_rot; // parent-relative rotation vs rest (drives the rig)
+
+        // This joint's turn relative to its parent bone: 
+        // the angle form of `local_anim_rot`, taken in the hinge plane (see hinge_angle.hh).
+        std::optional<double> local_sagittal_angle;
+
+        // This joint's own bone's turn in the rig frame. 
+        // The running total of `local_sagittal_angle` down the chain, 
+        // which the leg's joints sharing one hinge axis makes a plain sum, 
+        // so it states a bone's attitude without walking its ancestors.
+        std::optional<double> absolute_sagittal_angle;
     };
 
     // ---------------------------------------------------------------------------

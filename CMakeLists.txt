@@ -69,6 +69,7 @@ target_sources(${TARGET_NAME} PRIVATE
     "src/pose/tag_detector.hh"
     "src/pose/tag_detector.cc"
     "src/pose/leg_ik.hh"
+    "src/pose/hinge_angle.hh"
     "src/pose/joints_def.hh"
     "src/pose/view_plane.hh"
     "src/pose/pose_estimator_base.hh"

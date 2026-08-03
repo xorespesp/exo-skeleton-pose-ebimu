@@ -1,4 +1,5 @@
 #include "frontal_pose_estimator.hh"
+#include "hinge_angle.hh"
 #include "leg_ik.hh"
 
 #include <algorithm>
@@ -143,7 +144,7 @@ namespace pose
             }
         }
 
-        // ----- Pass 3: leg IK (3D positions -> per-joint local_anim_rot) -----
+        // ----- Pass 3: leg IK (3D positions -> per-joint local_anim_rot + local_sagittal_angle) -----
         // Needs a captured rest pose (for rest bone directions). Data driven over `get_joint_defs()`: a leg
         // is (knee = child of root, ankle = child of knee, foot = child of ankle). Each joint is a
         // 1-DOF forward/back hinge about the shared lateral axis when the hinge constraint is on.
@@ -163,8 +164,10 @@ namespace pose
             const std::optional<Eigen::Vector3d> hinge = _opt.enable_hinge_constraint
                 ? std::optional<Eigen::Vector3d>{ ik_normalize(_opt.hinge_axis_world) } : std::nullopt;
 
-            // Pelvis is the fixed base: identity animation.
+            // Pelvis is the fixed base: identity animation, no flexion.
             _ctx->last_frame_joint_states[index_of(root)].local_anim_rot = Eigen::Quaterniond::Identity();
+            _ctx->last_frame_joint_states[index_of(root)].local_sagittal_angle = 0.0;
+            _ctx->last_frame_joint_states[index_of(root)].absolute_sagittal_angle = 0.0;
 
             for (const auto& knee_def : get_joint_defs())
             {
@@ -198,6 +201,27 @@ namespace pose
                 _ctx->last_frame_joint_states[index_of(knee)].local_anim_rot = r.hip;
                 _ctx->last_frame_joint_states[index_of(ankle.value())].local_anim_rot = r.knee;
                 _ctx->last_frame_joint_states[index_of(foot.value())].local_anim_rot = r.ankle;
+
+                // Flexion per joint, taken from the measured positions so the reading follows the
+                // observed bone directions. Each bone's turn since rest within the plane
+                // perpendicular to `hinge_axis_world` is its absolute angle; subtracting its parent
+                // bone's turn leaves the joint's own.
+                const Eigen::Vector3d thigh_dir = ik_normalize(knee_pos.value() - hip_pos.value());
+                const Eigen::Vector3d shin_dir = ik_normalize(ankle_pos.value() - knee_pos.value());
+                const Eigen::Vector3d foot_dir = ik_normalize(foot_pos.value() - ankle_pos.value());
+
+                const Eigen::Vector3d axis = _opt.hinge_axis_world;
+                const double d_thigh = hinge_plane_angle(thigh_rest, thigh_dir, axis);
+                const double d_shin = hinge_plane_angle(shin_rest, shin_dir, axis);
+                const double d_foot = hinge_plane_angle(foot_rest, foot_dir, axis);
+
+                _ctx->last_frame_joint_states[index_of(knee)].absolute_sagittal_angle = d_thigh;
+                _ctx->last_frame_joint_states[index_of(ankle.value())].absolute_sagittal_angle = d_shin;
+                _ctx->last_frame_joint_states[index_of(foot.value())].absolute_sagittal_angle = d_foot;
+
+                _ctx->last_frame_joint_states[index_of(knee)].local_sagittal_angle = d_thigh;
+                _ctx->last_frame_joint_states[index_of(ankle.value())].local_sagittal_angle = wrap_pi(d_shin - d_thigh);
+                _ctx->last_frame_joint_states[index_of(foot.value())].local_sagittal_angle = wrap_pi(d_foot - d_shin);
             }
         }
     }

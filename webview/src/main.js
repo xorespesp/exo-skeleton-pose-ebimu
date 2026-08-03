@@ -3,7 +3,7 @@
 
 import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
 import { createScene, loadCharacter } from './scene.js';
-import { captureBindPose, applyPoseFrame, quatToEulerDeg, BONE_BY_JOINT_ID } from './skeleton.js';
+import { captureBindPose, applyPoseFrame, quatToEulerDeg, quatHingeAngleDeg, BONE_BY_JOINT_ID } from './skeleton.js';
 import { PoseClient } from './pose-client.js';
 
 const { scene, startRenderLoop } = createScene(document.getElementById('container'));
@@ -22,6 +22,10 @@ const ui = {
     frame_seq: 0,
     euler_order: 'XYZ',
     joints: Object.fromEntries(BONE_BY_JOINT_ID.map((n) => [n, '-'])),
+    // Which form of the incoming motion drives the rig, and the per-joint flexion readout
+    // ("local_sagittal_angle / absolute_sagittal_angle / the turn read back out of local_anim_rot", all in degrees).
+    drive_from_angle: false,
+    flexion: Object.fromEntries(BONE_BY_JOINT_ID.map((n) => [n, '-'])),
 };
 
 // Transient control flags (not shown in the panel).
@@ -77,17 +81,28 @@ client.onStatus = (st) => {
     refresh();
 };
 client.onPoseFrame = (frame) => {
-    applyPoseFrame(bones, bindPose, frame);
+    applyPoseFrame(bones, bindPose, frame, ui.drive_from_angle);
     ui.frame_seq = frame.frameSeq();
     for (let i = 0; i < frame.jointsLength(); i++) {
         const jp = frame.joints(i);
+        const name = BONE_BY_JOINT_ID[jp.id()];
         const q = jp.localAnimRot(); // null when the joint is lost this frame
         if (q) {
             const e = quatToEulerDeg(q, ui.euler_order); // convert on the client
-            ui.joints[BONE_BY_JOINT_ID[jp.id()]] = `${e.x.toFixed(0)}, ${e.y.toFixed(0)}, ${e.z.toFixed(0)}`;
+            ui.joints[name] = `${e.x.toFixed(0)}, ${e.y.toFixed(0)}, ${e.z.toFixed(0)}`;
         } else {
-            ui.joints[BONE_BY_JOINT_ID[jp.id()]] = '-';
+            ui.joints[name] = '-';
         }
+
+        // The server's two flexions beside the one this client can recover from the rotation. The
+        // last parts company with the first by however far the rotation's axis sits off the lateral
+        // axis; the middle one is the same turn taken in the exo's frame.
+        const rel = jp.localSagittalAngle(); // null when the joint is lost this frame
+        const abs = jp.absoluteSagittalAngle();
+        const deg = (rad) => (rad * 180 / Math.PI).toFixed(1);
+        ui.flexion[name] = (rel !== null && abs !== null && q)
+            ? `${deg(rel)} / ${deg(abs)} / ${quatHingeAngleDeg(q).toFixed(1)}`
+            : '-';
     }
 };
 
@@ -141,11 +156,20 @@ const cCalibrate = rest.add(acts, 'calibrate').name('Calibrate');
 const cClear = rest.add(acts, 'clearRest').name('Clear');
 rest.add(ui, 'rest_pose').name('state').listen().disable();
 
+const rig = gui.addFolder('Rig Drive');
+rig.add(ui, 'drive_from_angle').name('from local_sagittal_angle');
+
 const joints = gui.addFolder('Joints (euler deg)').close();
 joints.add(ui, 'frame_seq').name('frame seq').listen().disable();
 joints.add(ui, 'euler_order', ['XYZ', 'XZY', 'YXZ', 'YZX', 'ZXY', 'ZYX']).name('euler order');
 for (const name of BONE_BY_JOINT_ID) {
     joints.add(ui.joints, name).listen().disable();
+}
+
+// Per joint: the server's two flexion angles beside the one recovered from `local_anim_rot` [deg].
+const flexion = gui.addFolder('Flexion, rel / abs / quat (deg)').close();
+for (const name of BONE_BY_JOINT_ID) {
+    flexion.add(ui.flexion, name).listen().disable();
 }
 
 // Enable/disable controls to match the current connection + source state.

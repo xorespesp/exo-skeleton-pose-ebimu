@@ -65,7 +65,7 @@ namespace gui
             return Eigen::Vector3f(static_cast<float>(p.x()), static_cast<float>(p.z()), static_cast<float>(-p.y()));
         }
 
-        constexpr float kPositionsWindowSec = 6.0f; // positions-plot x-axis scroll span [s]
+        constexpr float kGridPlotWindowSec = 6.0f; // subplot-grid x-axis scroll span [s]
         constexpr int kNumAutofitFrames = 30; // auto-fit the 3D box for this many frames after a source/view change
 
         constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
@@ -148,9 +148,11 @@ namespace gui
         constexpr float kPlotMinW = 200.0f; // min width for the plots pane [px]
         constexpr float kSideMinW = 200.0f; // min width for the control pane [px]
 
-        // One subplot: a buffer's channels drawn zero-copy from its strided view over the newest
-        // `window` seconds. x auto-scrolls; y obeys `y_cond` (Always locks, Once mouse-free) and
-        // `sync` (links y to the shared `sy` so all subplots share one range).
+        // One subplot: channels [first_channel, first_channel + channel_count) of a buffer, drawn
+        // zero-copy from its strided view over the newest `window` seconds. `colors` and `names` are
+        // indexed by channel, so a buffer carrying several sets of channels labels each in place.
+        // x auto-scrolls; y obeys `y_cond` (Always locks, Once mouse-free) and `sync` (links y to
+        // the shared `sy` so all subplots share one range).
         template <typename _Scalar>
         void draw_plot_lines(
             const char* title,
@@ -163,7 +165,9 @@ namespace gui
             double* sy,
             const ImVec4* colors,
             const char* const* names,
-            const ImVec2& size)
+            const ImVec2& size,
+            std::size_t first_channel,
+            std::size_t channel_count)
         {
             // legend shown (short names); the caller wraps each subplot in PushID/PopID for unique ids.
             if (!ImPlot::BeginPlot(title, size, ImPlotFlags_None)) { return; }
@@ -174,7 +178,9 @@ namespace gui
             ImPlot::SetupAxisLimits(ImAxis_X1, v.t_hi - window, v.t_hi, ImPlotCond_Always);
             ImPlot::SetupAxisLimits(ImAxis_Y1, y_lo, y_hi, y_cond);
 
-            for (std::size_t k = 0; k < v.ys.size(); ++k)
+            // An empty view has no channels, which leaves the plot drawn but blank.
+            const std::size_t last_channel = std::min(first_channel + channel_count, v.ys.size());
+            for (std::size_t k = first_channel; k < last_channel; ++k)
             {
                 ImPlotSpec spec;
                 spec.LineColor = colors[k];
@@ -184,6 +190,79 @@ namespace gui
                 ImPlot::PlotLine(names[k], v.xs, v.ys.data() + k, v.count, spec);
             }
             ImPlot::EndPlot();
+        }
+
+        // Range and sizing controls for a subplot-grid plot mode. `reset` is the caller's one-shot
+        // flag, raised here and cleared once the grid has drawn with the default range forced.
+        void draw_grid_plot_controls(grid_plot_ui_t& g, bool& reset)
+        {
+            ImGui::Checkbox("Lock Plots", &g.lock);
+            ImGui::SetItemTooltip("Hold every subplot at its default Y range (no mouse pan/zoom on Y).\n"
+                                  "On: ranges stay put, live. Off: Y is mouse-adjustable.");
+            ImGui::SameLine();
+            if (ImGui::Checkbox("Sync Plots", &g.sync)) { reset = true; }
+            ImGui::SetItemTooltip("Share one Y range across all joint subplots so they compare directly.");
+            ImGui::SameLine();
+            if (ImGui::Button("Reset Plots")) { reset = true; }
+            ImGui::SetItemTooltip("Return every subplot to its default Y range now.");
+
+            ImGui::Checkbox("Auto-size Plots", &g.autosize);
+            ImGui::SetItemTooltip("On: pack the subplots to fill the panel. Off: use a fixed cell size.");
+            if (!g.autosize) {
+                ImGui::SliderFloat("Plots Size", &g.size_px, 80.0f, 400.0f, "%.0f px");
+            }
+        }
+
+        // One square subplot per rig joint, packed to fill the panel or laid out at a fixed cell
+        // size, each drawing channels [first_channel, first_channel + channel_count) of
+        // `get_view(joint index)`. Y obeys `y_cond` and `g.sync`; X scrolls the newest window.
+        template <typename _GetView>
+        void draw_joint_plot_grid(
+            const grid_plot_ui_t& g,
+            float dpi_scale,
+            float y_lo, float y_hi,
+            ImPlotCond y_cond,
+            double* sync_y,
+            const ImVec4* colors,
+            const char* const* names,
+            std::size_t first_channel,
+            std::size_t channel_count,
+            _GetView&& get_view)
+        {
+            const int n = static_cast<int>(pose::kNumJoints);
+            const float spacing = ImGui::GetStyle().ItemSpacing.x;
+            const ImVec2 avail = ImGui::GetContentRegionAvail();
+
+            int cols = 1;
+            float cell = 1.0f;
+            if (g.autosize) {
+                for (int c = 1; c <= n; ++c) {
+                    const int r = (n + c - 1) / c;
+                    const float cw = (avail.x - spacing * (c - 1)) / c;
+                    const float ch = (avail.y - spacing * (r - 1)) / r;
+                    if (const float s = std::min(cw, ch); s > cell) { cell = s; cols = c; }
+                }
+            } else {
+                cell = g.size_px * dpi_scale; // DPI-aware px
+                cols = std::max(1, static_cast<int>((avail.x + spacing) / (cell + spacing)));
+            }
+            const ImVec2 cell_sz{ cell, cell };
+
+            int col = 0;
+            for (std::size_t i = 0; i < pose::kNumJoints; ++i)
+            {
+                const auto name = pose::get_joint_name(static_cast<pose::joint_id_t>(i));
+                const std::string title = std::format("{}###{}", name, name);
+                if (col != 0) { ImGui::SameLine(); }
+                ImGui::PushID(static_cast<int>(i));
+                ImGui::BeginGroup();
+                draw_plot_lines(title.c_str(), get_view(i), kGridPlotWindowSec, y_lo, y_hi,
+                           y_cond, g.sync, sync_y, colors, names, cell_sz,
+                           first_channel, channel_count);
+                ImGui::EndGroup();
+                ImGui::PopID();
+                if (++col >= cols) { col = 0; }
+            }
         }
 
     } // namespace
@@ -392,7 +471,9 @@ namespace gui
 
         _server->pipeline().open_source(_config);
         _last_seq = 0;
-        _pos_plot_bufs.clear(); // restart the positions-plot timeline for the new source
+        // restart both subplot-grid timelines for the new source
+        _pos_plot_bufs.clear();
+        _angle_plot_bufs.clear();
         _raw_skel_positions = {};
         _skel_plot_autofit_frames = kNumAutofitFrames; // re-fit the 3D box over the next frames of the new source
     }
@@ -445,7 +526,9 @@ namespace gui
     {
         _server->pipeline().close_source();
         _last_seq = 0;
-        _pos_plot_bufs.clear(); // restart the positions-plot timeline for the new source
+        // restart both subplot-grid timelines for the new source
+        _pos_plot_bufs.clear();
+        _angle_plot_bufs.clear();
         _raw_skel_positions = {};
         _skel_plot_autofit_frames = kNumAutofitFrames; // re-fit the 3D box over the next frames of the new source
     }
@@ -483,11 +566,22 @@ namespace gui
             _trace.capture(ts, _last_tag_detections, *est, gates);
         }
 
-        // Advance the positions-plot timeline.
+        // Advance both subplot-grid timelines.
         _pos_plot_bufs.advance(t_now);
+        _angle_plot_bufs.advance(t_now);
 
         // Position source follows the smoothing switch: smoothed+held when on, raw when off.
         const bool smoothed_positions = est->uses_smoothed_positions();
+
+        // Axis the sagittal-angle traces are read about. A frontal run names it in its options; a
+        // sagittal run turns its in-plane readings about the rig's lateral axis.
+        const Eigen::Vector3d hinge_axis = pipe.frontal_options()
+            ? pipe.frontal_options()->hinge_axis_world : Eigen::Vector3d::UnitX();
+
+        // Running total of the rotation-derived flexion down each leg, giving that trace the rig-frame
+        // reading the estimator supplies for its own. `get_joint_defs()` lists a parent before its
+        // children, so one forward pass fills it.
+        std::array<double, pose::kNumJoints> quat_angle_sum{};
 
         int ji = 0;
         for (const auto& def : pose::get_joint_defs())
@@ -496,6 +590,22 @@ namespace gui
             const std::optional<Eigen::Vector3d> p = smoothed_positions ? st.position : st.raw_position;
             _raw_skel_positions[ji] = p; // latest rig-space position for the skeleton plot
             if (p.has_value()) { _pos_plot_bufs.push(ji, rig_to_display(p.value())); } // display-space history
+
+            const double quat_angle = st.local_anim_rot.has_value()
+                ? pose::quat_hinge_angle(st.local_anim_rot.value(), hinge_axis) : 0.0;
+            quat_angle_sum[ji] = pose::is_root_joint(def.joint_id)
+                ? quat_angle : quat_angle_sum[static_cast<std::size_t>(def.parent)] + quat_angle;
+
+            // Every trace comes from the same solved joint, so they are plotted only together.
+            if (st.local_sagittal_angle.has_value() && st.absolute_sagittal_angle.has_value() && st.local_anim_rot.has_value())
+            {
+                _angle_plot_bufs.push(ji, Eigen::Vector4f{
+                    static_cast<float>(st.local_sagittal_angle.value() * kRadToDeg),
+                    static_cast<float>(quat_angle * kRadToDeg),
+                    static_cast<float>(st.absolute_sagittal_angle.value() * kRadToDeg),
+                    static_cast<float>(quat_angle_sum[ji] * kRadToDeg),
+                });
+            }
             ++ji;
         }
     }
@@ -593,7 +703,7 @@ namespace gui
         // Visualization section
         if (ImGui::CollapsingHeader("Visualization", ImGuiTreeNodeFlags_DefaultOpen))
         {
-            constexpr std::array<const char*, 3> plot_types{ "Raw Skeleton", "Rig Skeleton", "Positions" };
+            constexpr std::array<const char*, 4> plot_types{ "Raw Skeleton", "Rig Skeleton", "Positions", "Sagittal Angles" };
             if (ImGui::BeginCombo("Plot Type", plot_types[static_cast<int>(_ui.plot_type)])) {
                 for (size_t i = 0; i < plot_types.size(); ++i) {
                     const plot_type_t curr_plot_type = static_cast<plot_type_t>(i);
@@ -608,27 +718,25 @@ namespace gui
             }
             ImGui::SetItemTooltip("Raw Skeleton: Measured raw skeleton (+ FK reconstruction overlay).\n"
                                   "Rig Skeleton: Fixed-length T-pose leg rig driven by local_anim_rot.\n"
-                                  "Positions: Per-joint XYZ position channels as 2D line plots.");
+                                  "Positions: Per-joint XYZ position channels as 2D line plots.\n"
+                                  "Sagittal Angles: Per-joint flexion [deg], measured against what\n"
+                                  "                 local_anim_rot carries, as 2D line plots.");
 
             // Plot controls, matched to the selected type: the 3D skeletons get a box re-fit; the
-            // positions grid gets the range lock/sync/reset and cell-size controls.
+            // subplot grids get the range lock/sync/reset and cell-size controls.
             if (_ui.plot_type == plot_type_t::positions)
             {
-                ImGui::Checkbox("Lock Plots", &_ui.pos_plot_lock);
-                ImGui::SetItemTooltip("Hold every subplot at its default Y range (no mouse pan/zoom on Y).\n"
-                                      "On: ranges stay put, live. Off: Y is mouse-adjustable.");
-                ImGui::SameLine();
-                if (ImGui::Checkbox("Sync Plots", &_ui.pos_plot_sync)) { _pos_plot_reset = true; }
-                ImGui::SetItemTooltip("Share one Y range across all joint subplots so they compare directly.");
-                ImGui::SameLine();
-                if (ImGui::Button("Reset Plots")) { _pos_plot_reset = true; }
-                ImGui::SetItemTooltip("Return every subplot to its default Y range now.");
-
-                ImGui::Checkbox("Auto-size Plots", &_ui.pos_plot_autosize);
-                ImGui::SetItemTooltip("On: pack the subplots to fill the panel. Off: use a fixed cell size.");
-                if (!_ui.pos_plot_autosize) {
-                    ImGui::SliderFloat("Plots Size", &_ui.pos_plot_size_px, 80.0f, 400.0f, "%.0f px");
-                }
+                draw_grid_plot_controls(_ui.pos_grid, _pos_plot_reset);
+            }
+            else if (_ui.plot_type == plot_type_t::sagittal_angles)
+            {
+                ImGui::Checkbox("Relative rotation", &_ui.angle_plot_relative);
+                ImGui::SetItemTooltip("Which flexion the traces draw. Both are recorded, so toggling\n"
+                                      "switches the view and keeps either history.\n"
+                                      "On: each joint's turn from its parent bone (local_sagittal_angle).\n"
+                                      "Off: the joint's own bone turn in the exo's frame\n"
+                                      "     (absolute_sagittal_angle), the running total down the leg.");
+                draw_grid_plot_controls(_ui.angle_grid, _angle_plot_reset);
             }
             else // raw/rig_skeleton (3D)
             {
@@ -919,6 +1027,7 @@ namespace gui
         case plot_type_t::raw_skeleton:  this->_render_raw_skeleton_plot(); break;
         case plot_type_t::rig_skeleton:  this->_render_rig_skeleton_plot(); break;
         case plot_type_t::positions:     this->_render_positions_plot(); break;
+        case plot_type_t::sagittal_angles:  this->_render_sagittal_angles_plot(); break;
         default: throw std::runtime_error{ "unknown plot type" };
         }
     }
@@ -1013,52 +1122,53 @@ namespace gui
 
     void debugger_app::_render_positions_plot()
     {
-        const int n = static_cast<int>(pose::kNumJoints);
-        const float spacing = ImGui::GetStyle().ItemSpacing.x;
-        const ImVec2 avail = ImGui::GetContentRegionAvail();
-
-        // Subplot cell size: pack to fill the panel, or a fixed DPI-scaled size.
-        int cols = 1;
-        float cell = 1.0f;
-        if (_ui.pos_plot_autosize) {
-            for (int c = 1; c <= n; ++c) {
-                const int r = (n + c - 1) / c;
-                const float cw = (avail.x - spacing * (c - 1)) / c;
-                const float ch = (avail.y - spacing * (r - 1)) / r;
-                if (const float s = std::min(cw, ch); s > cell) { cell = s; cols = c; }
-            }
-        } else {
-            cell = _ui.pos_plot_size_px * this->renderer().dpi_scale(); // DPI-aware px
-            cols = std::max(1, static_cast<int>((avail.x + spacing) / (cell + spacing)));
-        }
-        const ImVec2 cell_sz{ cell, cell };
-
         // Y range: Lock (or a one-shot Reset) forces the default; otherwise it is mouse-adjustable
         // (set once). Sync links one Y range across every subplot. X always scrolls the newest window.
         constexpr float kYLo = -1.2f, kYHi = 1.2f; // default position range [m], display space
-        const ImPlotCond y_cond = (_ui.pos_plot_lock || _pos_plot_reset) ? ImPlotCond_Always : ImPlotCond_Once;
+        const ImPlotCond y_cond = (_ui.pos_grid.lock || _pos_plot_reset) ? ImPlotCond_Always : ImPlotCond_Once;
 
         // Channels are plot space: rig X, rig Z, and -rig Y (the 3D views label the same three axes
         // right / depth / up).
         const ImVec4 axis_col[3]{ { 0.95f, 0.35f, 0.35f, 1 }, { 0.45f, 0.85f, 0.45f, 1 }, { 0.45f, 0.55f, 0.95f, 1 } };
         const char* const axis_nm[3]{ "x", "y", "z" };
 
-        int col = 0;
-        for (std::size_t i = 0; i < pose::kNumJoints; ++i)
-        {
-            const auto name = pose::get_joint_name(static_cast<pose::joint_id_t>(i));
-            const std::string title = std::format("{}###{}", name, name);
-            if (col != 0) { ImGui::SameLine(); }
-            ImGui::PushID(static_cast<int>(i));
-            ImGui::BeginGroup();
-            draw_plot_lines(title.c_str(), _pos_plot_bufs.view(i), kPositionsWindowSec, kYLo, kYHi,
-                       y_cond, _ui.pos_plot_sync, _pos_plot_sync_y, axis_col, axis_nm, cell_sz);
-            ImGui::EndGroup();
-            ImGui::PopID();
-            if (++col >= cols) { col = 0; }
-        }
+        draw_joint_plot_grid(
+            _ui.pos_grid, this->renderer().dpi_scale(), kYLo, kYHi, y_cond,
+            _pos_plot_sync_y, axis_col, axis_nm, /*first_channel*/0, /*channel_count*/3,
+            [this](std::size_t i) { return _pos_plot_bufs.view(i); }
+        );
 
         _pos_plot_reset = false; // one-shot: the ranges were forced this frame
+    }
+
+    void debugger_app::_render_sagittal_angles_plot()
+    {
+        // A walking exo swings its joints well inside this, so the default frames the motion without
+        // clipping a deep knee bend.
+        constexpr float kYLo = -90.0f, kYHi = 90.0f; // default flexion range [deg]
+        const ImPlotCond y_cond = (_ui.angle_grid.lock || _angle_plot_reset) ? ImPlotCond_Always : ImPlotCond_Once;
+
+        // Two readings of one joint's flexion. "angle" is the estimator's, measured on the bone
+        // directions in the hinge plane, and is what the protocol carries. "quat" is the turn a
+        // client recovers from `local_anim_rot` about the lateral axis. The two traces separate by
+        // however far the joint's rotation axis sits off that lateral axis.
+        //
+        // The buffer holds that pair twice over, parent-relative then rig-frame, so the
+        // "Relative rotation" toggle picks a pair without disturbing either history.
+        const ImVec4 ch_col[4]{
+            { 0.95f, 0.65f, 0.25f, 1 }, { 0.35f, 0.75f, 0.90f, 1 },
+            { 0.95f, 0.65f, 0.25f, 1 }, { 0.35f, 0.75f, 0.90f, 1 },
+        };
+        const char* const ch_nm[4]{ "angle", "quat", "angle", "quat" };
+        const std::size_t first_channel = _ui.angle_plot_relative ? 0u : 2u;
+
+        draw_joint_plot_grid(
+            _ui.angle_grid, this->renderer().dpi_scale(), kYLo, kYHi, y_cond,
+            _angle_plot_sync_y, ch_col, ch_nm, first_channel, /*channel_count*/2,
+            [this](std::size_t i) { return _angle_plot_bufs.view(i); }
+        );
+
+        _angle_plot_reset = false; // one-shot: the ranges were forced this frame
     }
 
     void debugger_app::_render_skeleton_3d(

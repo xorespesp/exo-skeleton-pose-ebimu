@@ -1,9 +1,9 @@
 #include "sagittal_pose_estimator.hh"
+#include "hinge_angle.hh"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <numbers>
 
 namespace pose
 {
@@ -27,14 +27,6 @@ namespace pose
                 if (c.side == side.value()) { return c.joint_id; }
             }
             return std::nullopt;
-        }
-
-        // Fold an angle into [-pi, pi] so a bone crossing the atan2 branch cut does not jump by 2pi.
-        double wrap_pi(double a) {
-            constexpr double two_pi = 2.0 * std::numbers::pi;
-            a = std::fmod(a + std::numbers::pi, two_pi);
-            if (a < 0.0) { a += two_pi; }
-            return a - std::numbers::pi;
         }
 
         // Direction of the bone from `start` to `end` in the image plane.
@@ -331,6 +323,19 @@ namespace pose
                     states[at(ankle.value())].local_anim_rot = flexion_rotation(a.knee, side);
                     states[at(foot.value())].local_anim_rot = flexion_rotation(a.ankle, side);
 
+                    // The same flexions as signed angles about the rig's lateral axis, 
+                    // the bone's own turn beside the joint's turn from its parent.
+                    // `-side` is the sign flexion_rotation() carries, so the angles agree with the rotations joint for joint.
+                    states[at(root)].local_sagittal_angle = 0.0;
+                    states[at(knee)].local_sagittal_angle = -side * a.hip;
+                    states[at(ankle.value())].local_sagittal_angle = -side * a.knee;
+                    states[at(foot.value())].local_sagittal_angle = -side * a.ankle;
+
+                    states[at(root)].absolute_sagittal_angle = 0.0;
+                    states[at(knee)].absolute_sagittal_angle = -side * d_thigh;
+                    states[at(ankle.value())].absolute_sagittal_angle = -side * d_shin;
+                    states[at(foot.value())].absolute_sagittal_angle = -side * d_foot;
+
                     _ctx->angles = a;
                 }
             }
@@ -338,6 +343,7 @@ namespace pose
 
         // ----- Pass 5: complete the rig -----
         // Every joint owes the consumer a rotation, so a joint left without one takes its mirror's.
+        // The flexion angles travel with it, the three being one joint's motion in three forms.
         // Positions stay as measured: only the tagged leg was observed, and the plots should say so.
         auto& states = _ctx->last_frame_joint_states;
         for (const auto& def : get_joint_defs())
@@ -347,6 +353,8 @@ namespace pose
             const size_t dst = index_of(def.mirror);
             if (states[src].local_anim_rot.has_value() && !states[dst].local_anim_rot.has_value()) {
                 states[dst].local_anim_rot = states[src].local_anim_rot;
+                states[dst].local_sagittal_angle = states[src].local_sagittal_angle;
+                states[dst].absolute_sagittal_angle = states[src].absolute_sagittal_angle;
             }
         }
     }

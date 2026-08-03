@@ -8,9 +8,9 @@
 namespace exo.proto;
 
 // Current version of this schema
-enum ProtocolVersion : uint { Current = 26080200 } // YYMMDDrr
+enum ProtocolVersion : uint { Current = 26080300 } // YYMMDDrr
 
-// Lower-limb joints id. (pose::joint_id_t)
+// Lower-limb joints id.
 enum JointId : ubyte {
     Pelvis = 0,
     RKnee,
@@ -47,17 +47,26 @@ table GetServerStatus {}   // request the current ServerStatus (reply a ServerSt
 
 struct Quat { x: double; y: double; z: double; w: double; }
 
-// One joint's pose info.
+// One joint's pose: the same motion in three forms.
+// All null when the joint is lost this frame.
 table JointPose {
     id: JointId;
-    local_anim_rot: Quat; // parent-relative rotation vs the captured rest pose (drives the skeleton); null when the joint is lost this frame.
+
+    // Rotation from the captured rest pose, relative to the parent bone (identity at rest).
+    // Apply to a rig bone as: bone.local = bind * local_anim_rot
+    local_anim_rot: Quat;
+
+    // Flexion in the exo's sagittal plane from the captured rest pose [rad], 0 at rest.
+    // Positive bends the knee back, negative swings the leg forward.
+    local_sagittal_angle: double = null;    // relative to the parent bone: this joint's own bend
+    absolute_sagittal_angle: double = null; // relative to the exo: the sum of `local_sagittal_angle` down the chain
 }
 
 // One estimation step, broadcast to subscribed clients per new frame.
 table PoseFrame {
     frame_seq: uint; // position of this frame in the open source's stream; restarts on every open
     timestamp_us: long; // when the source captured the frame, in Unix microseconds
-    has_rest_pose: bool;
+    has_rest_pose: bool; // false until CalibrateRestPose succeeds; every joint stays null until then
     joints: [JointPose];
 }
 

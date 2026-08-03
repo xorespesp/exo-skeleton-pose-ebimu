@@ -94,6 +94,8 @@ namespace gui
             std::optional<Eigen::Vector3d> raw_position;      // raw measured rig-space position [m]
             std::optional<Eigen::Vector3d> position;          // smoothed + held rig-space position [m]
             std::optional<Eigen::Quaterniond> local_anim_rot; // parent-relative animation rotation
+            std::optional<double> local_sagittal_angle;    // flexion from the parent bone [rad]
+            std::optional<double> absolute_sagittal_angle; // this bone's own flexion in the rig frame [rad]
         };
 
         struct frame_rec_t

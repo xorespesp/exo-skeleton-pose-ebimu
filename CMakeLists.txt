@@ -70,6 +70,8 @@ target_sources(${TARGET_NAME} PRIVATE
     "src/pose/tag_detector.cc"
     "src/pose/leg_ik.hh"
     "src/pose/hinge_angle.hh"
+    "src/pose/color_marker_detector.hh"
+    "src/pose/color_marker_detector.cc"
     "src/pose/joints_def.hh"
     "src/pose/view_plane.hh"
     "src/pose/pose_estimator_base.hh"
@@ -318,6 +320,10 @@ if (VZ_SDK_AVAILABLE)
         # tag detection, run without intrinsics for the 2D overlay
         "src/pose/tag_detector.hh"
         "src/pose/tag_detector.cc"
+
+        # color marker detection
+        "src/pose/color_marker_detector.hh"
+        "src/pose/color_marker_detector.cc"
     )
     target_include_directories(${VZCAM_TEST_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_compile_definitions(${VZCAM_TEST_NAME} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)

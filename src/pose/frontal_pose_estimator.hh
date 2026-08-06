@@ -1,7 +1,7 @@
 #pragma once
 #include "pose_estimator_base.hh"
 #include "joints_def.hh"
-#include "tag_detector.hh"
+#include "joint_measurement.hh"
 #include "dsp/one_euro_filter.hh"
 
 #include "hw/timestamp.hh"
@@ -16,20 +16,20 @@
 namespace pose
 {
     // ---------------------------------------------------------------------------
-    // Frontal-view estimator: tag detections -> per-joint 3D points + leg IK rotations
+    // Frontal-view estimator: rig-space joint points -> leg IK rotations
     // ---------------------------------------------------------------------------
     //
     // The camera faces the exo squarely, so its frame is the rig frame and measurements need no
-    // reorientation. A joint's position is the detected tag's camera-space translation, smoothed and
-    // held through occlusion. This requires the detector to solve a tag->camera pose, hence camera
-    // intrinsics.
+    // reorientation. A joint's position is the measured point, smoothed and held through occlusion.
+    // Measuring one at all takes a marker whose distance can be solved, which for a camera is what
+    // camera intrinsics are for.
     // Once a rest pose is captured (any neutral stance), leg IK maps the position track to per-joint
     // local_anim_rot: the minimal-swing rotation of each bone from its rest direction, constrained
     // to a 1-DOF hinge (every exo leg joint is a forward/back hinge). local_anim_rot drives the
     // skeleton and is the value broadcast to clients.
     //
-    // TODO: lens distortion is not corrected. Undistort the tag corners before the pose solve (or
-    // remap the frame) once tags sit near the image border or the lens gets wider.
+    // TODO: lens distortion is not corrected. Undistort the marker points before the pose solve (or
+    // remap the frame) once markers sit near the image border or the lens gets wider.
     class frontal_pose_estimator final : public pose_estimator_base
     {
     public:
@@ -61,9 +61,9 @@ namespace pose
         options_t& options() noexcept { return _opt; }
         const options_t& options() const noexcept { return _opt; }
 
-        // Ingest one frame's detections and recompute every joint state.
+        // Ingest one frame's measurements and recompute every joint state.
         void update(
-            std::span<const tag_detection_t> tag_detections,
+            std::span<const joint_3d_measurement_t> measurements,
             hw::timestamp_t sensor_timestamp // when the source captured the frame
         );
 

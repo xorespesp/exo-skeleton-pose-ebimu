@@ -1,7 +1,7 @@
 #pragma once
 #include "pose_estimator_base.hh"
 #include "joints_def.hh"
-#include "tag_detector.hh"
+#include "joint_measurement.hh"
 #include "dsp/one_euro_filter.hh"
 
 #include "hw/timestamp.hh"
@@ -16,22 +16,23 @@
 namespace pose
 {
     // ---------------------------------------------------------------------------
-    // Sagittal-view estimator: tag centers -> in-plane joint angles
+    // Sagittal-view estimator: image-plane joint points -> in-plane joint angles
     // ---------------------------------------------------------------------------
     //
     // For a camera looking at the exo from the side, every leg joint flexes within the sagittal
-    // plane, which projects onto the image plane. The angles are therefore recoverable from 2D tag
-    // centers alone: no tag->camera pose, no depth, no camera intrinsics. That makes this the cheap
-    // path (the detector skips pose estimation entirely) and immune to depth noise.
+    // plane, which projects onto the image plane. The angles are therefore recoverable from 2D joint
+    // points alone: no marker->camera pose, no depth, no camera intrinsics. That makes this the cheap
+    // path and immune to depth noise.
     //
     // Every rig joint comes out with a rotation, so a consumer always sees a whole skeleton and
     // never has to know how many legs the camera could actually see. Positions are a separate
     // matter: only measured joints get one, which keeps the raw-position views honest.
     //
-    // Reaching that from one side is an internal concern. The tagged leg follows from the detected
-    // tag ids, and the far leg (occluded by the near one) takes its rotations from its mirror joints.
+    // Reaching that from one side is an internal concern. The marked leg follows from the joints
+    // this frame measured, and the far leg (occluded by the near one) takes its rotations from its
+    // mirror joints.
     //
-    // A bone's angle is atan2 over its two tag centers; each joint's rotation is that angle's change
+    // A bone's angle is atan2 over its two endpoints; each joint's rotation is that angle's change
     // since the captured rest, taken relative to its parent bone's change. Angles are computed on
     // pixel coordinates, which is scale free, so the metric approximation below cannot leak in.
     //
@@ -40,13 +41,13 @@ namespace pose
     // about the rig's lateral axis and measured points land on the mid-sagittal plane (X = 0).
     // Which side the camera views from decides the sign of both, and the tagged leg gives it away.
     //
-    // `joint_state_t::position` is reported in approximate meters: the detected tags' pixel edge
-    // lengths against their known physical size give one meters-per-pixel scale for the whole rig.
-    // This keeps one unit convention across estimators for the plots and the diagnostic trace, and
-    // being a single factor it sets the skeleton's size without touching its shape.
+    // `joint_state_t::position` is reported in approximate meters: the scales the measurements
+    // supply are averaged into one meters-per-pixel factor for the whole rig. This keeps one unit
+    // convention across estimators for the plots and the diagnostic trace, and being a single factor
+    // it sets the skeleton's size without touching its shape.
     //
-    // TODO: lens distortion is not corrected. Undistort the tag centers before the angle math once
-    // tags sit near the image border or the lens gets wider.
+    // TODO: lens distortion is not corrected. Undistort the joint points before the angle math once
+    // markers sit near the image border or the lens gets wider.
     class sagittal_pose_estimator final : public pose_estimator_base
     {
     public:
@@ -75,23 +76,17 @@ namespace pose
             seconds_f64 dt_max{ 0.100 };   // dt clamp ceiling [s] (avoids a jump after a long pause)
         };
 
-        explicit sagittal_pose_estimator(
-            const options_t& opt = {},
-            // NOTE: `tag_size_m` [m] scales the reported positions into approximate meters. 
-            //       the angles this estimator produces do not depend on it.
-            double tag_size_m = 0.05
-        );
+        explicit sagittal_pose_estimator(const options_t& opt = {});
         ~sagittal_pose_estimator() override;
 
         options_t& options() noexcept { return _opt; }
         const options_t& options() const noexcept { return _opt; }
 
-        void set_tag_size_m(double v) noexcept { _tag_size_m = v; }
-        double tag_size_m() const noexcept { return _tag_size_m; }
-
-        // Ingest one frame's detections and recompute every joint state.
+        // Ingest one frame's measurements and recompute every joint state.
+        // NOTE: the metric scale rides on the measurements and reaches the reported positions only.
+        //       The angles this estimator produces do not depend on it.
         void update(
-            std::span<const tag_detection_t> tag_detections,
+            std::span<const joint_2d_measurement_t> measurements,
             hw::timestamp_t sensor_timestamp // when the source captured the frame
         );
 
@@ -120,8 +115,9 @@ namespace pose
 
         // --- sagittal specifics -----------------------------------------------------------
 
-        // Knee joint of the leg the tags were seen on; empty until a leg tag has been detected. Its
-        // `get_joint_name()` identifies the side for an operator.
+        // Knee joint of the leg the measurements came from; 
+        // empty until a leg joint has been measured. 
+        // Its `get_joint_name()` identifies the side for an operator.
         std::optional<joint_id_t> tracked_leg_knee() const;
 
         // This frame's joint angles for the tracked leg. Empty until a rest pose is captured and the
@@ -135,7 +131,6 @@ namespace pose
         struct context_t;
 
         options_t _opt;
-        double _tag_size_m;
         std::unique_ptr<context_t> _ctx;
     };
 

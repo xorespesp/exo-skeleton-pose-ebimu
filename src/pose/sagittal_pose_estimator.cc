@@ -63,16 +63,6 @@ namespace pose
             return Eigen::Quaterniond{ Eigen::AngleAxisd{ -side * angle, Eigen::Vector3d::UnitX() } };
         }
 
-        // Mean edge length of a tag quad [px]; against the tag's physical size it gives a
-        // meters-per-pixel scale.
-        double mean_edge_px(const std::array<cv::Point2f, 4>& corners) {
-            double sum = 0.0;
-            for (int k = 0; k < 4; ++k) {
-                const cv::Point2f d = corners[(k + 1) % 4] - corners[k];
-                sum += std::sqrt(static_cast<double>(d.x) * d.x + static_cast<double>(d.y) * d.y);
-            }
-            return sum / 4.0;
-        }
     } // namespace
 
     struct sagittal_pose_estimator::context_t
@@ -89,14 +79,14 @@ namespace pose
 
         std::array<joint_filter_state_t, kNumJoints> filter_states{}; // persists across frames
         std::array<joint_state_t, kNumJoints> last_frame_joint_states{}; // per-frame output; reset every update()
-        std::array<std::optional<Eigen::Vector2d>, kNumJoints> last_frame_raw_px{}; // per-frame raw tag centers
+        std::array<std::optional<Eigen::Vector2d>, kNumJoints> last_frame_raw_px{}; // per-frame measured points
         std::array<std::optional<Eigen::Vector2d>, kNumJoints> last_frame_px{}; // smoothed + held centers (angle source)
         std::array<bool, kNumJoints> last_frame_detection_flags{}; // per-joint fresh-detection flag
 
-        // One conversion factor for the whole rig, averaged over this frame's tags and held while
-        // none are seen. Per-tag factors would stretch each point away from the image origin by a
-        // different amount, skewing the skeleton's shape; a single one keeps the image geometry and
-        // only sets its size.
+        // One conversion factor for the whole rig, averaged over this frame's measurements and held
+        // while none arrive. A per-joint factor would stretch each point away from the image origin
+        // by a different amount, skewing the skeleton's shape; a single one keeps the image geometry
+        // and only sets its size.
         double meters_per_pixel{ 0.0 };
 
         // The captured rest (bind) reference. Kept in pixels: that is what the rest bone angles
@@ -116,17 +106,14 @@ namespace pose
         std::optional<leg_angles_t> angles; // this frame's angles; empty until rest + full chain
     };
 
-    sagittal_pose_estimator::sagittal_pose_estimator(
-        const options_t& opt, 
-        double tag_size_m)
+    sagittal_pose_estimator::sagittal_pose_estimator(const options_t& opt)
         : _opt{ opt }
-        , _tag_size_m{ tag_size_m }
         , _ctx{ std::make_unique<context_t>() }
     { }
 
-    // Which side the camera views from follows from the tagged leg, since the far leg is hidden
-    // behind the near one. Before any tag has been seen the left-hand mapping is assumed; nothing
-    // downstream depends on it yet, because rotations need a rest pose that cannot exist by then.
+    // Which side the camera views from follows from the marked leg, since the far leg is hidden
+    // behind the near one. Before any joint has been measured the left-hand mapping is assumed;
+    // nothing downstream depends on it yet, because rotations need a rest pose that cannot exist by then.
     double sagittal_pose_estimator::_side() const noexcept
     {
         return (_ctx->tracked_side == joint_side_t::right) ? -1.0 : 1.0;
@@ -170,7 +157,7 @@ namespace pose
     }
 
     void sagittal_pose_estimator::update(
-        const std::span<const tag_detection_t> tag_detections,
+        const std::span<const joint_2d_measurement_t> measurements,
         const hw::timestamp_t sensor_timestamp)
     {
         const auto t = sensor_timestamp;
@@ -183,15 +170,13 @@ namespace pose
         _ctx->angles.reset();
 
         // ----- Pass 1: which leg is in view -----
-        // Only one leg is tagged, so counting the sides of this frame's ids answers it outright.
-        // A tie means nothing decisive was seen (no tags at all, or only midline ones), and the
-        // previous answer stands.
+        // Only one leg is marked, so counting the sides of this frame's joints answers it outright.
+        // A tie means nothing decisive was seen (nothing measured at all, or only midline joints),
+        // and the previous answer stands.
         {
             int right_seen = 0, left_seen = 0;
-            for (const auto& det : tag_detections) {
-                const auto joint = tag_id_to_joint_id(det.id);
-                if (!joint.has_value()) { continue; } // tag id not part of the rig
-                const auto side = get_joint_side(joint.value());
+            for (const auto& m : measurements) {
+                const auto side = get_joint_side(m.joint_id);
                 if (side == joint_side_t::right)     { ++right_seen; }
                 else if (side == joint_side_t::left) { ++left_seen; }
                 // midline: belongs to neither leg
@@ -202,30 +187,26 @@ namespace pose
             }
         }
 
-        // ----- Pass 2: bind each detection's tag center to its joint (via the static tag table) -----
-        // The tags also fix the frame's metric scale, averaged over all of them: the rig sits at one
-        // distance from a side camera, so one scale describes it and the spread between tags is
+        // ----- Pass 2: take this frame's image-plane points and metric scale -----
+        // The scale is averaged over every measurement that supplied one: the rig sits at one
+        // distance from a side camera, so one factor describes it and the spread between markers is
         // measurement noise rather than depth.
-        double edge_px_sum = 0.0;
-        int edge_px_count = 0;
-        for (const auto& det : tag_detections)
+        double scale_sum = 0.0;
+        int scale_count = 0;
+        for (const auto& m : measurements)
         {
-            const auto joint = tag_id_to_joint_id(det.id);
-            if (!joint.has_value()) { continue; } // tag id not part of the rig
-
-            const double edge_px = mean_edge_px(det.corners);
-            if (edge_px < 1e-6) { continue; } // degenerate quad: no usable scale
-
-            const size_t i = index_of(joint.value());
-            _ctx->last_frame_raw_px[i] = Eigen::Vector2d{ det.center.x, det.center.y };
+            const size_t i = index_of(m.joint_id);
+            _ctx->last_frame_raw_px[i] = m.center_px;
             _ctx->last_frame_detection_flags[i] = true;
 
-            edge_px_sum += edge_px;
-            ++edge_px_count;
+            if (m.meters_per_pixel.has_value()) {
+                scale_sum += m.meters_per_pixel.value();
+                ++scale_count;
+            }
         }
-        // No tags this frame: keep the last factor so held points stay where they were.
-        if (edge_px_count > 0) {
-            _ctx->meters_per_pixel = _tag_size_m / (edge_px_sum / edge_px_count);
+        // Nothing measured this frame: keep the last factor so held points stay where they were.
+        if (scale_count > 0) {
+            _ctx->meters_per_pixel = scale_sum / scale_count;
         }
 
         // ----- Pass 3: smooth + hold each joint's image-plane point -----
@@ -344,7 +325,7 @@ namespace pose
         // ----- Pass 5: complete the rig -----
         // Every joint owes the consumer a rotation, so a joint left without one takes its mirror's.
         // The flexion angles travel with it, the three being one joint's motion in three forms.
-        // Positions stay as measured: only the tagged leg was observed, and the plots should say so.
+        // Positions stay as measured: only the marked leg was observed, and the plots should say so.
         auto& states = _ctx->last_frame_joint_states;
         for (const auto& def : get_joint_defs())
         {

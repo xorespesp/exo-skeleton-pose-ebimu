@@ -363,7 +363,6 @@ namespace net
 
         if (_sagittal) {
             _sagittal->options() = config.pose.sagittal;
-            _sagittal->set_tag_size_m(_tag_size_m);
         }
 
         _active->clear_rest_pose(); // a new source invalidates the captured rest reference
@@ -548,10 +547,11 @@ namespace net
         // Detections: pull the newest latched frame and recompute joint states.
         if (_observer && _observer->try_get(_detections, _last_timestamp, _last_seq))
         {
-            // update() is not part of the estimator base: each one takes the input its algorithm
-            // needs, so the pipeline feeds whichever it built.
-            if (_frontal) { _frontal->update(_detections, _last_timestamp); }
-            else if (_sagittal) { _sagittal->update(_detections, _last_timestamp); }
+            if (_frontal) {
+                _frontal->update(pose::bind_3d_measurements(_detections), _last_timestamp);
+            } else if (_sagittal) {
+                _sagittal->update(pose::bind_2d_measurements(_detections, _tag_size_m), _last_timestamp);
+            }
             r.new_pose = true;
 
             spdlog::trace("pipeline: frame #{} (t={:%H:%M:%S}) with {} tag(s)"
@@ -710,7 +710,6 @@ namespace net
     void exo_pose_pipeline::set_tag_size_m(double v)
     {
         _tag_size_m = v;
-        if (_sagittal) { _sagittal->set_tag_size_m(v); }
         if (_observer) { _observer->set_tag_size_m(v); }
     }
 

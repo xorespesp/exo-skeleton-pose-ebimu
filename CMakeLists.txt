@@ -73,6 +73,7 @@ target_sources(${TARGET_NAME} PRIVATE
     "src/pose/color_marker_detector.hh"
     "src/pose/color_marker_detector.cc"
     "src/pose/joints_def.hh"
+    "src/pose/joint_measurement.hh"
     "src/pose/view_plane.hh"
     "src/pose/pose_estimator_base.hh"
     "src/pose/frontal_pose_estimator.hh"
@@ -318,6 +319,8 @@ if (VZ_SDK_AVAILABLE)
         "src/gui/log_console.cc"
 
         # tag detection, run without intrinsics for the 2D overlay
+        "src/pose/joints_def.hh"
+        "src/pose/joint_measurement.hh"
         "src/pose/tag_detector.hh"
         "src/pose/tag_detector.cc"
 

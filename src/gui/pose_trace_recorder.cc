@@ -20,14 +20,6 @@ namespace gui
         json opt_v3_json(const std::optional<Eigen::Vector3d>& v) { return v.has_value() ? v3_json(v.value()) : json(nullptr); }
         json opt_q_json(const std::optional<Eigen::Quaterniond>& q) { return q.has_value() ? q_json(q.value()) : json(nullptr); }
         json opt_num_json(const std::optional<double>& d) { return d.has_value() ? json(d.value()) : json(nullptr); }
-
-        // Chosen camera-space position of a detection: the selected pose translation, else candidate[0].
-        std::optional<Eigen::Vector3d> detection_position(const pose::tag_detection_t& det)
-        {
-            if (det.pose.has_value()) { return det.pose->transform.translation(); }
-            if (det.num_pose_candidates > 0) { return det.pose_candidates[0].transform.translation(); }
-            return std::nullopt;
-        }
     } // namespace
 
     pose_trace_recorder::pose_trace_recorder(std::size_t capacity)
@@ -66,7 +58,7 @@ namespace gui
             d.center = { det.center.x, det.center.y };
             for (std::size_t k = 0; k < 4; ++k) { d.corners[k] = { det.corners[k].x, det.corners[k].y }; }
             d.joint_id = pose::tag_id_to_joint_id(det.id);
-            d.position = detection_position(det);
+            d.position = pose::detection_position(det);
             if (d.joint_id.has_value() && d.position.has_value()) {
                 tag_present[static_cast<std::size_t>(d.joint_id.value())] = true;
             }

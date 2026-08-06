@@ -93,7 +93,8 @@ namespace net
         void set_detector_options(const pose::tag_detector::options_t& opt);
         pose::tag_detector::options_t detector_options() const;
 
-        // Printed black-square edge length [m]. Reaches the detector and the sagittal estimator, which both scale by it.
+        // Printed black-square edge length [m]. Reaches the detector's pose solve and the metric
+        // scale carried on each image-plane measurement.
         void set_tag_size_m(double v);
         double tag_size_m() const;
 

@@ -10,16 +10,6 @@ namespace pose
     namespace
     {
         size_t index_of(joint_id_t jid) { return static_cast<size_t>(jid); }
-
-        // Raw camera-space position of a detected tag: the chosen pose's translation, falling back to
-        // the first pose candidate. A tag's pose candidates share the same translation, so the choice
-        // does not affect the position.
-        std::optional<Eigen::Vector3d> detection_position(const tag_detection_t& det)
-        {
-            if (det.pose.has_value()) { return det.pose->transform.translation(); }
-            if (det.num_pose_candidates > 0) { return det.pose_candidates[0].transform.translation(); }
-            return std::nullopt;
-        }
     } // namespace
 
     struct frontal_pose_estimator::context_t
@@ -79,7 +69,7 @@ namespace pose
     }
 
     void frontal_pose_estimator::update(
-        const std::span<const tag_detection_t> tag_detections,
+        const std::span<const joint_3d_measurement_t> measurements,
         const hw::timestamp_t sensor_timestamp)
     {
         const auto t = sensor_timestamp;
@@ -89,18 +79,13 @@ namespace pose
         _ctx->last_frame_raw_positions = {};
         _ctx->last_frame_detection_flags = {};
 
-        // ----- Pass 1: bind each detection's 3D position to its joint (via the static tag table) -----
-        for (const auto& det : tag_detections)
+        // ----- Pass 1: take this frame's rig-space points -----
+        for (const auto& m : measurements)
         {
-            const auto joint = tag_id_to_joint_id(det.id);
-            if (!joint.has_value()) { continue; } // tag id not part of the rig
-            const auto p = detection_position(det);
-            if (!p.has_value()) { continue; } // no pose (no intrinsics / undetected)
-
-            const size_t i = index_of(joint.value());
-            _ctx->last_frame_raw_positions[i] = p;
+            const size_t i = index_of(m.joint_id);
+            _ctx->last_frame_raw_positions[i] = m.position;
             _ctx->last_frame_detection_flags[i] = true;
-            _ctx->last_frame_joint_states[i].raw_position = p; // raw
+            _ctx->last_frame_joint_states[i].raw_position = m.position; // raw
         }
 
         // ----- Pass 2: smooth + hold each joint's rig-space position -----

@@ -164,10 +164,12 @@ namespace vz
         std::optional<float_feature_t> read_float(const char* name) const;
         std::optional<int_feature_t>   read_int(const char* name) const;
         std::optional<enum_feature_t>  read_enum(const char* name) const;
+        std::optional<bool>            read_bool(const char* name) const;
         std::optional<std::string>     read_string(const char* name) const;
 
         [[nodiscard]] bool write_float(const char* name, double value);
         [[nodiscard]] bool write_int(const char* name, int64_t value);
+        [[nodiscard]] bool write_bool(const char* name, bool value);
         [[nodiscard]] bool write_enum(const char* name, const std::string& value);
         [[nodiscard]] bool execute(const char* name);
 

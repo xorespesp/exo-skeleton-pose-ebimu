@@ -1,4 +1,4 @@
-#include "vz_device.hh"
+﻿#include "vz_device.hh"
 
 #include <GalaxyIncludes.h>
 
@@ -507,6 +507,19 @@ namespace vz
         catch (const CGalaxyException& e) { _impl->set_err_msg(make_exception_text(e)); return std::nullopt; }
     }
 
+    std::optional<bool> device::read_bool(const char* name) const
+    {
+        if (_impl->fc.IsNull()) { return std::nullopt; }
+        try {
+            const feature_flags_t f = probe(_impl->fc, name);
+            if (!f.implemented || !f.readable) { return std::nullopt; }
+            return _impl->fc->GetBoolFeature(name)->GetValue();
+        } catch (const CGalaxyException& e) { 
+            _impl->set_err_msg(make_exception_text(e)); 
+            return std::nullopt; 
+        }
+    }
+
     std::optional<std::string> device::read_string(const char* name) const
     {
         if (_impl->fc.IsNull()) { return std::nullopt; }
@@ -534,6 +547,19 @@ namespace vz
         if (_impl->fc.IsNull()) { return false; }
         try { _impl->fc->GetIntFeature(name)->SetValue(value); return true; }
         catch (const CGalaxyException& e) {
+            _impl->set_err_msg(make_exception_text(e));
+            spdlog::warn("vz: set {}={} failed: {}", name, value, e.what());
+            return false;
+        }
+    }
+
+    bool device::write_bool(const char* name, bool value)
+    {
+        if (_impl->fc.IsNull()) { return false; }
+        try { 
+            _impl->fc->GetBoolFeature(name)->SetValue(value);
+            return true; 
+        } catch (const CGalaxyException& e) {
             _impl->set_err_msg(make_exception_text(e));
             spdlog::warn("vz: set {}={} failed: {}", name, value, e.what());
             return false;

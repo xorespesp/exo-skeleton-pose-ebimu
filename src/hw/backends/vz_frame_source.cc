@@ -1,9 +1,12 @@
-#include "vz_frame_source.hh"
+﻿#include "vz_frame_source.hh"
 
 #include <spdlog/spdlog.h>
 
 #include <chrono>
+#include <format>
 #include <initializer_list>
+#include <optional>
+#include <string>
 
 namespace hw
 {
@@ -16,15 +19,98 @@ namespace hw
         // How long an interface scan may take before the cameras on it are counted as absent.
         constexpr uint32_t kEnumerateTimeoutMs = 500;
 
+        // Which of the camera's own illuminant presets the channel ratios come from.
+        constexpr const char* kLightSourcePreset = "Daylight6500K";
+
         vz::frame_format_t to_vz_format(const frame_format_t format)
         {
             return (format == frame_format_t::gray8) ? vz::frame_format_t::gray
                                                      : vz::frame_format_t::bgr;
         }
 
-        // The first of `names` the camera implements and can read. Cameras disagree on which
-        // of the interchangeable GenICam names they carry, so each is tried in turn.
-        std::optional<int64_t> read_first_int(
+        // Whether a GenICam pixel format name carries colour.
+        bool pixel_format_carries_color(const std::string& name)
+        {
+            // Check monochrome 
+            return !name.starts_with("Mono");
+        }
+
+        // GenICam nodes vary by model, so one this camera does not carry is a knob it does not have
+        // and nothing that went wrong.
+        void pin_enum_node_if_present(vz::device& device, const char* name, const char* value)
+        {
+            if (!device.read_enum(name).has_value()) { return; }
+            if (!device.write_enum(name, value)) {
+                spdlog::warn("vz: could not set {} to {}: {}", name, value, device.last_err_msg());
+            }
+        }
+
+        void pin_bool_node_if_present(vz::device& device, const char* name, const bool value)
+        {
+            if (!device.read_bool(name).has_value()) { return; }
+            if (!device.write_bool(name, value)) {
+                spdlog::warn("vz: could not set {} to {}: {}", name, value, device.last_err_msg());
+            }
+        }
+
+        // Settles the camera's colour processing, so every open starts from the same response.
+        //
+        // These nodes survive power cycles, so a value an earlier session left behind reaches this
+        // one. Each goes to a state the camera itself names: the chroma from the illuminant preset,
+        // everything else from its "do nothing" setting. Pinned at any frame format, since they also
+        // reach the luminance a gray conversion produces.
+        //
+        // TODO: fixed here because no installation has asked for a state of its own. Should one,
+        // these belong beside exposure and gain in the profile.
+        void pin_persistent_color_response(vz::device& device)
+        {
+            // Auto rewrites the channel ratios frame by frame, which a fitted model cannot follow.
+            // Off leaves them where they were last driven, so the preset states them right after.
+            pin_enum_node_if_present(device, "BalanceWhiteAuto", "Off");
+            pin_enum_node_if_present(device, "LightSourcePreset", kLightSourcePreset);
+
+            // Gamma bends each channel by an amount that depends on how bright it already is, 
+            // which moves a* and b* without moving the marker.
+            pin_bool_node_if_present(device, "GammaEnable", false);
+
+            // Saturation scales chroma outright; 
+            // the luminance lookup and the digital shift reach it by another route.
+            pin_enum_node_if_present(device, "SaturationMode", "Off");
+            pin_bool_node_if_present(device, "LUTEnable", false);
+            if (device.read_int("DigitalShift").has_value() && !device.write_int("DigitalShift", 0)) {
+                spdlog::warn("vz: could not clear the digital shift: {}", device.last_err_msg());
+            }
+
+            // Not colour, but the same leftover: a mirrored readout turns the leg upside down in the
+            // frame, and the colour markers are named by their order down it.
+            pin_bool_node_if_present(device, "ReverseX", false);
+            pin_bool_node_if_present(device, "ReverseY", false);
+
+            // What is left unpinned, said out loud. `BlackLevel` is an offset added before
+            // digitisation, so raising it compresses chroma toward neutral, and the camera names no
+            // neutral value for it to be pinned to.
+            std::string ratios;
+            if (const std::optional<vz::enum_feature_t> selector = device.read_enum("BalanceRatioSelector"))
+            {
+                for (const std::string& channel : selector->entries)
+                {
+                    if (!device.write_enum("BalanceRatioSelector", channel)) { continue; }
+                    const std::optional<vz::float_feature_t> r = device.read_float("BalanceRatio");
+                    if (!r.has_value()) { continue; }
+                    if (!ratios.empty()) { ratios += " "; }
+                    ratios += std::format("{}={:.3f}", channel, r->value);
+                }
+            }
+            const std::optional<vz::float_feature_t> black = device.read_float("BlackLevel");
+            spdlog::info("vz: color response settled (preset {}, {}, black level {})"
+                , kLightSourcePreset
+                , ratios.empty() ? std::string{ "no balance ratios" } : ratios
+                , black.has_value() ? std::format("{:.1f}", black->value) : std::string{ "n/a" });
+        }
+
+        // Cameras disagree on which of the interchangeable GenICam names they carry, 
+        // so each is tried in turn.
+        std::optional<int64_t> read_first_readable_int_node(
             const vz::device& device,
             std::initializer_list<const char*> names)
         {
@@ -68,11 +154,28 @@ namespace hw
         _color_format = config.color_format;
         _device.set_frame_format(to_vz_format(_color_format));
 
+        // Colour classification needs the sensor to deliver colour. A monochrome format debayers to
+        // R=G=B, which reads as a valid three-channel frame the whole way to the detector and
+        // measures nothing, so the stream is refused here where the cause is still legible.
+        if (_color_format != frame_format_t::gray8)
+        {
+            if (const std::optional<vz::enum_feature_t> pf = _device.read_enum("PixelFormat");
+                pf.has_value() && !pixel_format_carries_color(pf->value))
+            {
+                spdlog::error("vz: the camera streams '{}', which carries no color; set a color "
+                              "pixel format on it before opening a color-marker profile", pf->value);
+                _device.close();
+                return false;
+            }
+        }
+
+        pin_persistent_color_response(_device);
+
         // The calibration describes the sensor's whole readout, so the sensor extents are what
         // is wanted. `Width`/`Height` report the programmed window instead and come last, for
         // a camera that names no maximum.
-        const std::optional<int64_t> sensor_w = read_first_int(_device, { "WidthMax", "SensorWidth", "Width" });
-        const std::optional<int64_t> sensor_h = read_first_int(_device, { "HeightMax", "SensorHeight", "Height" });
+        const std::optional<int64_t> sensor_w = read_first_readable_int_node(_device, { "WidthMax", "SensorWidth", "Width" });
+        const std::optional<int64_t> sensor_h = read_first_readable_int_node(_device, { "HeightMax", "SensorHeight", "Height" });
         if (!sensor_w.has_value() || !sensor_h.has_value() || *sensor_w <= 0 || *sensor_h <= 0) {
             spdlog::error("vz: the camera reports no frame size");
             _device.close();

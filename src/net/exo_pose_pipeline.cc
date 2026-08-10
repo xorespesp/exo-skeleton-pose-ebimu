@@ -146,6 +146,13 @@ namespace net
     {
         _status_changed = true; // opening a source changes the reported status (even on failure)
 
+        // The same answer a config file is held to, asked of whatever assembled this one. A control
+        // panel reaches every rule here that an authored profile does.
+        if (std::string err; !app::validate_config(config, err)) {
+            spdlog::error("pipeline: {}", err);
+            return false;
+        }
+
         if (!config.camera.source.has_value()) {
             spdlog::error("pipeline: the config names no source to open");
             return false;
@@ -154,19 +161,6 @@ namespace net
         const app::source_address& source_addr = *config.camera.source;
         const pose::view_plane_t view_plane = config.pose.view_plane;
         const app::marker_kind_t marker_kind = config.pose.detector.kind;
-
-        // A plain disc is read off the image plane and its distance never solved, so it feeds the
-        // sagittal estimator alone. Pairing it with the frontal one builds a source that streams and
-        // a pose that never arrives, which is worth refusing outright rather than leaving to be
-        // diagnosed. A control panel picking the plane reaches this the same as a config file does.
-        if (marker_kind == app::marker_kind_t::color_marker
-            && view_plane != pose::view_plane_t::sagittal)
-        {
-            spdlog::error("pipeline: color markers measure only image-plane positions, so they "
-                          "cannot drive the {} estimator; open this source as sagittal",
-                pose::view_plane_name(view_plane));
-            return false;
-        }
 
         const std::optional<int32_t> exposure_us = config.camera.exposure_us;
         const std::optional<int32_t> gain = config.camera.gain;
@@ -331,7 +325,7 @@ namespace net
 
         _active->clear_rest_pose(); // a new source invalidates the captured rest reference
         _active->reset_tracking();  // and its position filters/held points must not carry over
-        this->_reset_frame_log_state();
+        _frame_log.reset();
 
         const auto res = _provider->get_color_frame_resolution();
         spdlog::info("pipeline: {} '{}' opened ({}x{} color, {} estimator); rest pose cleared, awaiting first frame",
@@ -356,7 +350,7 @@ namespace net
         _is_recording = false;
         _exposure_us.reset();
         _gain.reset();
-        this->_reset_frame_log_state();
+        _frame_log.reset();
     }
 
     bool exo_pose_pipeline::is_source_open() const { return static_cast<bool>(_provider); }
@@ -493,14 +487,26 @@ namespace net
     pose::pose_estimator_base* exo_pose_pipeline::estimator() { return _active; }
     const pose::pose_estimator_base* exo_pose_pipeline::estimator() const { return _active; }
 
-    pose::frontal_pose_estimator::options_t* exo_pose_pipeline::frontal_options()
+    std::optional<pose::frontal_pose_estimator::options_t> exo_pose_pipeline::frontal_options() const
     {
-        return _frontal ? &_frontal->options() : nullptr;
+        if (!_frontal) { return std::nullopt; }
+        return _frontal->options();
     }
 
-    pose::sagittal_pose_estimator::options_t* exo_pose_pipeline::sagittal_options()
+    void exo_pose_pipeline::set_frontal_options(const pose::frontal_pose_estimator::options_t& opt)
     {
-        return _sagittal ? &_sagittal->options() : nullptr;
+        if (_frontal) { _frontal->options() = opt; }
+    }
+
+    std::optional<pose::sagittal_pose_estimator::options_t> exo_pose_pipeline::sagittal_options() const
+    {
+        if (!_sagittal) { return std::nullopt; }
+        return _sagittal->options();
+    }
+
+    void exo_pose_pipeline::set_sagittal_options(const pose::sagittal_pose_estimator::options_t& opt)
+    {
+        if (_sagittal) { _sagittal->options() = opt; }
     }
 
     const pose::sagittal_pose_estimator* exo_pose_pipeline::sagittal_estimator() const
@@ -544,8 +550,8 @@ namespace net
                 , _tracker->last_detection_count()
             );
 
-            this->_log_frame_diff();
-            this->_log_periodic_stats();
+            _frame_log.log_transitions(*_tracker, *_active);
+            _frame_log.log_throughput(*_tracker, *_active, this->source_fps(), this->has_rest_pose());
         }
 
         // Stream end: consume the one-shot signal the worker thread raises at end of stream.
@@ -567,15 +573,16 @@ namespace net
     }
 
     // The tracker losing its markers, and joints gaining or losing their local rotation, are what
-    // explain a stalled or jumpy skeleton. Both are edges: log the transition, not the state, so a
-    // steady stream stays silent. What a marker technology has to say about its own detections it
-    // says itself.
-    void exo_pose_pipeline::_log_frame_diff()
+    // explain a stalled or jumpy skeleton. What a marker technology has to say about its own
+    // detections it says itself.
+    void exo_pose_pipeline::frame_logger::log_transitions(
+        const pose::marker_tracker_base& tracker,
+        const pose::pose_estimator_base& estimator)
     {
         // Whether the tracker has identified its markers is what a run whose markers are anonymous
         // hangs on: until it has, no joint is named and every one reads untracked for a reason that
         // is not the detector's.
-        if (const bool tracking = _tracker->is_tracking(); 
+        if (const bool tracking = tracker.is_tracking();
             tracking != _tracker_was_tracking)
         {
             if (tracking) { spdlog::debug("pipeline: the tracker identified its markers"); }
@@ -587,7 +594,7 @@ namespace net
         // missing), so joint tracking is reported on its own rather than inferred from the markers.
         for (const auto& def : pose::get_joint_defs())
         {
-            const bool tracked = _active->get_joint_state(def.joint_id).position.has_value();
+            const bool tracked = estimator.get_joint_state(def.joint_id).position.has_value();
             bool& was_tracked = _joint_tracked[static_cast<size_t>(def.joint_id)];
             if (tracked == was_tracked) { continue; }
 
@@ -600,44 +607,44 @@ namespace net
     // Periodic throughput line: the cheap way to see the pipeline is alive and keeping up
     // without a per-frame log. Detection rate matters as much as fps, since a stream at full
     // fps with no markers looks identical to a healthy one from the outside.
-    void exo_pose_pipeline::_log_periodic_stats()
+    void exo_pose_pipeline::frame_logger::log_throughput(
+        const pose::marker_tracker_base& tracker,
+        const pose::pose_estimator_base& estimator,
+        const float source_fps,
+        const bool has_rest_pose)
     {
-        ++_stats_frames;
-        _stats_detections += static_cast<uint32_t>(_tracker->last_detection_count());
+        ++_frames;
+        _detections += static_cast<uint32_t>(tracker.last_detection_count());
 
         const auto now = std::chrono::steady_clock::now();
-        if (_stats_since.time_since_epoch().count() == 0) { _stats_since = now; return; }
+        if (_since.time_since_epoch().count() == 0) { _since = now; return; }
 
-        const auto elapsed = now - _stats_since;
+        const auto elapsed = now - _since;
         if (elapsed < kStatsInterval) { return; }
 
         const double sec = std::chrono::duration<double>{ elapsed }.count();
         size_t tracked = 0;
         for (const auto& def : pose::get_joint_defs())
         {
-            if (_active->get_joint_state(def.joint_id).position.has_value()) { ++tracked; }
+            if (estimator.get_joint_state(def.joint_id).position.has_value()) { ++tracked; }
         }
 
         spdlog::debug("pipeline: {} frames in {:.1f} s ({:.1f} fps polled, source at {:.1f} fps), "
                       "{:.1f} detection(s)/frame, {}/{} joint(s) tracked, rest pose {}"
-            , _stats_frames, sec, _stats_frames / sec, this->source_fps()
-            , _stats_frames > 0 ? static_cast<double>(_stats_detections) / _stats_frames : 0.0
+            , _frames, sec, _frames / sec, source_fps
+            , _frames > 0 ? static_cast<double>(_detections) / _frames : 0.0
             , tracked, pose::kNumJoints
-            , this->has_rest_pose() ? "captured" : "not captured"
+            , has_rest_pose ? "captured" : "not captured"
         );
 
-        _stats_since = now;
-        _stats_frames = 0;
-        _stats_detections = 0;
+        _since = now;
+        _frames = 0;
+        _detections = 0;
     }
 
-    void exo_pose_pipeline::_reset_frame_log_state()
+    void exo_pose_pipeline::frame_logger::reset()
     {
-        _tracker_was_tracking = false;
-        _joint_tracked.fill(false);
-        _stats_since = {};
-        _stats_frames = 0;
-        _stats_detections = 0;
+        *this = frame_logger{};
     }
 
     bool exo_pose_pipeline::try_get_annotated_frame(

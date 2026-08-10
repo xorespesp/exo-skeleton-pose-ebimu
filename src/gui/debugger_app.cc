@@ -195,16 +195,16 @@ namespace gui
 
         // Range and sizing controls for a subplot-grid plot mode. `reset` is the caller's one-shot
         // flag, raised here and cleared once the grid has drawn with the default range forced.
-        void draw_grid_plot_controls(grid_plot_ui_t& g, bool& reset)
+        void draw_grid_plot_controls(grid_plot_ui_t& g)
         {
             ImGui::Checkbox("Lock Plots", &g.lock);
             ImGui::SetItemTooltip("Hold every subplot at its default Y range (no mouse pan/zoom on Y).\n"
                                   "On: ranges stay put, live. Off: Y is mouse-adjustable.");
             ImGui::SameLine();
-            if (ImGui::Checkbox("Sync Plots", &g.sync)) { reset = true; }
+            if (ImGui::Checkbox("Sync Plots", &g.sync)) { g.reset = true; }
             ImGui::SetItemTooltip("Share one Y range across all joint subplots so they compare directly.");
             ImGui::SameLine();
-            if (ImGui::Button("Reset Plots")) { reset = true; }
+            if (ImGui::Button("Reset Plots")) { g.reset = true; }
             ImGui::SetItemTooltip("Return every subplot to its default Y range now.");
 
             ImGui::Checkbox("Auto-size Plots", &g.autosize);
@@ -219,11 +219,10 @@ namespace gui
         // `get_view(joint index)`. Y obeys `y_cond` and `g.sync`; X scrolls the newest window.
         template <typename _GetView>
         void draw_joint_plot_grid(
-            const grid_plot_ui_t& g,
+            grid_plot_ui_t& g,
             float dpi_scale,
             float y_lo, float y_hi,
             ImPlotCond y_cond,
-            double* sync_y,
             const ImVec4* colors,
             const char* const* names,
             std::size_t first_channel,
@@ -258,7 +257,7 @@ namespace gui
                 ImGui::PushID(static_cast<int>(i));
                 ImGui::BeginGroup();
                 draw_plot_lines(title.c_str(), get_view(i), kGridPlotWindowSec, y_lo, y_hi,
-                           y_cond, g.sync, sync_y, colors, names, cell_sz,
+                           y_cond, g.sync, g.sync_y, colors, names, cell_sz,
                            first_channel, channel_count);
                 ImGui::EndGroup();
                 ImGui::PopID();
@@ -269,30 +268,9 @@ namespace gui
     } // namespace
 
     debugger_app::debugger_app(const app::app_config_t& config)
-        : _config{ config }
-        , _server{ std::make_unique<net::exo_pose_server>(config, /*annotate_frames*/true) }
+        : _server{ std::make_unique<net::exo_pose_server>(config, /*annotate_frames*/true) }
     {
-        const app::camera_config_t& cam = config.camera;
-        if (cam.exposure_us.has_value()) { _ui.open_dlg_manual_exposure = true; _ui.open_dlg_exposure = *cam.exposure_us; }
-        if (cam.gain.has_value()) { _ui.open_dlg_manual_gain = true; _ui.open_dlg_gain = *cam.gain; }
-        _ui.open_dlg_view_plane = config.pose.view_plane; // the config's viewing plane seeds the dialog
-        _ui.open_dlg_intrinsics = cam.intrinsics_file;
-
-        // The camera index and the recording path sit side by side, so switching between them discards neither;
-        // only the one the config named is filled.
-        if (cam.source.has_value())
-        {
-            if (cam.source->is_k4a_device()) {
-                _ui.open_dlg_device = static_cast<int>(cam.source->k4a_device_index());
-                _ui.open_dlg_kind = source_kind_t::k4a_device;
-            } else if (cam.source->is_vz_device()) {
-                _ui.open_dlg_device = static_cast<int>(cam.source->vz_device_index());
-                _ui.open_dlg_kind = source_kind_t::vz_device;
-            } else {
-                _ui.open_dlg_recording = cam.source->recording_path().string();
-                _ui.open_dlg_kind = source_kind_t::recording;
-            }
-        }
+        this->_seed_open_dialog();
         _ui.show_log = true; // surface the log console by default
 
         _file_dialog.SetTitle("Open recording file");
@@ -304,6 +282,9 @@ namespace gui
 
         _config_dialog.SetTitle("Save config as");
         _config_dialog.SetTypeFilters({ ".json" });
+
+        _config_open_dialog.SetTitle("Open config");
+        _config_open_dialog.SetTypeFilters({ ".json" });
 
         _intrinsics_dialog.SetTitle("Open camera calibration");
         _intrinsics_dialog.SetTypeFilters({ ".yml", ".yaml", ".xml" });
@@ -451,6 +432,13 @@ namespace gui
             _config_dialog.ClearSelected();
         }
 
+        _config_open_dialog.Display();
+        if (_config_open_dialog.HasSelected())
+        {
+            this->_do_load_config(_config_open_dialog.GetSelected());
+            _config_open_dialog.ClearSelected();
+        }
+
         _intrinsics_dialog.Display();
         if (_intrinsics_dialog.HasSelected())
         {
@@ -461,21 +449,23 @@ namespace gui
 
     void debugger_app::_open_source(const app::source_address& address, pose::view_plane_t view_plane)
     {
+        app::app_config_t& config = _server->config();
+
         // The dialog's choices become the session's, so a re-open and a saved config both carry them.
-        _config.camera.source = address;
-        _config.pose.view_plane = view_plane;
-        _config.pose.detector.kind = _ui.open_dlg_marker_kind;
+        config.camera.source = address;
+        config.pose.view_plane = view_plane;
+        config.pose.detector.kind = _ui.open_dlg_marker_kind;
 
         // Samples taken against the previous source describe a camera that is no longer open.
         _color_sampler.clear();
 
         // A recording already carries the settings it was shot with; only a live camera takes them.
         if (address.is_recording()) {
-            _config.camera.exposure_us.reset();
-            _config.camera.gain.reset();
+            config.camera.exposure_us.reset();
+            config.camera.gain.reset();
         }
 
-        _server->pipeline().open_source(_config);
+        _server->pipeline().open_source(config);
 
         // The slider that will decide the next fit starts on the value already in force, so what
         // the panel shows and what the running detector accepts do not disagree until asked to.
@@ -502,9 +492,10 @@ namespace gui
         }
         else
         {
-            _config.camera.exposure_us = _ui.open_dlg_manual_exposure ? std::optional<int32_t>{ _ui.open_dlg_exposure } : std::nullopt;
-            _config.camera.gain = _ui.open_dlg_manual_gain ? std::optional<int32_t>{ _ui.open_dlg_gain } : std::nullopt;
-            _config.camera.intrinsics_file = _ui.open_dlg_intrinsics;
+            app::app_config_t& config = _server->config();
+            config.camera.exposure_us = _ui.open_dlg_manual_exposure ? std::optional<int32_t>{ _ui.open_dlg_exposure } : std::nullopt;
+            config.camera.gain = _ui.open_dlg_manual_gain ? std::optional<int32_t>{ _ui.open_dlg_gain } : std::nullopt;
+            config.camera.intrinsics_file = _ui.open_dlg_intrinsics;
 
             const auto index = static_cast<uint32_t>(_ui.open_dlg_device);
             const app::source_address address = (_ui.open_dlg_kind == source_kind_t::vz_device)
@@ -515,22 +506,91 @@ namespace gui
         _ui.open_dlg_show = false;
     }
 
+    void debugger_app::_seed_open_dialog()
+    {
+        const app::app_config_t& config = _server->config();
+        const app::camera_config_t& cam = config.camera;
+
+        _ui.open_dlg_manual_exposure = cam.exposure_us.has_value();
+        if (cam.exposure_us.has_value()) { _ui.open_dlg_exposure = *cam.exposure_us; }
+        _ui.open_dlg_manual_gain = cam.gain.has_value();
+        if (cam.gain.has_value()) { _ui.open_dlg_gain = *cam.gain; }
+
+        _ui.open_dlg_view_plane = config.pose.view_plane;
+        _ui.open_dlg_marker_kind = config.pose.detector.kind;
+        _ui.open_dlg_intrinsics = cam.intrinsics_file;
+
+        // The camera index and the recording path sit side by side, so switching between them
+        // discards neither; only the one the config named is filled.
+        if (cam.source.has_value())
+        {
+            if (cam.source->is_k4a_device()) {
+                _ui.open_dlg_device = static_cast<int>(cam.source->k4a_device_index());
+                _ui.open_dlg_kind = source_kind_t::k4a_device;
+            } else if (cam.source->is_vz_device()) {
+                _ui.open_dlg_device = static_cast<int>(cam.source->vz_device_index());
+                _ui.open_dlg_kind = source_kind_t::vz_device;
+            } else {
+                _ui.open_dlg_recording = cam.source->recording_path().string();
+                _ui.open_dlg_kind = source_kind_t::recording;
+            }
+        }
+    }
+
+    void debugger_app::_do_load_config(const std::filesystem::path& path)
+    {
+        app::app_config_t loaded;
+        if (std::string err; !app::load_config(path, loaded, err)) {
+            spdlog::error("config: {}", err);
+            return;
+        }
+
+        _server->config() = std::move(loaded);
+        this->_seed_open_dialog();
+        spdlog::info("config: loaded '{}'", path.string());
+
+        // An open source keeps running the settings it was opened with, so a profile arriving over
+        // them is installed straight away. Left for the next Open, the running tracker would hold
+        // the colour and filters of the profile before it while the file says otherwise, and a save
+        // would gather those into this one.
+        if (!_server->pipeline().is_source_open()) {
+            spdlog::info("config: open a source to run with it");
+            return;
+        }
+
+        const app::app_config_t& config = _server->config();
+        if (!config.camera.source.has_value()) {
+            spdlog::info("config: this profile names no source, so the open one is closed");
+            this->_do_close_source();
+            return;
+        }
+
+        // Copied out: `_open_source` assigns through the same config these come from.
+        const app::source_address address = *config.camera.source;
+        const pose::view_plane_t view_plane = config.pose.view_plane;
+        this->_open_source(address, view_plane);
+    }
+
     void debugger_app::_do_save_config(const std::filesystem::path& path)
     {
         // A save gathers the config from two places. `server` stands as loaded, and the open
-        // dialog already wrote `camera` and the viewing plane into `_config`. The tuning below did
-        // not go there: the control panel edits it on the pipeline, so the live values are read back.
+        // dialog already wrote `camera` and the viewing plane into it. The tuning below did not go
+        // there: the control panel edits it on the pipeline, so the live values are read back.
+        //
+        // Reading back is right only while the pipeline is never older than the config, which
+        // holds because every other write to the config opens a source with it straight away.
         net::exo_pose_pipeline& pipe = _server->pipeline();
+        app::app_config_t& config = _server->config();
 
         // Only the running tracker has live values to read back; the other kind's block keeps
         // whatever the profile was loaded with.
         if (auto* tag_tracker = dynamic_cast<pose::apriltag_tracker*>(pipe.tracker())) {
-            _config.pose.detector.apriltag = tag_tracker->options();
-            _config.pose.tag_size_m = tag_tracker->tag_size_m();
+            config.pose.detector.apriltag = tag_tracker->options();
+            config.pose.tag_size_m = tag_tracker->tag_size_m();
         }
         if (auto* color_tracker = dynamic_cast<pose::color_marker_tracker*>(pipe.tracker()))
         {
-            _config.pose.detector.color_marker.assigner = color_tracker->assigner_options();
+            config.pose.detector.color_marker.assigner = color_tracker->assigner_options();
 
             // The colour and the blob filters are read back the same way, and the frame size they
             // were measured on comes from the source that is delivering it. A colour that was never
@@ -538,17 +598,17 @@ namespace gui
             if (const pose::color_marker_detector::options_t detector = color_tracker->detector_options();
                 detector.model.valid)
             {
-                _config.pose.detector.color_marker.calibration = app::color_marker_calibration_t{
+                config.pose.detector.color_marker.calibration = app::color_marker_calibration_t{
                     .detector = detector,
                     .frame_resolution = pipe.source_resolution(),
                 };
             }
         }
-        if (const auto* o = pipe.frontal_options())  { _config.pose.frontal = *o; }
-        if (const auto* o = pipe.sagittal_options()) { _config.pose.sagittal = *o; }
+        if (const auto o = pipe.frontal_options())  { config.pose.frontal = *o; }
+        if (const auto o = pipe.sagittal_options()) { config.pose.sagittal = *o; }
 
         std::string err;
-        if (!app::save_config(_config, path, err)) {
+        if (!app::save_config(config, path, err)) {
             spdlog::error("config: {}", err);
             return;
         }
@@ -609,12 +669,12 @@ namespace gui
         if (_ui.trace_enabled)
         {
             trace_gates_t gates;
-            if (const auto* o = pipe.frontal_options()) {
+            if (const auto o = pipe.frontal_options()) {
                 gates.max_hold_ms = o->max_hold.count();
                 gates.reset_gap_ms = o->reset_gap.count();
                 if (o->enable_hinge_constraint) { gates.hinge_axis = o->hinge_axis_world; }
             }
-            else if (const auto* o = pipe.sagittal_options()) {
+            else if (const auto o = pipe.sagittal_options()) {
                 gates.max_hold_ms = o->max_hold.count();
                 gates.reset_gap_ms = o->reset_gap.count();
             }
@@ -636,8 +696,8 @@ namespace gui
 
         // Axis the sagittal-angle traces are read about. A frontal run names it in its options; a
         // sagittal run turns its in-plane readings about the rig's lateral axis.
-        const Eigen::Vector3d hinge_axis = pipe.frontal_options()
-            ? pipe.frontal_options()->hinge_axis_world : Eigen::Vector3d::UnitX();
+        const std::optional<pose::frontal_pose_estimator::options_t> frontal = pipe.frontal_options();
+        const Eigen::Vector3d hinge_axis = frontal ? frontal->hinge_axis_world : Eigen::Vector3d::UnitX();
 
         // Running total of the rotation-derived flexion down each leg, giving that trace the rig-frame
         // reading the estimator supplies for its own. `get_joint_defs()` lists a parent before its
@@ -680,8 +740,8 @@ namespace gui
             {
                 // Opened on what the profile already says, so a run started from a config file is
                 // re-opened without retyping it, and a blank dialog cannot silently drop a path.
-                _ui.open_dlg_marker_kind = _config.pose.detector.kind;
-                _ui.open_dlg_view_plane = _config.pose.view_plane;
+                _ui.open_dlg_marker_kind = _server->config().pose.detector.kind;
+                _ui.open_dlg_view_plane = _server->config().pose.view_plane;
                 _ui.open_dlg_show = true;
             }
             if (ImGui::MenuItem("Close", nullptr, false, _server->pipeline().is_source_open())) { this->_do_close_source(); }
@@ -795,7 +855,7 @@ namespace gui
             // subplot grids get the range lock/sync/reset and cell-size controls.
             if (_ui.plot_type == plot_type_t::positions)
             {
-                draw_grid_plot_controls(_ui.pos_grid, _pos_plot_reset);
+                draw_grid_plot_controls(_ui.pos_grid);
             }
             else if (_ui.plot_type == plot_type_t::sagittal_angles)
             {
@@ -805,7 +865,7 @@ namespace gui
                                       "On: each joint's turn from its parent bone (local_sagittal_angle).\n"
                                       "Off: the joint's own bone turn in the exo's frame\n"
                                       "     (absolute_sagittal_angle), the running total down the leg.");
-                draw_grid_plot_controls(_ui.angle_grid, _angle_plot_reset);
+                draw_grid_plot_controls(_ui.angle_grid);
             }
             else // raw/rig_skeleton (3D)
             {
@@ -813,11 +873,12 @@ namespace gui
                 ImGui::SetItemTooltip("Re-center/zoom the 3D view to the current skeleton.\n"
                                       "Zoom (wheel) / pan / rotate are otherwise free.");
 
-                // Bind the style controls to the active skeleton mode's own fields.
+                // Bind the style controls to the active skeleton mode's own style.
                 const bool is_raw = (_ui.plot_type == plot_type_t::raw_skeleton);
-                float* point_size  = is_raw ? &_ui.raw_skel_point_size : &_ui.rig_skel_point_size;
-                float* point_color = is_raw ? _ui.raw_skel_point_color : _ui.rig_skel_point_color;
-                float* bone_color  = is_raw ? _ui.raw_skel_bone_color  : _ui.rig_skel_bone_color;
+                skeleton_plot_ui_t& style = is_raw ? _ui.raw_skel : _ui.rig_skel;
+                float* point_size  = &style.point_size;
+                float* point_color = style.point_color;
+                float* bone_color  = style.bone_color;
 
                 constexpr ImGuiColorEditFlags col_flags = ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar;
                 ImGui::DragFloat("Sphere size", point_size, 0.1f, 1.0f, 20.0f, "%.1f px", ImGuiSliderFlags_AlwaysClamp);
@@ -924,8 +985,15 @@ namespace gui
             }
 
             // ----- Estimator tuning (the two estimators expose different knobs) -----
-            if (auto* frontal = pipe.frontal_options()) { this->_render_frontal_estimator_control(*frontal); }
-            else if (auto* sagittal = pipe.sagittal_options()) { this->_render_sagittal_estimator_control(*sagittal); }
+            // Handed back every frame: assigning options is cheap, so no change detection.
+            if (auto frontal = pipe.frontal_options()) {
+                this->_render_frontal_estimator_control(*frontal);
+                pipe.set_frontal_options(*frontal);
+            }
+            else if (auto sagittal = pipe.sagittal_options()) {
+                this->_render_sagittal_estimator_control(*sagittal);
+                pipe.set_sagittal_options(*sagittal);
+            }
 
             // ----- Diagnostic pose trace -----
             // Rolling ring of full per-frame traces (detections + 3D positions + joint rotations). See a
@@ -1241,8 +1309,8 @@ namespace gui
 
         if (detector_changed) { tracker.set_detector_options(detector); }
 
-        // ----- Joint assignment (live; runs on this thread, so it takes effect next frame) -----
-        pose::color_marker_assigner::options_t& assigner = tracker.assigner_options();
+        // ----- Joint assignment (live; handed back below, so it takes effect next frame) -----
+        pose::color_marker_assigner::options_t assigner = tracker.assigner_options();
 
         const double kRadiusMin = 5.0, kRadiusMax = 400.0;
         const double kTolMin = 0.05, kTolMax = 0.95;
@@ -1294,6 +1362,9 @@ namespace gui
                             &kDiaMin, &kDiaMax, "%.4f");
         ImGui::SetItemTooltip("Printed disc diameter. Sets the metric scale of the reported\n"
                               "positions only; the joint angles do not depend on it.");
+
+        // Handed back every frame: six numbers, so no change detection.
+        tracker.set_assigner_options(assigner);
     }
 
     void debugger_app::_render_sagittal_estimator_control(pose::sagittal_pose_estimator::options_t& opt)
@@ -1419,13 +1490,13 @@ namespace gui
             }
         }
 
-        const ImVec4 bone_col(_ui.raw_skel_bone_color[0], _ui.raw_skel_bone_color[1], _ui.raw_skel_bone_color[2], _ui.raw_skel_bone_color[3]);
-        const ImVec4 point_col(_ui.raw_skel_point_color[0], _ui.raw_skel_point_color[1], _ui.raw_skel_point_color[2], _ui.raw_skel_point_color[3]);
+        const ImVec4 bone_col(_ui.raw_skel.bone_color[0], _ui.raw_skel.bone_color[1], _ui.raw_skel.bone_color[2], _ui.raw_skel.bone_color[3]);
+        const ImVec4 point_col(_ui.raw_skel.point_color[0], _ui.raw_skel.point_color[1], _ui.raw_skel.point_color[2], _ui.raw_skel.point_color[3]);
         const ImVec4 fk_col(_ui.raw_skel_fk_bone_color[0], _ui.raw_skel_fk_bone_color[1], _ui.raw_skel_fk_bone_color[2], _ui.raw_skel_fk_bone_color[3]);
         this->_render_skeleton_3d(
             "Raw skeleton (measured positions + FK overlay)",
             measured, bone_col, point_col,
-            _ui.raw_skel_point_size,
+            _ui.raw_skel.point_size,
             has_overlay ? &overlay : nullptr,
             fk_col,
             /*hint*/nullptr
@@ -1456,12 +1527,12 @@ namespace gui
             if (world[i].has_value()) { disp[i] = to_display(world[i].value()); }
         }
 
-        const ImVec4 bone_col(_ui.rig_skel_bone_color[0], _ui.rig_skel_bone_color[1], _ui.rig_skel_bone_color[2], _ui.rig_skel_bone_color[3]);
-        const ImVec4 point_col(_ui.rig_skel_point_color[0], _ui.rig_skel_point_color[1], _ui.rig_skel_point_color[2], _ui.rig_skel_point_color[3]);
+        const ImVec4 bone_col(_ui.rig_skel.bone_color[0], _ui.rig_skel.bone_color[1], _ui.rig_skel.bone_color[2], _ui.rig_skel.bone_color[3]);
+        const ImVec4 point_col(_ui.rig_skel.point_color[0], _ui.rig_skel.point_color[1], _ui.rig_skel.point_color[2], _ui.rig_skel.point_color[3]);
         this->_render_skeleton_3d(
             "Rig skeleton (local_anim_rot on a fixed-length rig)",
             disp, bone_col, point_col,
-            _ui.rig_skel_point_size,
+            _ui.rig_skel.point_size,
             /*overlay*/nullptr,
             /*overlay_color*/ImVec4{},
             _server->pipeline().has_rest_pose() ? nullptr : "calibrate a rest pose to animate"
@@ -1473,7 +1544,7 @@ namespace gui
         // Y range: Lock (or a one-shot Reset) forces the default; otherwise it is mouse-adjustable
         // (set once). Sync links one Y range across every subplot. X always scrolls the newest window.
         constexpr float kYLo = -1.2f, kYHi = 1.2f; // default position range [m], display space
-        const ImPlotCond y_cond = (_ui.pos_grid.lock || _pos_plot_reset) ? ImPlotCond_Always : ImPlotCond_Once;
+        const ImPlotCond y_cond = (_ui.pos_grid.lock || _ui.pos_grid.reset) ? ImPlotCond_Always : ImPlotCond_Once;
 
         // Channels are plot space: rig X, rig Z, and -rig Y (the 3D views label the same three axes
         // right / depth / up).
@@ -1482,11 +1553,11 @@ namespace gui
 
         draw_joint_plot_grid(
             _ui.pos_grid, this->renderer().dpi_scale(), kYLo, kYHi, y_cond,
-            _pos_plot_sync_y, axis_col, axis_nm, /*first_channel*/0, /*channel_count*/3,
+            axis_col, axis_nm, /*first_channel*/0, /*channel_count*/3,
             [this](std::size_t i) { return _pos_plot_bufs.view(i); }
         );
 
-        _pos_plot_reset = false; // one-shot: the ranges were forced this frame
+        _ui.pos_grid.reset = false; // one-shot: the ranges were forced this frame
     }
 
     void debugger_app::_render_sagittal_angles_plot()
@@ -1494,7 +1565,7 @@ namespace gui
         // A walking exo swings its joints well inside this, so the default frames the motion without
         // clipping a deep knee bend.
         constexpr float kYLo = -90.0f, kYHi = 90.0f; // default flexion range [deg]
-        const ImPlotCond y_cond = (_ui.angle_grid.lock || _angle_plot_reset) ? ImPlotCond_Always : ImPlotCond_Once;
+        const ImPlotCond y_cond = (_ui.angle_grid.lock || _ui.angle_grid.reset) ? ImPlotCond_Always : ImPlotCond_Once;
 
         // Two readings of one joint's flexion. "angle" is the estimator's, measured on the bone
         // directions in the hinge plane, and is what the protocol carries. "quat" is the turn a
@@ -1512,11 +1583,11 @@ namespace gui
 
         draw_joint_plot_grid(
             _ui.angle_grid, this->renderer().dpi_scale(), kYLo, kYHi, y_cond,
-            _angle_plot_sync_y, ch_col, ch_nm, first_channel, /*channel_count*/2,
+            ch_col, ch_nm, first_channel, /*channel_count*/2,
             [this](std::size_t i) { return _angle_plot_bufs.view(i); }
         );
 
-        _angle_plot_reset = false; // one-shot: the ranges were forced this frame
+        _ui.angle_grid.reset = false; // one-shot: the ranges were forced this frame
     }
 
     void debugger_app::_render_skeleton_3d(
@@ -1774,6 +1845,21 @@ namespace gui
         ImGui::SetNextWindowSize(ImVec2(420, 0), ImGuiCond_Appearing);
         if (ImGui::Begin("Open Source", &_ui.open_dlg_show, ImGuiWindowFlags_NoCollapse))
         {
+            // Everything below comes from a profile, and so does what this dialog cannot show: the
+            // colour model, the blob filters, the joint assignment and the estimator tuning.
+            if (ImGui::Button("Load profile..."))
+            {
+                _config_open_dialog.SetPwd(app::project_dir("configs"));
+                _config_open_dialog.Open();
+            }
+            ImGui::SetItemTooltip(
+                "Reads a saved profile over the current settings and fills this dialog from it.\n"
+                "An open source is reopened with it at once; with none open it takes effect on\n"
+                "Open. Either way it replaces what the control panel has been tuned to since the\n"
+                "last save.");
+
+            ImGui::Separator();
+
             // What is stuck on the exo, which decides how a frame becomes joint measurements and
             // what the camera has to deliver, so it is picked alongside the source.
             const auto marker_kind_radio = [this](const char* label, app::marker_kind_t val) {
@@ -1831,18 +1917,35 @@ namespace gui
                 ImGui::InputInt("Device index", &_ui.open_dlg_device);
                 if (_ui.open_dlg_device < 0) { _ui.open_dlg_device = 0; }
 
+                // A fitted colour sits at one brightness, and the open refuses a camera free to
+                // leave it, so choosing colour markers settles both of these here. The values stay
+                // editable; only the choice of auto goes away.
+                if (color_markers) {
+                    _ui.open_dlg_manual_exposure = true;
+                    _ui.open_dlg_manual_gain = true;
+                }
+
+                ImGui::BeginDisabled(color_markers);
                 ImGui::Checkbox("Manual exposure [us]", &_ui.open_dlg_manual_exposure);
+                ImGui::EndDisabled();
                 if (_ui.open_dlg_manual_exposure)
                 {
                     ImGui::SameLine();
                     ImGui::InputInt("##exposure", &_ui.open_dlg_exposure);
                 }
+
+                ImGui::BeginDisabled(color_markers);
                 ImGui::Checkbox("Manual gain", &_ui.open_dlg_manual_gain);
+                ImGui::EndDisabled();
                 if (_ui.open_dlg_manual_gain)
                 {
                     ImGui::SameLine();
                     ImGui::InputInt("##gain", &_ui.open_dlg_gain);
                     ImGui::SetItemTooltip("K4A: raw gain. VZ: gain in dB.");
+                }
+
+                if (color_markers) {
+                    ImGui::TextDisabled("Color markers are measured at one brightness, so both are fixed.");
                 }
 
                 if (_ui.open_dlg_kind == source_kind_t::vz_device)

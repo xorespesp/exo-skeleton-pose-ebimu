@@ -177,6 +177,10 @@ namespace app
     // Not config-relative, since these hold what the tool produces, not what an installation names.
     [[nodiscard]] std::filesystem::path project_dir(std::string_view name);
 
+    // What the types alone cannot say: is this a usable installation. A read runs it, and so does
+    // an open, so a config assembled in memory is held to what a file is held to.
+    [[nodiscard]] bool validate_config(const app_config_t& config, std::string& err);
+
     // Every key the schema names must be present; a default standing in for an omitted one is the
     // failure this guards against. Keys it does not name are ignored.
     // On failure `err` names the key and `out` is untouched.

@@ -48,7 +48,7 @@
 
 | 항목 | 상태 | 판단 |
 |---|---|---|
-| `marker_tracker_base::reset()` 이 `_published` / `_unread` 를 안 지움 | seek 직후 옛 프레임 1장이 옛 타임스탬프로 소비된다. 색 배정은 최대 `lost_frames_before_full_search`(기본 10) 프레임 공백 후 자동 복구 | **트래커 안에서는 못 닫힌다.** 워커가 `_source_mtx` 를 놓은 뒤 옵저버를 부르므로, 래치를 비운 직후 seek 이전 프레임이 다시 들어올 수 있다. 제대로 닫으려면 `sensor_frame_provider` 에 seek epoch 을 두고 워커가 stale 프레임을 버려야 한다(약 5줄). 실기 검증에서 거슬리면 별건으로 |
+| `marker_tracker_base::reset()` 이 `latest_value_latch` 를 안 비움 | seek 직후 옛 프레임 1장이 옛 타임스탬프로 소비된다. 색 배정은 최대 `lost_frames_before_full_search`(기본 10) 프레임 공백 후 자동 복구 | **트래커 안에서는 못 닫힌다.** 워커가 `_source_mtx` 를 놓은 뒤 옵저버를 부르므로, 래치를 비운 직후 seek 이전 프레임이 다시 들어올 수 있다. 제대로 닫으려면 `sensor_frame_provider` 에 seek epoch 을 두고 워커가 stale 프레임을 버려야 한다(약 5줄). 실기 검증에서 거슬리면 별건으로 |
 | `_do_save_config` 가 해석된 절대 `intrinsics_file` 경로를 써넣음 | 프로파일을 GUI 로 한 번 저장하면 상대 경로가 절대 경로가 된다 | 사용자 판단: 수동으로 고친다 |
 | `color_sampler::_points` | 표본점을 최대 2만 개 모으지만 읽는 곳이 없다 | a\*b\* 산점도 UI 가 보류 중이라 그 UI 를 붙이면 바로 쓰인다 |
 | `assign()` 미lock 경로의 후보 부족 시 계수기 | 두 조기 return 의 `_unlock()` 처리를 맞춰 순환하게 해 둠 | 해결됨 |

@@ -80,10 +80,15 @@ namespace net
         // Which plane the active estimator solves in; meaningful only once one exists.
         pose::view_plane_t view_plane() const { return _view_plane; }
 
-        // Live tuning of the active estimator. At most one is non-null, matching the plane, which
-        // lets a caller render the right controls without testing the plane itself.
-        pose::frontal_pose_estimator::options_t* frontal_options();
-        pose::sagittal_pose_estimator::options_t* sagittal_options();
+        // Live tuning of the active estimator. At most one answers, matching the plane, so a caller
+        // renders the right controls without testing the plane itself. Read a copy, edit it, hand
+        // it back: an open replaces the estimator when the plane changes, so no handle into one
+        // escapes. A set for the idle plane is ignored.
+        std::optional<pose::frontal_pose_estimator::options_t> frontal_options() const;
+        void set_frontal_options(const pose::frontal_pose_estimator::options_t& opt);
+
+        std::optional<pose::sagittal_pose_estimator::options_t> sagittal_options() const;
+        void set_sagittal_options(const pose::sagittal_pose_estimator::options_t& opt);
 
         // The sagittal estimator's readouts (tracked leg, joint angles); null in a frontal run.
         const pose::sagittal_pose_estimator* sagittal_estimator() const;
@@ -147,12 +152,35 @@ namespace net
         void seek_to_end();
 
     private:
-        // Log what changed since the last frame (markers appearing/disappearing, joints gaining or
-        // losing tracking) instead of restating the same state every frame, plus a throughput
-        // line on a timer. Cleared whenever the source changes.
-        void _log_frame_diff();
-        void _log_periodic_stats();
-        void _reset_frame_log_state();
+        // Says what changed rather than what is, so a steady stream stays silent, plus a throughput
+        // line on a timer. Every field here remembers the previous frame, which is why it sits apart
+        // from the state the pipeline runs on.
+        class frame_logger
+        {
+        public:
+            // Markers identified or lost, and joints gaining or losing tracking, as edges.
+            void log_transitions(
+                const pose::marker_tracker_base& tracker,
+                const pose::pose_estimator_base& estimator
+            );
+
+            // One line per interval, or nothing.
+            void log_throughput(
+                const pose::marker_tracker_base& tracker,
+                const pose::pose_estimator_base& estimator,
+                float source_fps,
+                bool has_rest_pose
+            );
+
+            void reset(); // called whenever the source changes
+
+        private:
+            bool _tracker_was_tracking{ false }; // the tracker had identified its markers last frame
+            std::array<bool, pose::kNumJoints> _joint_tracked{}; // per joint: had a position last frame
+            std::chrono::steady_clock::time_point _since{}; // start of the current summary window
+            uint32_t _frames{ 0 };     // frames polled in the window
+            uint32_t _detections{ 0 }; // markers detected across those frames
+        };
 
         // Build the estimator for `view_plane` when it differs from the active one, and point _active at it.
         // A no-op when unchanged, leaving the existing estimator in place.
@@ -184,12 +212,7 @@ namespace net
         std::optional<int32_t> _exposure_us;
         std::optional<int32_t> _gain;
 
-        // --- frame-log state (transitions + throughput; see _log_frame_diff) --------------
-        bool _tracker_was_tracking{ false }; // the tracker had identified its markers last frame
-        std::array<bool, pose::kNumJoints> _joint_tracked{}; // per joint: had a local rotation last frame
-        std::chrono::steady_clock::time_point _stats_since{}; // start of the current summary window
-        uint32_t _stats_frames{ 0 };   // frames polled in the window
-        uint32_t _stats_detections{ 0 }; // markers detected across those frames
+        frame_logger _frame_log;
     };
 
 } // namespace net

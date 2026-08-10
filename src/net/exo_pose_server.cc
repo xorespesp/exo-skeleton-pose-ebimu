@@ -188,6 +188,9 @@ namespace net
     exo_pose_pipeline& exo_pose_server::pipeline() { return _imp->pipeline; }
     const exo_pose_pipeline& exo_pose_server::pipeline() const { return _imp->pipeline; }
 
+    app::app_config_t& exo_pose_server::config() { return _imp->config; }
+    const app::app_config_t& exo_pose_server::config() const { return _imp->config; }
+
     bool exo_pose_server::start()
     {
         if (_imp->uws_loop.is_listening()) { return true; }

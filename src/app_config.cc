@@ -393,7 +393,14 @@ namespace app
             // choose its own exposure or gain moves a marker off them: both scale luminance, and
             // a* and b* follow its cube root. Left on auto that happens mid-run, with nothing to
             // signal it but markers that stop being found, so the pairing is refused up front.
-            if (cfg.pose.detector.kind == marker_kind_t::color_marker
+            //
+            // Only for a camera this config opens. A recording carries the frames it was shot
+            // with, so there is nothing to program into it and no brightness left to drift, and a
+            // config that names no source programs nothing at load either.
+            const bool opens_a_live_camera =
+                cfg.camera.source.has_value() && !cfg.camera.source->is_recording();
+            if (cfg.pose.detector.kind == marker_kind_t::color_marker 
+                && opens_a_live_camera
                 && (!cfg.camera.exposure_us.has_value() || !cfg.camera.gain.has_value()))
             {
                 err = "'pose.detector.kind' color_marker requires 'camera.exposure_us' and "
@@ -461,6 +468,11 @@ namespace app
 
     } // namespace
 
+    bool validate_config(const app_config_t& config, std::string& err)
+    {
+        return validate(config, err);
+    }
+
     std::filesystem::path project_dir(std::string_view name)
     {
         if (const auto found = search_above_exe(std::filesystem::path{ name })) {
@@ -497,7 +509,7 @@ namespace app
         // Built on a fresh value, so a failure part-way leaves the caller's config untouched.
         app_config_t cfg;
         if (!from_json(root, "", cfg, err)) { return false; }
-        if (!validate(cfg, err)) { return false; }
+        if (!validate_config(cfg, err)) { return false; }
 
         // A colour block that parsed and passed validation is a colour that was fitted, which is
         // what `valid` means to the detector. The file does not say it: a flag beside the numbers

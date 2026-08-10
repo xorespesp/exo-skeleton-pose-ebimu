@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "app_base.hh"
 #include "app_renderer_sdl3.hh"
 #include "frame_texture.hh"
@@ -39,13 +39,25 @@ namespace gui
         sagittal_angles,  // per-joint flexion over time: the measured angle against the one `local_anim_rot` carries
     };
 
-    // Controls shared by the plot modes that lay one subplot out per joint (`positions`, `sagittal_angles`).
+    // One grid mode's whole state: the modes that lay one subplot out per joint (`positions`,
+    // `sagittal_angles`) each keep one of these, so adding a knob reaches both by one line.
     struct grid_plot_ui_t
     {
         bool autosize{ true };    // pack subplots to fill the panel
         float size_px{ 150.0f };  // manual subplot cell size [px], DPI-scaled at use
         bool lock{ false };       // force the default range (live), else mouse-adjustable
         bool sync{ true };        // share one Y range across all subplots
+
+        bool reset{ false };          // one-shot: force the default range on the next frame
+        double sync_y[2]{ 0.0, 0.0 }; // the range `sync` shares across the subplots
+    };
+
+    // Style of one 3D skeleton plot.
+    struct skeleton_plot_ui_t
+    {
+        float point_size{ 7.5f };                          // joint sphere size [px]
+        float point_color[4]{ 0.95f, 0.45f, 0.20f, 1.0f }; // joint sphere color (orange)
+        float bone_color[4]{ 0.55f, 0.75f, 0.95f, 1.0f };  // bone line color (blue)
     };
 
     enum class source_kind_t { k4a_device, vz_device, recording };
@@ -71,7 +83,14 @@ namespace gui
         void _do_open_source();
         void _do_close_source();
 
+        // Reads `path` over the settings this window edits, discarding what the control panel has
+        // been tuned to since the last save. It fills the open dialog and reopens an open source,
+        // so what streams is what the settings say. A file that fails to load changes nothing.
+        void _do_load_config(const std::filesystem::path& path);
         void _do_save_config(const std::filesystem::path& path);
+
+        // Fills the open dialog from the settings the server holds.
+        void _seed_open_dialog();
         void _do_start_recording();
         void _do_stop_recording();
         void _update_pose_frame();
@@ -145,16 +164,12 @@ namespace gui
             // its own bone's turn in the rig frame. Both are recorded, so this only picks the view.
             bool angle_plot_relative{ true };
 
-            // raw_skeleton plot style
-            float raw_skel_point_size{ 7.5f };                          // joint sphere size [px]
-            float raw_skel_point_color[4]{ 0.95f, 0.45f, 0.20f, 1.0f }; // joint sphere color (orange)
-            float raw_skel_bone_color[4]{ 0.55f, 0.75f, 0.95f, 1.0f };  // bone line color (blue)
-            float raw_skel_fk_bone_color[4]{ 0.95f, 0.85f, 0.20f, 1.0f }; // FK overlay bone color
-
-            // rig_skeleton plot style
-            float rig_skel_point_size{ 7.5f };                          // joint sphere size [px]
-            float rig_skel_point_color[4]{ 0.95f, 0.45f, 0.20f, 1.0f }; // joint sphere color (orange)
-            float rig_skel_bone_color[4]{ 0.55f, 0.75f, 0.95f, 1.0f };  // bone line color (blue)
+            // 3D skeleton plot styles, one per mode so each keeps its own
+            skeleton_plot_ui_t raw_skel{}; // raw_skeleton
+            skeleton_plot_ui_t rig_skel{}; // rig_skeleton
+            // Only the raw plot draws a second skeleton over the first, so this is not part of the
+            // style both modes share.
+            float raw_skel_fk_bone_color[4]{ 0.95f, 0.85f, 0.20f, 1.0f };
 
             // open-source dialog
             bool open_dlg_show{ false };
@@ -186,13 +201,15 @@ namespace gui
             int trace_capacity{ 600 }; // ring length [frames]
         };
 
-        app::app_config_t _config;
+        // Owns the installation settings this window edits; `_server->config()` is the one copy,
+        // so a client command and this window open a source with the same thing.
         std::unique_ptr<net::exo_pose_server> _server;
 
         std::optional<frame_texture> _frame_texture;
         ImGui::FileBrowser _file_dialog;
         ImGui::FileBrowser _save_dialog{ ImGuiFileBrowserFlags_EnterNewFilename | ImGuiFileBrowserFlags_CreateNewDir };
         ImGui::FileBrowser _config_dialog{ ImGuiFileBrowserFlags_EnterNewFilename | ImGuiFileBrowserFlags_CreateNewDir };
+        ImGui::FileBrowser _config_open_dialog; // picks an existing profile, so no new-filename flag
         ImGui::FileBrowser _intrinsics_dialog;
         log_console _log_console;
 
@@ -221,11 +238,6 @@ namespace gui
         // channels 2-3 the bone's own turn in the rig frame
         plot_buffer<Eigen::Vector4f, pose::kNumJoints> _angle_plot_bufs;
         int _skel_plot_autofit_frames{ 30 }; // frames left to auto-fit the 3D box (after a source/view change), then free zoom
-        // 2D subplot-grid range controls, one pair per grid mode
-        bool _pos_plot_reset{ false };   // one-shot: force the default range on the next frame
-        double _pos_plot_sync_y[2]{ 0.0, 0.0 }; // shared Y range link for "Sync Plots"
-        bool _angle_plot_reset{ false };
-        double _angle_plot_sync_y[2]{ 0.0, 0.0 };
     };
 
 } // namespace gui

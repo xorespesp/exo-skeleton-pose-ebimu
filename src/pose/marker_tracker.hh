@@ -17,6 +17,48 @@
 
 namespace pose
 {
+    // Hands a producer's latest value to a consumer across a thread boundary. A publish overwrites
+    // whatever has not been taken, so a slow consumer gets the newest value and misses the ones
+    // between; a take gets one whole value or nothing, never a mix of two.
+    template <typename Payload>
+    class latest_value_latch
+    {
+    public:
+        void publish(Payload payload, hw::timestamp_t at)
+        {
+            std::scoped_lock lk{ _mtx };
+            _payload = std::move(payload);
+            _at = at;
+            _unread = true;
+        }
+
+        // False when nothing has been published since the last take, leaving the outputs untouched.
+        bool try_take(Payload& out, hw::timestamp_t& at)
+        {
+            std::scoped_lock lk{ _mtx };
+            if (!_unread) { return false; }
+            _unread = false;
+            out = _payload;
+            at = _at;
+            return true;
+        }
+
+        // Reads the newest frame without claiming it, which is what a readout does. `fn` runs under
+        // the lock, so it returns a copy of what it wants rather than a handle to it.
+        template <typename Fn>
+        auto read(Fn&& fn) const
+        {
+            std::scoped_lock lk{ _mtx };
+            return fn(_payload);
+        }
+
+    private:
+        mutable std::mutex _mtx;
+        Payload _payload{};
+        hw::timestamp_t _at{};
+        bool _unread{ false }; // a frame has been published that no take has claimed
+    };
+
     // ---------------------------------------------------------------------------
     // Marker tracker: one marker technology's whole path from a frame to measurements
     // ---------------------------------------------------------------------------
@@ -137,14 +179,12 @@ namespace pose
         std::optional<tag_detector> _detector; // frame thread; rebuilt when `_dirty`
         std::uint64_t _seen_tag_mask{ 0 };     // frame thread; bit t = id t was in the previous frame
 
-        mutable std::mutex _mtx; // guards everything below, which both threads reach
+        mutable std::mutex _mtx; // guards the tuning below, which both threads reach
         tag_detector::options_t _opt;
         double _tag_size_m;
         bool _dirty{ true }; // forces a build on the first frame, then after each stage
 
-        std::vector<tag_detection_t> _published;
-        hw::timestamp_t _published_at{};
-        bool _unread{ false }; // a frame has been published that no take has claimed
+        latest_value_latch<std::vector<tag_detection_t>> _latch;
     };
 
     // ---------------------------------------------------------------------------
@@ -167,9 +207,10 @@ namespace pose
         void set_detector_options(const color_marker_detector::options_t& opt);
         color_marker_detector::options_t detector_options() const;
 
-        // The assigner runs on the estimator thread, so its options are edited in place and the
-        // next frame uses them.
-        color_marker_assigner::options_t& assigner_options() noexcept { return _assigner.options(); }
+        // Estimator thread. Read a copy, edit it, hand it back; the next frame uses it.
+        color_marker_assigner::options_t assigner_options() const noexcept { return _assigner.options(); }
+        void set_assigner_options(const color_marker_assigner::options_t& opt) { _assigner.options() = opt; }
+
         const color_marker_assigner::stats_t& assigner_stats() const noexcept { return _assigner.stats(); }
 
         // Estimator thread. The last published frame's blobs and why others were dropped, which is
@@ -211,17 +252,21 @@ namespace pose
 
         color_marker_assigner _assigner; // estimator thread
 
-        mutable std::mutex _mtx; // guards everything below, which both threads reach
+        mutable std::mutex _mtx; // guards the tuning below, which both threads reach
         color_marker_detector::options_t _opt;
         bool _dirty{ true }; // forces a build on the first frame, then after each stage
 
         bool _publish_debug_images{ false }; // a tuning view is reading the per-pixel decisions
 
-        std::vector<marker_detection_t> _published;
-        marker_reject_stats_t _published_rejects{};
-        cv::Mat _published_mask, _published_score; // empty while `_publish_debug_images` is off
-        hw::timestamp_t _published_at{};
-        bool _unread{ false }; // a frame has been published that no take has claimed
+        // One frame of detection, published together so a readout cannot pair this frame's blobs
+        // with the previous frame's mask.
+        struct color_frame_t
+        {
+            std::vector<marker_detection_t> blobs;
+            marker_reject_stats_t rejects{};
+            cv::Mat mask, score; // empty while `_publish_debug_images` is off
+        };
+        latest_value_latch<color_frame_t> _latch;
     };
 
 } // namespace pose

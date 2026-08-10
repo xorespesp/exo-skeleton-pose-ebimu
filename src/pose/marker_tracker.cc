@@ -80,14 +80,12 @@ namespace pose
 
     std::vector<tag_detection_t> apriltag_tracker::last_detections() const
     {
-        std::scoped_lock lk{ _mtx };
-        return _published;
+        return _latch.read([](const std::vector<tag_detection_t>& tags) { return tags; });
     }
 
     std::size_t apriltag_tracker::last_detection_count() const
     {
-        std::scoped_lock lk{ _mtx };
-        return _published.size();
+        return _latch.read([](const std::vector<tag_detection_t>& tags) { return tags.size(); });
     }
 
     void apriltag_tracker::process_frame(
@@ -145,10 +143,7 @@ namespace pose
             _seen_tag_mask = mask;
         }
 
-        std::scoped_lock lk{ _mtx };
-        _published = std::move(found);
-        _published_at = timestamp;
-        _unread = true;
+        _latch.publish(std::move(found), timestamp);
     }
 
     void apriltag_tracker::reset()
@@ -160,12 +155,11 @@ namespace pose
         std::vector<joint_2d_measurement_t>& out,
         hw::timestamp_t& timestamp)
     {
-        std::scoped_lock lk{ _mtx };
-        if (!_unread) { return false; }
-        _unread = false;
+        // Bound outside the latch: a table lookup per tag is no reason to hold up the frame thread.
+        std::vector<tag_detection_t> tags;
+        if (!_latch.try_take(tags, timestamp)) { return false; }
 
-        out = bind_2d_measurements(_published, _tag_size_m);
-        timestamp = _published_at;
+        out = bind_2d_measurements(tags, this->tag_size_m());
         return true;
     }
 
@@ -173,12 +167,10 @@ namespace pose
         std::vector<joint_3d_measurement_t>& out,
         hw::timestamp_t& timestamp)
     {
-        std::scoped_lock lk{ _mtx };
-        if (!_unread) { return false; }
-        _unread = false;
+        std::vector<tag_detection_t> tags;
+        if (!_latch.try_take(tags, timestamp)) { return false; }
 
-        out = bind_3d_measurements(_published);
-        timestamp = _published_at;
+        out = bind_3d_measurements(tags);
         return true;
     }
 
@@ -210,20 +202,17 @@ namespace pose
 
     std::vector<marker_detection_t> color_marker_tracker::last_detections() const
     {
-        std::scoped_lock lk{ _mtx };
-        return _published;
+        return _latch.read([](const color_frame_t& frame) { return frame.blobs; });
     }
 
     marker_reject_stats_t color_marker_tracker::reject_stats() const
     {
-        std::scoped_lock lk{ _mtx };
-        return _published_rejects;
+        return _latch.read([](const color_frame_t& frame) { return frame.rejects; });
     }
 
     std::size_t color_marker_tracker::last_detection_count() const
     {
-        std::scoped_lock lk{ _mtx };
-        return _published.size();
+        return _latch.read([](const color_frame_t& frame) { return frame.blobs.size(); });
     }
 
     void color_marker_tracker::set_publish_debug_images(const bool on)
@@ -234,14 +223,12 @@ namespace pose
 
     cv::Mat color_marker_tracker::mask() const
     {
-        std::scoped_lock lk{ _mtx };
-        return _published_mask;
+        return _latch.read([](const color_frame_t& frame) { return frame.mask; });
     }
 
     cv::Mat color_marker_tracker::score_image() const
     {
-        std::scoped_lock lk{ _mtx };
-        return _published_score;
+        return _latch.read([](const color_frame_t& frame) { return frame.score; });
     }
 
     void color_marker_tracker::process_frame(
@@ -294,44 +281,32 @@ namespace pose
             }
         }
 
-        std::vector<marker_detection_t> found = _detector.value().detect(image);
-        const marker_reject_stats_t rejects = _detector.value().reject_stats();
-        if (annotated != nullptr) { draw_marker_detections(*annotated, found); }
+        color_frame_t frame;
+        frame.blobs = _detector.value().detect(image);
+        frame.rejects = _detector.value().reject_stats();
+        if (annotated != nullptr) { draw_marker_detections(*annotated, frame.blobs); }
 
         // The detector writes over these on the next frame, so a reader on the other thread needs
         // its own copy. Taken only while a view is asking, which is what keeps a frame's worth of
         // pixels off the normal path.
-        cv::Mat mask, score;
         if (publish_debug) {
-            mask = _detector.value().mask().clone();
-            score = _detector.value().score_image().clone();
+            frame.mask = _detector.value().mask().clone();
+            frame.score = _detector.value().score_image().clone();
         }
 
-        std::scoped_lock lk{ _mtx };
-        _published = std::move(found);
-        _published_rejects = rejects;
-        _published_mask = std::move(mask);
-        _published_score = std::move(score);
-        _published_at = timestamp;
-        _unread = true;
+        _latch.publish(std::move(frame), timestamp);
     }
 
     bool color_marker_tracker::try_get_2d_measurements(
         std::vector<joint_2d_measurement_t>& out,
         hw::timestamp_t& timestamp)
     {
-        // The assigner runs on this thread, so the blobs are copied out from under the lock and
-        // named outside it: naming walks the whole leg and would hold up the detection thread.
-        std::vector<marker_detection_t> blobs;
-        {
-            std::scoped_lock lk{ _mtx };
-            if (!_unread) { return false; }
-            _unread = false;
-            blobs = _published;
-            timestamp = _published_at;
-        }
+        // The assigner runs on this thread and names outside the latch: naming walks the whole leg
+        // and would hold up the detection thread.
+        color_frame_t frame;
+        if (!_latch.try_take(frame, timestamp)) { return false; }
 
-        out = _assigner.assign(blobs);
+        out = _assigner.assign(frame.blobs);
         return true;
     }
 

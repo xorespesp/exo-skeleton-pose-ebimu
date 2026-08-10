@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "app_config.hh"
 
 #include <cstdint>
@@ -50,6 +50,13 @@ namespace net
         // single-threaded with poll().
         exo_pose_pipeline& pipeline();
         const exo_pose_pipeline& pipeline() const;
+
+        // The one copy of the installation settings, so a client command and a debugger open a
+        // source with the same thing. Edited on the thread that calls poll(), which is where a
+        // command is served too. The port is read when the listener binds, so a change reaches a
+        // stopped listener and leaves a running one alone.
+        app::app_config_t& config();
+        const app::app_config_t& config() const;
 
     private:
         // Advance the pipeline one step: pull detections and recompute, then, while the listener

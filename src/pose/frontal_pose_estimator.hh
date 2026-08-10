@@ -1,10 +1,11 @@
-#pragma once
+﻿#pragma once
 #include "pose_estimator_base.hh"
 #include "joints_def.hh"
 #include "joint_measurement.hh"
 #include "dsp/one_euro_filter.hh"
 
 #include "hw/timestamp.hh"
+#include "utils/serializable.hh"
 
 #include <Eigen/Geometry>
 
@@ -53,6 +54,17 @@ namespace pose
             // Lateral hinge axis in the rig frame: ~(1,0,0) for a frontal view, ~(0,0,1) for a
             // sagittal (side) view. All leg joints share this axis.
             Eigen::Vector3d hinge_axis_world{ Eigen::Vector3d::UnitX() };
+
+            DECLARE_SERIALIZABLE_FIELDS(
+                v("enable_position_smoothing", o.enable_position_smoothing);
+                v("position_filter",           o.position_filter);
+                v("max_hold_ms",               o.max_hold);
+                v("reset_gap_ms",              o.reset_gap);
+                v("dt_min_s",                  o.dt_min);
+                v("dt_max_s",                  o.dt_max);
+                v("enable_hinge_constraint",   o.enable_hinge_constraint);
+                v("hinge_axis",                o.hinge_axis_world);
+            )
         };
 
         explicit frontal_pose_estimator(const options_t& opt = {});

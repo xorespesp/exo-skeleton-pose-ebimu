@@ -1,5 +1,7 @@
-// Ported from: https://github.com/casiez/OneEuroFilter
+﻿// Ported from: https://github.com/casiez/OneEuroFilter
 #pragma once
+
+#include "utils/serializable.hh"
 
 #include <cmath>
 #include <numbers>
@@ -11,6 +13,12 @@ namespace dsp
         double min_cutoff_hz = 1.0; // lower min_cutoff -> smoother at rest;
         double beta = 0.05; // higher beta -> less lag in motion;
         double dcutoff_hz = 1.0; // dcutoff shapes the internal speed estimate.
+
+        DECLARE_SERIALIZABLE_FIELDS(
+            v("min_cutoff_hz", o.min_cutoff_hz);
+            v("beta",          o.beta);
+            v("dcutoff_hz",    o.dcutoff_hz);
+        )
     };
 
     // Smoothing factor for an exponential low-pass at `cutoff_hz`, sampled over

@@ -1,4 +1,4 @@
-cmake_minimum_required (VERSION 3.28 FATAL_ERROR)
+﻿cmake_minimum_required (VERSION 3.28 FATAL_ERROR)
 
 # Enable Hot Reload for MSVC compilers if supported.
 if (POLICY CMP0141)
@@ -102,6 +102,9 @@ target_sources(${TARGET_NAME} PRIVATE
     "src/net/exo_pose_pipeline.cc"
     "src/net/exo_pose_server.hh"
     "src/net/exo_pose_server.cc"
+
+    # misc
+    "src/utils/serializable.hh"
 )
 
 target_include_directories(${TARGET_NAME} PRIVATE

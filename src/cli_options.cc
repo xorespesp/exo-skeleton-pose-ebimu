@@ -14,22 +14,11 @@ namespace app
 
     } // namespace
 
-    bool cli_options_t::has_direct_options() const
-    {
-        return this->source.has_value()
-            || this->view_plane.has_value()
-            || this->tag_size_m.has_value()
-            || this->exposure_us.has_value()
-            || this->gain.has_value()
-            || this->roi.has_value()
-            || this->port.has_value();
-    }
-
     void add_cli_options(CLI::App& app, cli_options_t& o)
     {
         auto* config = app.add_option("-c,--config", o.config_name,
-            "Installation config: a profile name (configs/<name>.json) or a file path.\n"
-            "Names the marker kind; the options below always run the AprilTag one")
+            "Installation config: <name>.json read from the configs folder, or a path when it\n"
+            "carries a folder. Names the marker kind; the options below always run the AprilTag one")
             ->group(kConfigGroup);
 
         // Callbacks fire only when the option is present, which is what lets an omitted one stay
@@ -125,14 +114,15 @@ namespace app
         std::string& err)
     {
         out_file.clear();
-        const bool named = !o.config_name.empty();
 
-        // The direct options describe a setup of their own, so a default profile does not join in.
+        // A config file is read only when one is named. Nothing named leaves the built-in defaults
+        // standing, which the direct options then adjust; where those are absent too, a bare run is
+        // exactly the defaults.
         //
-        // They also leave `pose.detector` at its default, which is the AprilTag path. 
-        // A colour marker takes a calibration measured on site, 
-        // and naming its file is what a profile or the debugger's open dialog does.
-        if (!named && o.has_direct_options())
+        // Those defaults leave `pose.detector` on the AprilTag path. A colour marker takes a
+        // calibration measured on site, and naming its file is what a profile or the debugger's
+        // open dialog does.
+        if (o.config_name.empty())
         {
             app_config_t cfg;
             if (o.source.has_value())     { cfg.camera.source = *o.source; }
@@ -146,16 +136,16 @@ namespace app
             return true;
         }
 
-        const std::optional<std::filesystem::path> path = find_config_file(o.config_name);
-
-        // Nothing named and no default profile on disk: the built-in defaults stand.
-        if (!path.has_value()) { out = app_config_t{}; return true; }
-
-        if (!load_config(*path, out, err)) {
-            err = std::format("config '{}': {}", path->string(), err);
+        const std::filesystem::path path = find_config_file(o.config_name);
+        if (path.empty()) {
+            err = std::format("config '{}' was not found", o.config_name);
             return false;
         }
-        out_file = *path;
+        if (!load_config(path, out, err)) {
+            err = std::format("config '{}': {}", path.string(), err);
+            return false;
+        }
+        out_file = path;
         return true;
     }
 

@@ -1,10 +1,11 @@
-#pragma once
+﻿#pragma once
 #include "pose_estimator_base.hh"
 #include "joints_def.hh"
 #include "joint_measurement.hh"
 #include "dsp/one_euro_filter.hh"
 
 #include "hw/timestamp.hh"
+#include "utils/serializable.hh"
 
 #include <Eigen/Geometry>
 
@@ -74,6 +75,15 @@ namespace pose
             millis_f64 reset_gap{ 400.0 }; // beyond this gap, reseed the filter to the raw sample
             seconds_f64 dt_min{ 0.001 };   // dt clamp floor [s]
             seconds_f64 dt_max{ 0.100 };   // dt clamp ceiling [s] (avoids a jump after a long pause)
+
+            DECLARE_SERIALIZABLE_FIELDS(
+                v("enable_position_smoothing", o.enable_position_smoothing);
+                v("position_filter",           o.position_filter);
+                v("max_hold_ms",               o.max_hold);
+                v("reset_gap_ms",              o.reset_gap);
+                v("dt_min_s",                  o.dt_min);
+                v("dt_max_s",                  o.dt_max);
+            )
         };
 
         explicit sagittal_pose_estimator(const options_t& opt = {});

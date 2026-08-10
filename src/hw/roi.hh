@@ -1,5 +1,7 @@
-#pragma once
+﻿#pragma once
 #include "calibration.hh"
+
+#include "utils/serializable.hh"
 
 #include <algorithm>
 
@@ -12,6 +14,13 @@ namespace hw
         int width{ 0 }, height{ 0 }; // (w,h) : dimensions
 
         bool is_empty() const { return width <= 0 || height <= 0; }
+
+        DECLARE_SERIALIZABLE_FIELDS(
+            v("x",      o.x);
+            v("y",      o.y);
+            v("width",  o.width);
+            v("height", o.height);
+        )
     };
 
     // `roi` clipped to a width x height frame. Comes back empty when the two do not overlap.

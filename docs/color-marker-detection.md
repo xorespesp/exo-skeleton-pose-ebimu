@@ -532,12 +532,12 @@ add_executable(${VZCAM_TEST_NAME}
   "apriltag": { "...": "태그 경로도 그대로 남아 있어 전환해도 튜닝을 잃지 않는다" },
   "color_marker": {
     "calibration": {
-      "model": {
-        "mean_ab": [62.4000, -18.1000],
-        "cov_ab": [[9.2000, 1.4000], [1.4000, 7.8000]],
-        "max_distance": 3.0000
-      },
       "detector": {
+        "model": {
+          "mean_ab": [62.4000, -18.1000],
+          "cov_ab": [[9.2000, 1.4000], [1.4000, 7.8000]],
+          "max_distance": 3.0000
+        },
         "min_area_px": 60.0, "max_area_px": 6000.0,
         "min_fill": 0.55, "max_aspect": 3.0, "min_score": 0.15,
         "open_kernel_px": 3, "close_kernel_px": 5
@@ -557,7 +557,9 @@ add_executable(${VZCAM_TEST_NAME}
 ```
 
 `assigner` 블록은 `color_marker_assigner::options_t` 를 그대로 비춘다. `frontal` / `sagittal` 이
-추정기 옵션을 비추는 것과 같은 형태라, 파라미터를 하나 더하면 `visit_fields` 한 줄이 전부다.
+추정기 옵션을 비추는 것과 같은 형태라, 파라미터를 하나 더하면 그 구조체 안
+`DECLARE_SERIALIZABLE_FIELDS` 목록의 한 줄이 전부다. 각 타입이 자기 키 목록을 멤버 옆에 들고
+있어서(`utils/serializable.hh`), 필드와 키가 한 자리에서 같이 늘어난다.
 
 핵심은 다음과 같다.
 

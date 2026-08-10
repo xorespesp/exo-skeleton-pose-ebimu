@@ -1,7 +1,8 @@
-#pragma once
+﻿#pragma once
 #include "joint_measurement.hh"
 
 #include "hw/calibration.hh" // hw::intrinsic_t
+#include "utils/serializable.hh"
 
 #include <Eigen/Geometry>
 #include <opencv2/core.hpp>
@@ -72,7 +73,7 @@ namespace pose
             homography,
         };
 
-        // Tuning options for the detector. (JSON serializable)
+        // Tuning options for the detector.
         struct options_t {
             float quad_decimate{ 2.0f }; // 1.0 = full resolution (best corner accuracy)
             float quad_sigma{ 0.0f };    // Gaussian blur sigma for quad detection (0 = none)
@@ -80,6 +81,15 @@ namespace pose
             int num_iters{ 20 };         // orthogonal-iteration steps per tag
             int num_threads{ 4 };        // detection worker threads
             pose_method_t pose_method{ pose_method_t::orthogonal_iteration }; // tag->camera pose estimator
+
+            DECLARE_SERIALIZABLE_FIELDS(
+                v("quad_decimate", o.quad_decimate);
+                v("quad_sigma",    o.quad_sigma);
+                v("refine_edges",  o.refine_edges);
+                v("num_iters",     o.num_iters);
+                v("num_threads",   o.num_threads);
+                v("pose_method",   o.pose_method);
+            )
         };
 
         // TODO: make the tag family selectable (currently fixed to tagStandard41h12).

@@ -2,6 +2,8 @@
 #include "joint_measurement.hh"
 #include "joints_def.hh"
 
+#include "utils/serializable.hh"
+
 #include <Eigen/Core>
 #include <opencv2/core.hpp>
 
@@ -104,6 +106,13 @@ namespace pose
         // 정규분포라면 2.0 은 표본의 약 86%, 3.0 은 약 99% 를 덮는다.
         double max_distance{ 3.0 };
         bool valid{ false }; // 적합 전에는 false. 이 상태에서는 검출이 아무것도 내지 않는다
+
+        // NOTE: `valid` 필드는 serializable field 목록에서 제외. (해당 필드는 각 필드에 저장된 값들이 유효한지를 나타내는 상태이므로)
+        DECLARE_SERIALIZABLE_FIELDS(
+            v("mean_ab",      o.mean_ab);
+            v("cov_ab",       o.cov_ab);
+            v("max_distance", o.max_distance);
+        )
     };
 
     // 검출된 마커 하나. (NOTE: `center` 가 최종 산출물, 나머지 필드는 디버깅용)
@@ -245,6 +254,17 @@ namespace pose
             //
             // 둘 다 0 이면 해당 단계를 건너뛴다.
             int close_kernel_px{ 5 };
+
+            DECLARE_SERIALIZABLE_FIELDS(
+                v("model",           o.model);
+                v("min_area_px",     o.min_area_px);
+                v("max_area_px",     o.max_area_px);
+                v("min_fill",        o.min_fill);
+                v("max_aspect",      o.max_aspect);
+                v("min_score",       o.min_score);
+                v("open_kernel_px",  o.open_kernel_px);
+                v("close_kernel_px", o.close_kernel_px);
+            )
         };
 
         explicit color_marker_detector(const options_t& opt = {});
@@ -342,6 +362,15 @@ namespace pose
 
             // 전 구간을 잇지 못한 프레임이 이만큼 연속되면 lock 을 풀고 처음부터 다시 찾는다.
             int lost_frames_before_full_search{ 10 };
+
+            DECLARE_SERIALIZABLE_FIELDS(
+                v("leg",                            o.leg);
+                v("marker_diameter_m",              o.marker_diameter_m);
+                v("search_radius_px",               o.search_radius_px);
+                v("enable_bone_length_check",       o.enable_bone_length_check);
+                v("bone_length_tolerance",          o.bone_length_tolerance);
+                v("lost_frames_before_full_search", o.lost_frames_before_full_search);
+            )
         };
 
         // 한 프레임의 배정 결과 요약. (왜 관절이 안 잡혔는지에 대한 디버깅 목적)

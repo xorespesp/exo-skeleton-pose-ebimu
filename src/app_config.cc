@@ -1,4 +1,6 @@
-#include "app_config.hh"
+﻿#include "app_config.hh"
+
+#include "utils/serializable.hh"
 
 #include <nlohmann/json.hpp>
 
@@ -18,10 +20,6 @@ namespace app
     namespace
     {
         using json = nlohmann::ordered_json;
-
-        // Bumped on any change to the field lists below. Every key they name is required, so a
-        // key added, renamed or dropped makes files written for the previous version unreadable.
-        constexpr int kConfigVersion = 4;
 
         // Deep enough to clear a build tree's out/build/<preset>/, stopping at the filesystem root.
         constexpr int kSearchLevels = 6;
@@ -63,198 +61,16 @@ namespace app
             return std::nullopt;
         }
 
-        std::string profile_filename(std::string_view name)
-        {
-            return std::string{ name } + ".json";
-        }
-
-        // A profile lives under `configs/` where that folder exists, and flat beside the
-        // executable where it does not, which is where `project_dir("configs")` falls back to.
-        // Both are searched so a saved profile can always be reopened by name.
-        std::optional<std::filesystem::path> locate_profile(std::string_view name)
-        {
-            if (auto found = search_above_exe(std::filesystem::path{ "configs" } / profile_filename(name))) {
-                return found->lexically_normal();
-            }
-
-            std::error_code ec;
-            const std::filesystem::path dir = exe_dir();
-            if (dir.empty()) { return std::nullopt; }
-            if (const std::filesystem::path flat = dir / profile_filename(name);
-                std::filesystem::exists(flat, ec))
-            {
-                return flat.lexically_normal();
-            }
-            return std::nullopt;
-        }
-
-        // =====================================================================================
-        // Field lists
-        //
-        // One `visit_fields` per type names its keys once. `Self` binds both `T&` and `const T&`,
-        // so reading and writing share that list and a field added here reaches both. This is the
-        // only place a config type's layout is spelled out.
-        // =====================================================================================
-
-        template <typename T, typename U>
-        concept same_as_decayed = std::same_as<std::remove_cvref_t<T>, U>;
-
-        template <typename V, same_as_decayed<dsp::one_euro_params_t> Self>
-        void visit_fields(V& v, Self& o)
-        {
-            v("min_cutoff_hz", o.min_cutoff_hz);
-            v("beta",          o.beta);
-            v("dcutoff_hz",    o.dcutoff_hz);
-        }
-
-        template <typename V, same_as_decayed<hw::roi_t> Self>
-        void visit_fields(V& v, Self& o)
-        {
-            v("x",      o.x);
-            v("y",      o.y);
-            v("width",  o.width);
-            v("height", o.height);
-        }
-
-        template <typename V, same_as_decayed<pose::tag_detector::options_t> Self>
-        void visit_fields(V& v, Self& o)
-        {
-            v("quad_decimate", o.quad_decimate);
-            v("quad_sigma",    o.quad_sigma);
-            v("refine_edges",  o.refine_edges);
-            v("num_iters",     o.num_iters);
-            v("num_threads",   o.num_threads);
-            v("pose_method",   o.pose_method);
-        }
-
-        // `valid` is left out on purpose: a colour that parsed and describes an ellipse is a
-        // colour that was fitted, and the loader sets it. A flag in the file could claim
-        // otherwise about the numbers right beside it.
-        template <typename V, same_as_decayed<pose::color_model_t> Self>
-        void visit_fields(V& v, Self& o)
-        {
-            v("mean_ab",      o.mean_ab);
-            v("cov_ab",       o.cov_ab);
-            v("max_distance", o.max_distance);
-        }
-
-        // The colour comes out under its own key even though it sits inside `detector`, since the
-        // two are read by different eyes: one is fitted and never touched by hand, the other is
-        // adjusted while watching the frame.
-        template <typename V, same_as_decayed<color_marker_calibration_t> Self>
-        void visit_fields(V& v, Self& o)
-        {
-            v("model",            o.detector.model);
-            v("detector",         o.detector);
-            v("frame_resolution", o.frame_resolution);
-        }
-
-        // `model` is absent here, so the field list above can name it once beside this one.
-        template <typename V, same_as_decayed<pose::color_marker_detector::options_t> Self>
-        void visit_fields(V& v, Self& o)
-        {
-            v("min_area_px",     o.min_area_px);
-            v("max_area_px",     o.max_area_px);
-            v("min_fill",        o.min_fill);
-            v("max_aspect",      o.max_aspect);
-            v("min_score",       o.min_score);
-            v("open_kernel_px",  o.open_kernel_px);
-            v("close_kernel_px", o.close_kernel_px);
-        }
-
-        template <typename V, same_as_decayed<pose::color_marker_assigner::options_t> Self>
-        void visit_fields(V& v, Self& o)
-        {
-            v("leg",                            o.leg);
-            v("marker_diameter_m",              o.marker_diameter_m);
-            v("search_radius_px",               o.search_radius_px);
-            v("enable_bone_length_check",       o.enable_bone_length_check);
-            v("bone_length_tolerance",          o.bone_length_tolerance);
-            v("lost_frames_before_full_search", o.lost_frames_before_full_search);
-        }
-
-        template <typename V, same_as_decayed<color_marker_config_t> Self>
-        void visit_fields(V& v, Self& o)
-        {
-            v("calibration", o.calibration);
-            v("assigner",    o.assigner);
-        }
-
-        template <typename V, same_as_decayed<detector_config_t> Self>
-        void visit_fields(V& v, Self& o)
-        {
-            v("kind",         o.kind);
-            v("apriltag",     o.apriltag);
-            v("color_marker", o.color_marker);
-        }
-
-        template <typename V, same_as_decayed<pose::frontal_pose_estimator::options_t> Self>
-        void visit_fields(V& v, Self& o)
-        {
-            v("enable_position_smoothing", o.enable_position_smoothing);
-            v("position_filter",           o.position_filter);
-            v("max_hold_ms",               o.max_hold);
-            v("reset_gap_ms",              o.reset_gap);
-            v("dt_min_s",                  o.dt_min);
-            v("dt_max_s",                  o.dt_max);
-            v("enable_hinge_constraint",   o.enable_hinge_constraint);
-            v("hinge_axis",                o.hinge_axis_world);
-        }
-
-        template <typename V, same_as_decayed<pose::sagittal_pose_estimator::options_t> Self>
-        void visit_fields(V& v, Self& o)
-        {
-            v("enable_position_smoothing", o.enable_position_smoothing);
-            v("position_filter",           o.position_filter);
-            v("max_hold_ms",               o.max_hold);
-            v("reset_gap_ms",              o.reset_gap);
-            v("dt_min_s",                  o.dt_min);
-            v("dt_max_s",                  o.dt_max);
-        }
-
-        template <typename V, same_as_decayed<camera_config_t> Self>
-        void visit_fields(V& v, Self& o)
-        {
-            v("source",          o.source);
-            v("exposure_us",     o.exposure_us);
-            v("gain",            o.gain);
-            v("roi",             o.roi);
-            v("intrinsics_file", o.intrinsics_file);
-        }
-
-        template <typename V, same_as_decayed<pose_config_t> Self>
-        void visit_fields(V& v, Self& o)
-        {
-            v("view_plane", o.view_plane);
-            v("tag_size_m", o.tag_size_m);
-            v("detector",   o.detector);
-            v("frontal",    o.frontal);
-            v("sagittal",   o.sagittal);
-        }
-
-        template <typename V, same_as_decayed<server_config_t> Self>
-        void visit_fields(V& v, Self& o)
-        {
-            v("port", o.port);
-        }
-
-        template <typename V, same_as_decayed<app_config_t> Self>
-        void visit_fields(V& v, Self& o)
-        {
-            v("server", o.server);
-            v("camera", o.camera);
-            v("pose",   o.pose);
-        }
-
-        // A type with a field list of its own, hence a JSON object.
-        struct probe_visitor_t { void operator()(const char*, auto&) {} };
-        template <typename T>
-        concept visitable = requires(probe_visitor_t & p, T & o) { visit_fields(p, o); };
-
         // =====================================================================================
         // Leaf conversions
         //
-        // One pair per type the field lists mention. Nothing here knows a key name.
+        // One pair per type a field list mentions but that carries no list of its own, because it
+        // is a single value in the file. Nothing here knows a key name.
+        //
+        // The keys themselves are not spelled here: every stored type names its own beside its
+        // members with `DECLARE_SERIALIZABLE_FIELDS` (see `utils/serializable.hh`), so a field and
+        // its key are added in one place. What this file owns is the format those lists are
+        // written in.
         // =====================================================================================
 
         template <typename T> struct is_duration : std::false_type {};
@@ -290,10 +106,10 @@ namespace app
             else if constexpr (is_duration<T>::value) {
                 return json(value.count());
             }
-            else if constexpr (visitable<const T>) {
+            else if constexpr (utils::has_serializable_fields<T>) {
                 json node = json::object();
                 auto writer = [&node](const char* key, const auto& field) { node[key] = to_json(field); };
-                visit_fields(writer, value);
+                T::visit_serializable_fields(writer, value);
                 return node;
             }
             else if constexpr (requires { to_json_leaf(value); }) {
@@ -464,7 +280,7 @@ namespace app
                 out = T{ value };
                 return true;
             }
-            else if constexpr (visitable<T>) {
+            else if constexpr (utils::has_serializable_fields<T>) {
                 if (!node.is_object()) { err = std::format("'{}' must be an object", name); return false; }
                 bool ok = true;
                 auto reader = [&](const char* key, auto& field) {
@@ -478,9 +294,23 @@ namespace app
                         ok = false;
                         return;
                     }
-                    ok = from_json(*it, key_name(name, key), field, err);
+                    // A field a list cannot write into is a stamp the file states and has to match,
+                    // so it is read into a scratch value and compared. The load below is in the
+                    // other arm because it would not compile against a const field.
+                    using field_t = std::remove_reference_t<decltype(field)>;
+                    if constexpr (std::is_const_v<field_t>) {
+                        std::remove_const_t<field_t> stated{};
+                        if (!from_json(*it, key_name(name, key), stated, err)) { ok = false; return; }
+                        if (stated != field) {
+                            err = std::format("'{}' is {}, and this build reads {}",
+                                key_name(name, key), stated, field);
+                            ok = false;
+                        }
+                    } else {
+                        ok = from_json(*it, key_name(name, key), field, err);
+                    }
                 };
-                visit_fields(reader, out);
+                T::visit_serializable_fields(reader, out);
                 return ok; // keys the field list does not name are left alone
             }
             else if constexpr (requires { from_json_leaf(node, name, out, err); }) {
@@ -586,12 +416,13 @@ namespace app
                 // A fitted colour is an ellipse on the a*b* plane, so its covariance has to describe
                 // an area. A singular one inverts to nonsense and would admit every pixel or none.
                 if (covariance(0, 0) <= 0.0 || covariance(1, 1) <= 0.0 || covariance.determinant() <= 0.0) {
-                    err = "'pose.detector.color_marker.calibration.model.cov_ab' does not describe a "
-                          "spread (both diagonals and the determinant must be positive)";
+                    err = "'pose.detector.color_marker.calibration.detector.model.cov_ab' does not "
+                          "describe a spread (both diagonals and the determinant must be positive)";
                     return false;
                 }
                 if (model.max_distance <= 0.0) {
-                    err = "'pose.detector.color_marker.calibration.model.max_distance' must be greater than zero";
+                    err = "'pose.detector.color_marker.calibration.detector.model.max_distance' "
+                          "must be greater than zero";
                     return false;
                 }
                 if (detector.min_fill <= 0.0 || detector.min_fill > 1.0) {
@@ -663,19 +494,6 @@ namespace app
             return false;
         }
 
-        // Stated, not assumed: a file with no version is one whose shape this build cannot vouch for.
-        const auto version_it = root.find("config_version");
-        if (version_it == root.end()) {
-            err = std::format("'config_version' is missing (this build reads {})", kConfigVersion);
-            return false;
-        }
-        int version = 0;
-        if (!from_json(*version_it, "config_version", version, err)) { return false; }
-        if (version != kConfigVersion) {
-            err = std::format("config_version {} is not supported (this build reads {})", version, kConfigVersion);
-            return false;
-        }
-
         // Built on a fresh value, so a failure part-way leaves the caller's config untouched.
         app_config_t cfg;
         if (!from_json(root, "", cfg, err)) { return false; }
@@ -702,14 +520,7 @@ namespace app
 
     std::string dump_config(const app_config_t& config)
     {
-        // Named, not iterated in place: `items()` holds a reference to the json it was called on,
-        // and a temporary there dies before the loop body runs.
-        json body = to_json(config);
-
-        json root = json::object();
-        root["config_version"] = kConfigVersion; // first, where a reader looks for it
-        for (auto& [key, value] : body.items()) { root[key] = std::move(value); }
-        return root.dump(2);
+        return to_json(config).dump(2);
     }
 
     bool save_config(const app_config_t& config, const std::filesystem::path& path, std::string& err)
@@ -731,24 +542,15 @@ namespace app
         return true;
     }
 
-    std::optional<std::filesystem::path> find_config_file(std::string_view name)
+    std::filesystem::path find_config_file(std::string_view name)
     {
-        // Nothing named: the default profile is used where it exists and skipped where it does not.
-        if (name.empty()) { return locate_profile("default"); }
+        const std::filesystem::path spelled{ name };
+        const std::filesystem::path path = spelled.has_parent_path()
+            ? spelled
+            : project_dir("configs") / spelled;
 
-        // A path is spelled like one; a profile is a bare name.
-        if (name.ends_with(".json")
-            || name.find('/') != std::string_view::npos
-            || name.find('\\') != std::string_view::npos)
-        {
-            return std::filesystem::path{ name };
-        }
-
-        if (auto found = locate_profile(name)) { return found; }
-
-        // Named but not there: hand back where a save would have put it, so the caller reports
-        // the miss against a path the operator can go and look at.
-        return project_dir("configs") / profile_filename(name);
+        std::error_code ec;
+        return std::filesystem::exists(path, ec) ? path : std::filesystem::path{};
     }
 
 } // namespace app

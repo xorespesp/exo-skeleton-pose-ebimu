@@ -28,14 +28,12 @@ namespace app
         std::optional<uint16_t> port;
 
         bool dump_config{ false }; // print the resolved config and exit
-
-        // Whether anything in the direct group was given.
-        [[nodiscard]] bool has_direct_options() const;
     };
 
     void add_cli_options(CLI::App& app, cli_options_t& o);
 
-    // The config the run uses: the named file (or the default profile, where nothing else was said) or the built-in defaults with the direct options applied. 
+    // The config the run uses: the file `--config` named, or the built-in defaults with the direct
+    // options applied where it named none. A file is read only when one is named.
     // `out_file` names the file it came from and is empty for the built-in defaults.
     [[nodiscard]] bool resolve_config(
         const cli_options_t& o,

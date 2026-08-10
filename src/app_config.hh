@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "source_address.hh"
 
 #include "hw/frame_format.hh"
@@ -8,6 +8,7 @@
 #include "pose/sagittal_pose_estimator.hh"
 #include "pose/tag_detector.hh"
 #include "pose/view_plane.hh"
+#include "utils/serializable.hh"
 
 #include <cstdint>
 #include <filesystem>
@@ -32,6 +33,14 @@ namespace app
         // Calibration measured off-line, for a camera reporting none of its own.
         // Empty leaves tag poses unsolvable, which the 2D estimators do not mind. Ignored for a K4A.
         std::string intrinsics_file;
+
+        DECLARE_SERIALIZABLE_FIELDS(
+            v("source",          o.source);
+            v("exposure_us",     o.exposure_us);
+            v("gain",            o.gain);
+            v("roi",             o.roi);
+            v("intrinsics_file", o.intrinsics_file);
+        )
     };
 
     // What is printed on the exo, which decides how a frame becomes per-joint measurements.
@@ -76,6 +85,11 @@ namespace app
         // not state: a ROI, a binned mode or another sensor all change how many pixels a marker
         // covers, and the blob gates are counted in pixels. Compared at open.
         Eigen::Vector2i frame_resolution{ 0, 0 };
+
+        DECLARE_SERIALIZABLE_FIELDS(
+            v("detector",         o.detector);
+            v("frame_resolution", o.frame_resolution);
+        )
     };
 
     // The colour-marker path.
@@ -86,6 +100,11 @@ namespace app
         std::optional<color_marker_calibration_t> calibration;
 
         pose::color_marker_assigner::options_t assigner; // which blob is which joint
+
+        DECLARE_SERIALIZABLE_FIELDS(
+            v("calibration", o.calibration);
+            v("assigner",    o.assigner);
+        )
     };
 
     // Both marker kinds are kept, so switching loses neither one's tuning.
@@ -95,6 +114,12 @@ namespace app
 
         pose::tag_detector::options_t apriltag;
         color_marker_config_t color_marker;
+
+        DECLARE_SERIALIZABLE_FIELDS(
+            v("kind",         o.kind);
+            v("apriltag",     o.apriltag);
+            v("color_marker", o.color_marker);
+        )
     };
 
     // Turning frames into joint angles. Both planes are kept, so switching loses neither.
@@ -108,18 +133,43 @@ namespace app
         detector_config_t detector;
         pose::frontal_pose_estimator::options_t frontal;
         pose::sagittal_pose_estimator::options_t sagittal;
+
+        DECLARE_SERIALIZABLE_FIELDS(
+            v("view_plane", o.view_plane);
+            v("tag_size_m", o.tag_size_m);
+            v("detector",   o.detector);
+            v("frontal",    o.frontal);
+            v("sagittal",   o.sagittal);
+        )
     };
 
     struct server_config_t
     {
         uint16_t port{ 9002 };
+
+        DECLARE_SERIALIZABLE_FIELDS(
+            v("port", o.port);
+        )
     };
 
     struct app_config_t
     {
+        // The current config schema version. (YYMMDDRR) 
+        // It has to be updated whenever any field list nested below this one changes.
+        static constexpr int config_version = 26081000;
+
         server_config_t server;
         camera_config_t camera;
         pose_config_t pose;
+
+        DECLARE_SERIALIZABLE_FIELDS(
+            // NOTE: `config_version` MUST be named first, so that a file written for another
+            //       schema says so before any key of that schema's shape is read.
+            v("config_version", o.config_version);
+            v("server",         o.server);
+            v("camera",         o.camera);
+            v("pose",           o.pose);
+        )
     };
 
     // Where the app keeps its own output (`recordings`, `dumps`, `configs`):
@@ -127,8 +177,8 @@ namespace app
     // Not config-relative, since these hold what the tool produces, not what an installation names.
     [[nodiscard]] std::filesystem::path project_dir(std::string_view name);
 
-    // Every key the schema names must be present, `config_version` included; a default standing in
-    // for an omitted one is the failure this guards against. Keys it does not name are ignored.
+    // Every key the schema names must be present; a default standing in for an omitted one is the
+    // failure this guards against. Keys it does not name are ignored.
     // On failure `err` names the key and `out` is untouched.
     [[nodiscard]] bool load_config(const std::filesystem::path& path, app_config_t& out, std::string& err);
 
@@ -138,10 +188,8 @@ namespace app
     // The JSON text `save_config()` would write. (--dump-config)
     [[nodiscard]] std::string dump_config(const app_config_t& config);
 
-    // What `--config` named: a path if it carries a separator or a `.json` suffix, else a profile
-    // sought as `configs/<name>.json` and then as `<name>.json` beside the executable, matching
-    // where `project_dir("configs")` writes. An empty name seeks the `default` profile, and
-    // nullopt means there is none, so a bare run uses the built-in defaults.
-    [[nodiscard]] std::optional<std::filesystem::path> find_config_file(std::string_view name);
+    // Where `--config <name>` points: a bare filename comes from `project_dir("configs")`, the
+    // folder a save writes to; a name carrying a folder is that path. Empty when nothing is there.
+    [[nodiscard]] std::filesystem::path find_config_file(std::string_view name);
 
 } // namespace app

@@ -954,7 +954,7 @@ namespace gui
                 if (ImGui::Button("Save Config As..."))
                 {
                     _config_dialog.SetPwd(app::project_dir("configs"));
-                    _config_dialog.SetInputName("default.json");
+                    _config_dialog.SetInputName("new_config.json");
                     _config_dialog.Open();
                 }
                 ImGui::SetItemTooltip("Write the open source, its camera settings, and the tuning\n"

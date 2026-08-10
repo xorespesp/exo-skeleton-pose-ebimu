@@ -21,7 +21,7 @@ namespace app
 
         // Bumped on any change to the field lists below. Every key they name is required, so a
         // key added, renamed or dropped makes files written for the previous version unreadable.
-        constexpr int kConfigVersion = 1;
+        constexpr int kConfigVersion = 4;
 
         // Deep enough to clear a build tree's out/build/<preset>/, stopping at the filesystem root.
         constexpr int kSearchLevels = 6;
@@ -127,6 +127,67 @@ namespace app
             v("pose_method",   o.pose_method);
         }
 
+        // `valid` is left out on purpose: a colour that parsed and describes an ellipse is a
+        // colour that was fitted, and the loader sets it. A flag in the file could claim
+        // otherwise about the numbers right beside it.
+        template <typename V, same_as_decayed<pose::color_model_t> Self>
+        void visit_fields(V& v, Self& o)
+        {
+            v("mean_ab",      o.mean_ab);
+            v("cov_ab",       o.cov_ab);
+            v("max_distance", o.max_distance);
+        }
+
+        // The colour comes out under its own key even though it sits inside `detector`, since the
+        // two are read by different eyes: one is fitted and never touched by hand, the other is
+        // adjusted while watching the frame.
+        template <typename V, same_as_decayed<color_marker_calibration_t> Self>
+        void visit_fields(V& v, Self& o)
+        {
+            v("model",            o.detector.model);
+            v("detector",         o.detector);
+            v("frame_resolution", o.frame_resolution);
+        }
+
+        // `model` is absent here, so the field list above can name it once beside this one.
+        template <typename V, same_as_decayed<pose::color_marker_detector::options_t> Self>
+        void visit_fields(V& v, Self& o)
+        {
+            v("min_area_px",     o.min_area_px);
+            v("max_area_px",     o.max_area_px);
+            v("min_fill",        o.min_fill);
+            v("max_aspect",      o.max_aspect);
+            v("min_score",       o.min_score);
+            v("open_kernel_px",  o.open_kernel_px);
+            v("close_kernel_px", o.close_kernel_px);
+        }
+
+        template <typename V, same_as_decayed<pose::color_marker_assigner::options_t> Self>
+        void visit_fields(V& v, Self& o)
+        {
+            v("leg",                            o.leg);
+            v("marker_diameter_m",              o.marker_diameter_m);
+            v("search_radius_px",               o.search_radius_px);
+            v("enable_bone_length_check",       o.enable_bone_length_check);
+            v("bone_length_tolerance",          o.bone_length_tolerance);
+            v("lost_frames_before_full_search", o.lost_frames_before_full_search);
+        }
+
+        template <typename V, same_as_decayed<color_marker_config_t> Self>
+        void visit_fields(V& v, Self& o)
+        {
+            v("calibration", o.calibration);
+            v("assigner",    o.assigner);
+        }
+
+        template <typename V, same_as_decayed<detector_config_t> Self>
+        void visit_fields(V& v, Self& o)
+        {
+            v("kind",         o.kind);
+            v("apriltag",     o.apriltag);
+            v("color_marker", o.color_marker);
+        }
+
         template <typename V, same_as_decayed<pose::frontal_pose_estimator::options_t> Self>
         void visit_fields(V& v, Self& o)
         {
@@ -207,7 +268,18 @@ namespace app
         json to_json_leaf(const source_address& v)              { return json(v.to_string()); }
         json to_json_leaf(pose::view_plane_t v)                 { return json(std::string{ pose::view_plane_name(v) }); }
         json to_json_leaf(pose::tag_detector::pose_method_t v)  { return json(std::string{ pose::pose_method_to_str(v) }); }
+        json to_json_leaf(pose::joint_side_t v)                 { return json(std::string{ pose::joint_side_name(v) }); }
+        json to_json_leaf(marker_kind_t v)                      { return json(std::string{ marker_kind_name(v) }); }
         json to_json_leaf(const Eigen::Vector3d& v)             { return json::array({ v.x(), v.y(), v.z() }); }
+        json to_json_leaf(const Eigen::Vector2d& v)             { return json::array({ v.x(), v.y() }); }
+        json to_json_leaf(const Eigen::Vector2i& v)             { return json::array({ v.x(), v.y() }); }
+
+        // Row major, so the file reads the way the matrix is written.
+        json to_json_leaf(const Eigen::Matrix2d& v)
+        {
+            return json::array({ json::array({ v(0, 0), v(0, 1) }),
+                                 json::array({ v(1, 0), v(1, 1) }) });
+        }
 
         json to_json(const auto& value)
         {
@@ -281,6 +353,32 @@ namespace app
             return true;
         }
 
+        bool from_json_leaf(const json& node, std::string_view name, pose::joint_side_t& out, std::string& err)
+        {
+            if (!node.is_string()) { err = std::format("'{}' must be a string", name); return false; }
+            const auto text = node.get<std::string>();
+            const auto parsed = pose::joint_side_from_name(text);
+            if (!parsed.has_value()) {
+                err = std::format("'{}' must be left, right or midline, not '{}'", name, text);
+                return false;
+            }
+            out = *parsed;
+            return true;
+        }
+
+        bool from_json_leaf(const json& node, std::string_view name, marker_kind_t& out, std::string& err)
+        {
+            if (!node.is_string()) { err = std::format("'{}' must be a string", name); return false; }
+            const auto text = node.get<std::string>();
+            const auto parsed = marker_kind_from_name(text);
+            if (!parsed.has_value()) {
+                err = std::format("'{}' must be apriltag or color_marker, not '{}'", name, text);
+                return false;
+            }
+            out = *parsed;
+            return true;
+        }
+
         bool from_json_leaf(const json& node, std::string_view name, Eigen::Vector3d& out, std::string& err)
         {
             if (!node.is_array() || node.size() != 3) {
@@ -289,6 +387,54 @@ namespace app
             }
             try {
                 out = Eigen::Vector3d{ node[0].get<double>(), node[1].get<double>(), node[2].get<double>() };
+            }
+            catch (const std::exception&) {
+                err = std::format("'{}' holds something other than numbers", name);
+                return false;
+            }
+            return true;
+        }
+
+        bool from_json_leaf(const json& node, std::string_view name, Eigen::Vector2d& out, std::string& err)
+        {
+            if (!node.is_array() || node.size() != 2) {
+                err = std::format("'{}' must be an array of two numbers", name);
+                return false;
+            }
+            try {
+                out = Eigen::Vector2d{ node[0].get<double>(), node[1].get<double>() };
+            }
+            catch (const std::exception&) {
+                err = std::format("'{}' holds something other than numbers", name);
+                return false;
+            }
+            return true;
+        }
+
+        bool from_json_leaf(const json& node, std::string_view name, Eigen::Vector2i& out, std::string& err)
+        {
+            if (!node.is_array() || node.size() != 2
+                || !node[0].is_number_integer() || !node[1].is_number_integer())
+            {
+                err = std::format("'{}' must be an array of two whole numbers", name);
+                return false;
+            }
+            out = Eigen::Vector2i{ node[0].get<int>(), node[1].get<int>() };
+            return true;
+        }
+
+        bool from_json_leaf(const json& node, std::string_view name, Eigen::Matrix2d& out, std::string& err)
+        {
+            if (!node.is_array() || node.size() != 2
+                || !node[0].is_array() || node[0].size() != 2
+                || !node[1].is_array() || node[1].size() != 2)
+            {
+                err = std::format("'{}' must be two rows of two numbers", name);
+                return false;
+            }
+            try {
+                out << node[0][0].get<double>(), node[0][1].get<double>(),
+                       node[1][0].get<double>(), node[1][1].get<double>();
             }
             catch (const std::exception&) {
                 err = std::format("'{}' holds something other than numbers", name);
@@ -391,16 +537,92 @@ namespace app
                 err = "'camera.roi' has no area";
                 return false;
             }
-            if (cfg.pose.detector.quad_decimate < 1.0f) {
-                err = "'pose.detector.quad_decimate' must be at least 1.0 (1.0 = full resolution)";
+            if (cfg.pose.detector.apriltag.quad_decimate < 1.0f) {
+                err = "'pose.detector.apriltag.quad_decimate' must be at least 1.0 (1.0 = full resolution)";
                 return false;
             }
-            if (cfg.pose.detector.num_iters < 1 || cfg.pose.detector.num_threads < 1) {
-                err = "'pose.detector.num_iters' and 'pose.detector.num_threads' must be at least 1";
+            if (cfg.pose.detector.apriltag.num_iters < 1 || cfg.pose.detector.apriltag.num_threads < 1) {
+                err = "'pose.detector.apriltag.num_iters' and '...num_threads' must be at least 1";
                 return false;
             }
             if (cfg.pose.frontal.hinge_axis_world.norm() <= 0.0) {
                 err = "'pose.frontal.hinge_axis' has zero length";
+                return false;
+            }
+
+            // Colour markers are read off the image plane, which is the sagittal estimator's input.
+            // A frontal run needs a marker whose distance can be solved, and a plain disc is not one.
+            if (cfg.pose.detector.kind == marker_kind_t::color_marker
+                && cfg.pose.view_plane != pose::view_plane_t::sagittal)
+            {
+                err = "'pose.detector.kind' color_marker requires 'pose.view_plane' sagittal";
+                return false;
+            }
+
+            // A colour model is a fixed pair of numbers on the a*b* plane, and a camera free to
+            // choose its own exposure or gain moves a marker off them: both scale luminance, and
+            // a* and b* follow its cube root. Left on auto that happens mid-run, with nothing to
+            // signal it but markers that stop being found, so the pairing is refused up front.
+            if (cfg.pose.detector.kind == marker_kind_t::color_marker
+                && (!cfg.camera.exposure_us.has_value() || !cfg.camera.gain.has_value()))
+            {
+                err = "'pose.detector.kind' color_marker requires 'camera.exposure_us' and "
+                      "'camera.gain' to name values (a colour model cannot follow auto)";
+                return false;
+            }
+
+            const color_marker_config_t& color_marker = cfg.pose.detector.color_marker;
+
+            // An absent calibration is not an error: it is what a profile says before anyone has
+            // measured this installation. The detector then finds nothing and says so. One that is
+            // present has to describe something, since every number in it is a ratio of one
+            // measured quantity to another and each has a range it cannot mean anything outside of.
+            if (color_marker.calibration.has_value())
+            {
+                const pose::color_marker_detector::options_t& detector = color_marker.calibration->detector;
+                const pose::color_model_t& model = detector.model;
+                const Eigen::Matrix2d& covariance = model.cov_ab;
+
+                // A fitted colour is an ellipse on the a*b* plane, so its covariance has to describe
+                // an area. A singular one inverts to nonsense and would admit every pixel or none.
+                if (covariance(0, 0) <= 0.0 || covariance(1, 1) <= 0.0 || covariance.determinant() <= 0.0) {
+                    err = "'pose.detector.color_marker.calibration.model.cov_ab' does not describe a "
+                          "spread (both diagonals and the determinant must be positive)";
+                    return false;
+                }
+                if (model.max_distance <= 0.0) {
+                    err = "'pose.detector.color_marker.calibration.model.max_distance' must be greater than zero";
+                    return false;
+                }
+                if (detector.min_fill <= 0.0 || detector.min_fill > 1.0) {
+                    err = "'pose.detector.color_marker.calibration.detector.min_fill' must be within (0, 1]";
+                    return false;
+                }
+                if (detector.min_score < 0.0 || detector.min_score > 1.0) {
+                    err = "'pose.detector.color_marker.calibration.detector.min_score' must be within [0, 1]";
+                    return false;
+                }
+                if (detector.max_aspect < 1.0) {
+                    err = "'pose.detector.color_marker.calibration.detector.max_aspect' must be at "
+                          "least 1.0 (1.0 = a circle)";
+                    return false;
+                }
+            }
+
+            if (color_marker.assigner.leg == pose::joint_side_t::midline) {
+                err = "'pose.detector.color_marker.assigner.leg' must name a leg (left or right)";
+                return false;
+            }
+            if (color_marker.assigner.marker_diameter_m <= 0.0) {
+                err = "'pose.detector.color_marker.assigner.marker_diameter_m' must be greater than zero";
+                return false;
+            }
+            if (color_marker.assigner.search_radius_px <= 0.0) {
+                err = "'pose.detector.color_marker.assigner.search_radius_px' must be greater than zero";
+                return false;
+            }
+            if (color_marker.assigner.bone_length_tolerance <= 0.0 || color_marker.assigner.bone_length_tolerance >= 1.0) {
+                err = "'pose.detector.color_marker.assigner.bone_length_tolerance' must be within (0, 1)";
                 return false;
             }
             return true;
@@ -459,9 +681,19 @@ namespace app
         if (!from_json(root, "", cfg, err)) { return false; }
         if (!validate(cfg, err)) { return false; }
 
+        // A colour block that parsed and passed validation is a colour that was fitted, which is
+        // what `valid` means to the detector. The file does not say it: a flag beside the numbers
+        // could claim otherwise about them.
+        if (auto& calibration = cfg.pose.detector.color_marker.calibration) {
+            calibration->detector.model.valid = true;
+        }
+
+        // A companion file is named relative to the profile that names it, so a profile folder can
+        // be moved or copied whole.
         if (!cfg.camera.intrinsics_file.empty()) {
             const std::filesystem::path p{ cfg.camera.intrinsics_file };
-            cfg.camera.intrinsics_file = (p.is_absolute() ? p : path.parent_path() / p).lexically_normal().string();
+            cfg.camera.intrinsics_file =
+                (p.is_absolute() ? p : path.parent_path() / p).lexically_normal().string();
         }
 
         out = std::move(cfg);

@@ -1,4 +1,4 @@
-#include "cli_options.hh"
+﻿#include "cli_options.hh"
 
 #include <format>
 #include <string>
@@ -28,7 +28,8 @@ namespace app
     void add_cli_options(CLI::App& app, cli_options_t& o)
     {
         auto* config = app.add_option("-c,--config", o.config_name,
-            "Installation config: a profile name (configs/<name>.json) or a file path")
+            "Installation config: a profile name (configs/<name>.json) or a file path.\n"
+            "Names the marker kind; the options below always run the AprilTag one")
             ->group(kConfigGroup);
 
         // Callbacks fire only when the option is present, which is what lets an omitted one stay
@@ -127,6 +128,10 @@ namespace app
         const bool named = !o.config_name.empty();
 
         // The direct options describe a setup of their own, so a default profile does not join in.
+        //
+        // They also leave `pose.detector` at its default, which is the AprilTag path. 
+        // A colour marker takes a calibration measured on site, 
+        // and naming its file is what a profile or the debugger's open dialog does.
         if (!named && o.has_direct_options())
         {
             app_config_t cfg;

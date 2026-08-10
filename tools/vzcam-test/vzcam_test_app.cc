@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <mutex>
 #include <numeric>
+#include <cmath>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -881,6 +882,15 @@ namespace
                 "Discards the collected samples. The installed model stays in force until\n"
                 "the next Fit, so detection keeps running while you resample.");
 
+            // 여기서 적합한 모델은 이 창을 벗어나지 않는다. 설치용 색 캘리브레이션은
+            // 본 앱의 디버거가 실제로 운용할 카메라 설정 그대로 측정해서 파일로 남긴다.
+            ImGui::TextDisabled("Volatile: fitted here to try the algorithm, not to keep");
+            ImGui::SetItemTooltip(
+                "This harness exists to see the detector run on this camera, so nothing it\n"
+                "fits is written anywhere. An installation's colour is measured in the\n"
+                "debugger, which opens the camera with the profile that will run it and so\n"
+                "cannot record conditions that differ from production.");
+
             // 분류기에서 사람이 맞춰야 하는 설정값은 이것 하나뿐이다. 모델 중심에서 몇
             // 표준편차만큼 떨어진 픽셀까지 마커로 인정할 것인가를 정한다.
             // (HSV 방식이라면 H/S/V 최소·최대 여섯 개를 맞춰야 하는 자리다.)
@@ -896,7 +906,7 @@ namespace
                 "sampled colours are spread, so it follows the shape of the sample cloud\n"
                 "instead of a fixed box.\n"
                 "\n"
-                "Roughly: 2.0 keeps ~86% of the sampled pixels, 3.0 keeps ~99%.\n"
+                "Roughly: 2.0 keeps ~86%% of the sampled pixels, 3.0 keeps ~99%%.\n"
                 "\n"
                 "Higher: the marker's rim is included, but background starts leaking in.\n"
                 "Lower: only the core survives, blobs shrink and may fall under min area.");
@@ -1000,6 +1010,21 @@ namespace
                 "Higher: survives motion blur, admits elongated background objects.\n"
                 "Lower: strictly round blobs only.");
 
+            // 크기와 모양이 우연히 맞은 배경 물체를 색의 확신도로 한 번 더 거른다.
+            // 덩어리 안 픽셀들의 소속 점수 평균이라, 모델 타원 가장자리에 걸친 것은 낮게 나온다.
+            changed |= ImGui::SliderScalar("min score", ImGuiDataType_Double, &opt.min_score,
+                                           &kZero, &kOne, "%.2f");
+            ImGui::SetItemTooltip(
+                "Mean membership score over the blob's pixels, 0 to 1. A blob sitting at\n"
+                "the centre of the colour model scores near 1; one clipping the edge of the\n"
+                "model scores near 0.\n"
+                "\n"
+                "Size and shape can match by accident. This is the check on the colour\n"
+                "itself, which is the one thing a background object rarely gets right.\n"
+                "\n"
+                "Higher: only confident blobs, but a marker in shadow drops out.\n"
+                "Lower: keeps marginal blobs, background objects start appearing.");
+
             // 열림 = 침식 후 팽창. 마스크 "밖"의 작은 점 노이즈를 지운다. 0 이면 건너뛴다.
             //   before:  ####  .  .        after:  ####
             //           ######    .               ######
@@ -1055,8 +1080,8 @@ namespace
 
             // 걸러진 후보의 사유별 개수. 마커가 안 잡힐 때 어느 노브를 풀지 바로 알려준다.
             const pose::marker_reject_stats_t& r = _color_detector.reject_stats();
-            ImGui::Text("rejected   %d  (small %d, large %d, unfilled %d, elongated %d)",
-                        r.total(), r.too_small, r.too_large, r.not_filled, r.too_long);
+            ImGui::Text("rejected   %d  (small %d, large %d, unfilled %d, elongated %d, faint %d)",
+                        r.total(), r.too_small, r.too_large, r.not_filled, r.too_long, r.low_score);
             ImGui::SetItemTooltip(
                 "Candidate blobs the filters dropped, and which filter dropped them.\n"
                 "\n"
@@ -1065,6 +1090,7 @@ namespace
                 "  large     -> lower max area, or a background region matches the colour\n"
                 "  unfilled  -> raise the close kernel, or lower min fill\n"
                 "  elongated -> shorten the exposure, or raise max aspect\n"
+                "  faint     -> lower min score, or resample the model under this light\n"
                 "\n"
                 "If everything reads 0 and no markers appear, the colour model itself is\n"
                 "not matching: check the Score backdrop and raise Max distance.");
@@ -1108,8 +1134,8 @@ namespace
                     // dia     면적을 원으로 환산한 지름. 이 거리에서 나와야 할 값보다 한참
                     //         작으면 색 모델이 마커 테두리를 잘라내고 있는 것이다.
                     // fill    0.785 근처가 정상. 낮으면 구멍이 있거나 윤곽이 찢어진 것.
-                    // score   블롭 평균 소속도(0~1). 낮으면 임계에 간신히 걸쳐 있어 곧 놓칠 상태다
-                    //         현재 판정에는 쓰이지 않는 표시 전용 값이다.
+                    // score   블롭 평균 소속도(0~1). min score 게이트가 보는 값이라, 여기 낮게
+                    //         찍힌 것들이 그 값을 올릴 때 먼저 사라진다.
                     ImGui::TableNextColumn(); ImGui::Text("%.2f", m.center.x);
                     ImGui::TableNextColumn(); ImGui::Text("%.2f", m.center.y);
                     ImGui::TableNextColumn(); ImGui::Text("%.1f", m.diameter_px);

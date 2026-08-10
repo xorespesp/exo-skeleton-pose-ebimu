@@ -137,12 +137,6 @@ namespace pose
         {
             const auto& rest = _ctx->rest_pose->joint_position;
             const auto position_of = [this](joint_id_t j) { return _ctx->last_frame_joint_states[index_of(j)].position; };
-            const auto child_of = [](joint_id_t parent) -> std::optional<joint_id_t> {
-                for (const auto& c : get_joint_defs()) {
-                    if (!is_root_joint(c.joint_id) && c.parent == parent) { return c.joint_id; }
-                }
-                return std::nullopt;
-            };
 
             const joint_id_t root = get_root_joint();
 
@@ -158,8 +152,8 @@ namespace pose
             {
                 if (is_root_joint(knee_def.joint_id) || knee_def.parent != root) { continue; } // knee = child of root
                 const joint_id_t knee = knee_def.joint_id;
-                const std::optional<joint_id_t> ankle = child_of(knee);
-                const std::optional<joint_id_t> foot = ankle.has_value() ? child_of(ankle.value()) : std::nullopt;
+                const std::optional<joint_id_t> ankle = get_child_joint(knee);
+                const std::optional<joint_id_t> foot = ankle.has_value() ? get_child_joint(ankle.value()) : std::nullopt;
                 if (!ankle.has_value() || !foot.has_value()) { continue; }
 
                 const auto hip_pos = position_of(root), knee_pos = position_of(knee);

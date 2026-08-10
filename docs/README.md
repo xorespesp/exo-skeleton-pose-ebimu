@@ -1,6 +1,12 @@
 # Markers Mapping
 
-Each lower-limb joint carries one AprilTag marker.
+Two marker technologies are supported, and `pose.detector.kind` in the installation config picks
+which one a run uses. This page covers the AprilTag one; the colour-marker one is a sagittal-only
+path documented in [color-marker-detection.md](color-marker-detection.md), with its sheet generated
+by `tools/marker-sheet/` and the alternatives weighed along the way recorded in
+[color-marker-decisions.md](color-marker-decisions.md).
+
+Under AprilTag, each lower-limb joint carries one marker.
 
 - Family: `tagStandard41h12`
 - Tag ids: `0 .. 6`
@@ -10,7 +16,7 @@ Each lower-limb joint carries one AprilTag marker.
 > Generated from: https://shiqiliu-67.github.io/apriltag-generator/
 
 Print the sheet, cut the tags out, and stick one on each joint per the table below. 
-The black-square edge length is what the estimator needs (default 0.05 m): `marker.tag_size_m` in
+The black-square edge length is what the estimator needs (default 0.05 m): `pose.tag_size_m` in
 the installation config, or `--tag-size` when running without one.
 Measure your printed tags and set it to match.
 

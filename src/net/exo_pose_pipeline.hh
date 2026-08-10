@@ -9,9 +9,9 @@
 #include "hw/source_backend.hh"
 #include "io/frame_recorder.hh"
 #include "pose/frontal_pose_estimator.hh"
+#include "pose/marker_tracker.hh"
 #include "pose/sagittal_pose_estimator.hh"
 #include "pose/pose_estimator_base.hh"
-#include "pose/tag_detector.hh"
 #include "pose/view_plane.hh"
 
 #include <opencv2/core.hpp>
@@ -22,18 +22,20 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
 namespace net
 {
-    // forward declaration of the worker-thread tag detection observer
+    // forward declaration of the worker-thread marker detection observer
     class pose_frame_observer;
 
     // The pose pipeline: owns the source, the detection worker, and the joint estimator, and
     // steps them independently of any network transport. A server or GUI holds one and drives
     // it via poll(). Not thread-safe: call from a single thread (the loop/GUI thread). Only the
-    // provider's worker crosses threads, and it latches into the observer under a lock.
+    // provider's worker crosses threads: it publishes measurements into the tracker and the drawn
+    // frame into the observer, each under that object's own lock.
     class exo_pose_pipeline final
     {
     public:
@@ -86,17 +88,20 @@ namespace net
         // The sagittal estimator's readouts (tracked leg, joint angles); null in a frontal run.
         const pose::sagittal_pose_estimator* sagittal_estimator() const;
 
-        // --- detection settings, live -------------------------------------------------
-        // Both take effect on the next frame, when the detection worker rebuilds. 
-        // Opening a source installs the config's values over whatever was set here.
-
-        void set_detector_options(const pose::tag_detector::options_t& opt);
-        pose::tag_detector::options_t detector_options() const;
-
-        // Printed black-square edge length [m]. Reaches the detector's pose solve and the metric
-        // scale carried on each image-plane measurement.
-        void set_tag_size_m(double v);
-        double tag_size_m() const;
+        // --- marker tracking ----------------------------------------------------------
+        // The tracker owns everything that differs between marker technologies. It is null until
+        // the first source is opened (the config it is built from arrives then) and outlives a
+        // close, so the last frame's readouts stay available.
+        //
+        // A caller wanting one technology's own controls asks for that type:
+        //
+        //   if (auto* t = dynamic_cast<pose::apriltag_tracker*>(pipe.tracker())) { ... }
+        //
+        // which reads null both when nothing is open and when another technology is running. The
+        // running tracker's type is the one record of which is which, so adding a technology leaves
+        // this class alone.
+        pose::marker_tracker_base* tracker() { return _tracker.get(); }
+        const pose::marker_tracker_base* tracker() const { return _tracker.get(); }
 
         // --- stepping -----------------------------------------------------------------
         // Advance one step: pull the newest latched detections and recompute joint states.
@@ -108,13 +113,14 @@ namespace net
         };
         poll_result_t poll();
 
-        // Latest annotated frame for display; false if nothing new since `last_seq`.
-        bool try_get_annotated_frame(
-            cv::Mat& out_img,
-            std::vector<pose::tag_detection_t>& out_dets,
-            hw::timestamp_t& out_ts,
-            uint64_t& last_seq
-        );
+        // Latest annotated frame for display, with the source frame it was drawn over; false if
+        // nothing new since `last_seq`. The detections drawn on it are the tracker's to hand out,
+        // since only it knows their shape.
+        //
+        // The two describe the same capture, so a point picked off the drawn image names the same
+        // pixel in the source. Sampling a colour reads that source: the overlay would otherwise
+        // contribute its own pixels to what a marker is measured to be.
+        bool try_get_annotated_frame(cv::Mat& out_img, cv::Mat& out_source, uint64_t& last_seq);
 
         // --- source metadata ----------------------------------------------------------
         hw::source_backend_t source_backend() const;
@@ -126,7 +132,13 @@ namespace net
         // Position of the newest frame in the open source's stream; restarts on every open.
         uint32_t current_frame_seq() const;
 
+        // Capture time of the frame the estimator last stepped on, which is the moment the joint
+        // state describes. Meaningful only once `has_pose()`.
         hw::timestamp_t last_timestamp() const { return _last_timestamp; }
+
+        // True once the estimator has stepped on a frame. Frames arriving is not the same thing:
+        // a tracker can refuse every one of them, as the color one does for a gray source.
+        bool has_pose() const { return _has_pose; }
 
         // --- recording playback (no-op without an open recording source) ---------------
         bool is_source_paused() const;
@@ -135,14 +147,14 @@ namespace net
         void seek_to_end();
 
     private:
-        // Log what changed since the last frame (tags appearing/disappearing, joints gaining or
+        // Log what changed since the last frame (markers appearing/disappearing, joints gaining or
         // losing tracking) instead of restating the same state every frame, plus a throughput
         // line on a timer. Cleared whenever the source changes.
         void _log_frame_diff();
         void _log_periodic_stats();
         void _reset_frame_log_state();
 
-        // Build the estimator for `view_plane` when it differs from the active one, and point _active at it. 
+        // Build the estimator for `view_plane` when it differs from the active one, and point _active at it.
         // A no-op when unchanged, leaving the existing estimator in place.
         void _select_estimator(pose::view_plane_t view_plane);
 
@@ -151,8 +163,10 @@ namespace net
 
         std::shared_ptr<hw::sensor_frame_provider> _provider;
         std::shared_ptr<pose_frame_observer> _observer;
-        pose::tag_detector::options_t _detector_options{}; // applied to each observer
-        double _tag_size_m{ 0.05 };
+
+        // Shared with the observer, which calls into it from the provider's worker thread.
+        std::shared_ptr<pose::marker_tracker_base> _tracker;
+
         std::shared_ptr<io::frame_recorder> _recorder; // non-null only while recording
 
         // At most one estimator is engaged at a time and _active points at it, so the readers of
@@ -161,9 +175,8 @@ namespace net
         std::optional<pose::frontal_pose_estimator> _frontal;
         std::optional<pose::sagittal_pose_estimator> _sagittal;
         pose::pose_estimator_base* _active{ nullptr };
-        std::vector<pose::tag_detection_t> _detections;
-        uint64_t _last_seq{ 0 };
-        hw::timestamp_t _last_timestamp{}; // capture time of the latched frame
+        hw::timestamp_t _last_timestamp{}; // capture time of the frame the estimator last stepped on
+        bool _has_pose{ false };           // that frame exists; cleared when a new source is opened
         bool _is_recording{ false }; // the open source is a recording file (vs a live camera)
         bool _status_changed{ false }; // a source/rest command changed the reported status; consumed by poll()
 
@@ -172,11 +185,11 @@ namespace net
         std::optional<int32_t> _gain;
 
         // --- frame-log state (transitions + throughput; see _log_frame_diff) --------------
-        uint64_t _seen_tag_mask{ 0 };  // bit t = tag id t was detected in the previous frame
+        bool _tracker_was_tracking{ false }; // the tracker had identified its markers last frame
         std::array<bool, pose::kNumJoints> _joint_tracked{}; // per joint: had a local rotation last frame
         std::chrono::steady_clock::time_point _stats_since{}; // start of the current summary window
         uint32_t _stats_frames{ 0 };   // frames polled in the window
-        uint32_t _stats_detections{ 0 }; // tags detected across those frames
+        uint32_t _stats_detections{ 0 }; // markers detected across those frames
     };
 
 } // namespace net

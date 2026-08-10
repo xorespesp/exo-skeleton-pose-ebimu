@@ -74,6 +74,8 @@ target_sources(${TARGET_NAME} PRIVATE
     "src/pose/color_marker_detector.cc"
     "src/pose/joints_def.hh"
     "src/pose/joint_measurement.hh"
+    "src/pose/marker_tracker.hh"
+    "src/pose/marker_tracker.cc"
     "src/pose/view_plane.hh"
     "src/pose/pose_estimator_base.hh"
     "src/pose/frontal_pose_estimator.hh"

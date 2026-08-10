@@ -7,7 +7,7 @@
 #include "app_config.hh"
 
 #include "io/recording_writer.hh"
-#include "pose/tag_detector.hh"
+#include "pose/marker_tracker.hh"
 #include "pose/frontal_pose_estimator.hh"
 #include "pose/sagittal_pose_estimator.hh"
 #include "pose/hinge_angle.hh"
@@ -83,6 +83,23 @@ namespace gui
         // Estimator tuning, one function per viewing plane.
         void _render_frontal_estimator_control(pose::frontal_pose_estimator::options_t& opt);
         void _render_sagittal_estimator_control(pose::sagittal_pose_estimator::options_t& opt);
+
+        // Blob filters, joint assignment, and what the last frame found, plus the sampling that
+        // measures this installation's colour.
+        void _render_color_marker_control(pose::color_marker_tracker& tracker);
+
+        // Sampling and fitting the colour itself, which is what the rest of that panel is tuned
+        // against. Nothing here saves: the fit lands on the running tracker and reaches the file
+        // through the profile, like every other control on this panel.
+        void _render_color_model_section(pose::color_marker_tracker& tracker);
+
+        // Feeds the pixels under the cursor to the colour sampler, over the camera view drawn
+        // between `img_min` and `img_max`.
+        void _handle_color_sample_click(const ImVec2& img_min, const ImVec2& img_max);
+
+        // Fits the collected samples and installs the result on the running tracker, so the next
+        // frame is classified by what was just measured.
+        void _do_fit_color_model(pose::color_marker_tracker& tracker);
         void _render_recording_status(); // live counters while a recording is being written
         void _render_plot_panel();
         void _render_raw_skeleton_plot();  // raw_skeleton: measured 3D positions + bones (+ FK overlay)
@@ -150,6 +167,13 @@ namespace gui
             int open_dlg_gain{ 0 };
             std::string open_dlg_recording;
             std::string open_dlg_intrinsics; // calibration file for a camera that reports none
+            app::marker_kind_t open_dlg_marker_kind{ app::marker_kind_t::apriltag };
+
+            // colour sampling (the panel that measures this installation's colour)
+            bool color_sampling{ false }; // clicking the camera view feeds the sampler
+            int color_sample_radius{ 6 }; // pixels collected around each click [px]
+            double color_max_distance{ 3.0 }; // how far into the fitted ellipse still counts
+            int color_backdrop{ 0 };      // 0 camera, 1 mask, 2 membership score
 
             // record dialog
             bool record_dlg_show{ false };
@@ -172,10 +196,16 @@ namespace gui
         ImGui::FileBrowser _intrinsics_dialog;
         log_console _log_console;
 
-        // last frame pulled from the pipeline: annotated image, its tag detections, and its sequence number
+        // last annotated frame pulled from the pipeline, the same capture undrawn, and its
+        // sequence number. The undrawn one is what a colour sample is taken from.
         cv::Mat _last_frame;
-        std::vector<pose::tag_detection_t> _last_tag_detections;
+        cv::Mat _last_source_frame;
         uint64_t _last_seq{ 0 };
+
+        // Samples this installation's colour, accumulated across clicks and frames. What it holds
+        // is a measurement in progress, discarded whenever the operator says so and no part of
+        // detecting anything, so it belongs to the panel that collects it.
+        pose::color_sampler _color_sampler;
 
         pose_trace_recorder _trace; // rolling per-frame diagnostic trace (dumped to JSON on demand)
 

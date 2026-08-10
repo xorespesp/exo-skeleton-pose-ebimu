@@ -3,6 +3,7 @@
 #include "net/exo_pose_server.hh"
 #include "net/exo_pose_pipeline.hh"
 
+#include <opencv2/imgproc.hpp>
 #include <spdlog/spdlog.h>
 
 #include <imgui.h>
@@ -392,6 +393,7 @@ namespace gui
                 const ImVec2 cur = ImGui::GetCursorPos();
                 ImGui::SetCursorPos(ImVec2{ cur.x + (avail.x - sz.x) * 0.5f, cur.y + (avail.y - sz.y) * 0.5f });
                 ImGui::Image(_frame_texture.value().id(), sz);
+                this->_handle_color_sample_click(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
             }
         }
         else
@@ -462,6 +464,10 @@ namespace gui
         // The dialog's choices become the session's, so a re-open and a saved config both carry them.
         _config.camera.source = address;
         _config.pose.view_plane = view_plane;
+        _config.pose.detector.kind = _ui.open_dlg_marker_kind;
+
+        // Samples taken against the previous source describe a camera that is no longer open.
+        _color_sampler.clear();
 
         // A recording already carries the settings it was shot with; only a live camera takes them.
         if (address.is_recording()) {
@@ -470,6 +476,15 @@ namespace gui
         }
 
         _server->pipeline().open_source(_config);
+
+        // The slider that will decide the next fit starts on the value already in force, so what
+        // the panel shows and what the running detector accepts do not disagree until asked to.
+        if (const auto* color_tracker = dynamic_cast<const pose::color_marker_tracker*>(
+                _server->pipeline().tracker()))
+        {
+            _ui.color_max_distance = color_tracker->detector_options().model.max_distance;
+        }
+
         _last_seq = 0;
         // restart both subplot-grid timelines for the new source
         _pos_plot_bufs.clear();
@@ -503,13 +518,32 @@ namespace gui
     void debugger_app::_do_save_config(const std::filesystem::path& path)
     {
         // A save gathers the config from two places. `server` stands as loaded, and the open
-        // dialog already wrote `camera` and the viewing plane into `_config`. The tag size and the
-        // tuning below did not go there: the control panel edits them on the pipeline, so the live
-        // values are read back.
+        // dialog already wrote `camera` and the viewing plane into `_config`. The tuning below did
+        // not go there: the control panel edits it on the pipeline, so the live values are read back.
         net::exo_pose_pipeline& pipe = _server->pipeline();
 
-        _config.pose.detector = pipe.detector_options();
-        _config.pose.tag_size_m = pipe.tag_size_m();
+        // Only the running tracker has live values to read back; the other kind's block keeps
+        // whatever the profile was loaded with.
+        if (auto* tag_tracker = dynamic_cast<pose::apriltag_tracker*>(pipe.tracker())) {
+            _config.pose.detector.apriltag = tag_tracker->options();
+            _config.pose.tag_size_m = tag_tracker->tag_size_m();
+        }
+        if (auto* color_tracker = dynamic_cast<pose::color_marker_tracker*>(pipe.tracker()))
+        {
+            _config.pose.detector.color_marker.assigner = color_tracker->assigner_options();
+
+            // The colour and the blob filters are read back the same way, and the frame size they
+            // were measured on comes from the source that is delivering it. A colour that was never
+            // fitted leaves the block absent, which is what an unmeasured installation writes.
+            if (const pose::color_marker_detector::options_t detector = color_tracker->detector_options();
+                detector.model.valid)
+            {
+                _config.pose.detector.color_marker.calibration = app::color_marker_calibration_t{
+                    .detector = detector,
+                    .frame_resolution = pipe.source_resolution(),
+                };
+            }
+        }
         if (const auto* o = pipe.frontal_options())  { _config.pose.frontal = *o; }
         if (const auto* o = pipe.sagittal_options()) { _config.pose.sagittal = *o; }
 
@@ -535,21 +569,42 @@ namespace gui
 
     void debugger_app::_update_pose_frame()
     {
-        // Pull the server's latest annotated frame + detections. The server owns and updates the
-        // estimator; nothing to do until a new frame arrives.
-        hw::timestamp_t ts{};
-        if (!_server->pipeline().try_get_annotated_frame(_last_frame, _last_tag_detections, ts, _last_seq)) { return; }
+        // Pull the server's latest annotated frame. The server owns and updates the estimator;
+        // nothing to do until a new frame arrives.
+        net::exo_pose_pipeline& pipe = _server->pipeline();
 
-        _frame_texture.value().update(_last_frame);
+        // The classifier's per-pixel images are copied on the frame thread, so the tracker is told
+        // each step whether anything is looking at them.
+        auto* color_tracker = dynamic_cast<pose::color_marker_tracker*>(pipe.tracker());
+        if (color_tracker != nullptr) { color_tracker->set_publish_debug_images(_ui.color_backdrop != 0); }
+
+        if (!pipe.try_get_annotated_frame(_last_frame, _last_source_frame, _last_seq)) { return; }
+
+        // What the camera view shows. The classifier's own two images answer "is this colour being
+        // accepted, and how surely", which is what sampling is judged against; the drawn frame
+        // answers "is the marker being found", which is what everything else wants.
+        cv::Mat view = _last_frame;
+        if (color_tracker != nullptr && _ui.color_backdrop != 0)
+        {
+            const cv::Mat decisions = (_ui.color_backdrop == 1) ? color_tracker->mask()
+                                                                : color_tracker->score_image();
+            if (!decisions.empty()) { cv::cvtColor(decisions, view, cv::COLOR_GRAY2BGR); }
+        }
+        _frame_texture.value().update(view);
+
+        // Everything below places joint state on a timeline, so it is timed by the frame the
+        // estimator stepped on rather than the one just drawn. A run whose markers are never
+        // detected keeps showing that image, which is what an operator needs to see to fix it,
+        // while there is still nothing to plot.
+        const pose::pose_estimator_base* est = pipe.estimator();
+        if (!est || !pipe.has_pose()) { return; }
 
         // The plot buffers rebase against their first sample, so an absolute value is fine here.
+        const hw::timestamp_t ts = pipe.last_timestamp();
         const double t_now = std::chrono::duration<double>{ ts.time_since_epoch() }.count();
-        net::exo_pose_pipeline& pipe = _server->pipeline();
-        const pose::pose_estimator_base* est = pipe.estimator();
-        if (!est) { return; } // a frame arrived, so a source is open and so is its estimator
 
         // Capture the full per-frame trace into the rolling ring so a glitch can be dumped with its
-        // lead-up right after it is seen on screen. Uses the same detections behind the plots below.
+        // lead-up right after it is seen on screen.
         // The gates are estimator specific, so they are read off whichever options exist.
         if (_ui.trace_enabled)
         {
@@ -563,7 +618,13 @@ namespace gui
                 gates.max_hold_ms = o->max_hold.count();
                 gates.reset_gap_ms = o->reset_gap.count();
             }
-            _trace.capture(ts, _last_tag_detections, *est, gates);
+            // The trace records tag geometry, which only the tag tracker has; a colour run leaves
+            // that section empty and keeps the joint state the rest of the trace is about.
+            std::vector<pose::tag_detection_t> tags;
+            if (auto* tag_tracker = dynamic_cast<pose::apriltag_tracker*>(pipe.tracker())) {
+                tags = tag_tracker->last_detections();
+            }
+            _trace.capture(ts, tags, *est, gates);
         }
 
         // Advance both subplot-grid timelines.
@@ -615,7 +676,14 @@ namespace gui
         if (!ImGui::BeginMainMenuBar()) { return; }
         if (ImGui::BeginMenu("File"))
         {
-            if (ImGui::MenuItem("Open...")) { _ui.open_dlg_show = true; }
+            if (ImGui::MenuItem("Open..."))
+            {
+                // Opened on what the profile already says, so a run started from a config file is
+                // re-opened without retyping it, and a blank dialog cannot silently drop a path.
+                _ui.open_dlg_marker_kind = _config.pose.detector.kind;
+                _ui.open_dlg_view_plane = _config.pose.view_plane;
+                _ui.open_dlg_show = true;
+            }
             if (ImGui::MenuItem("Close", nullptr, false, _server->pipeline().is_source_open())) { this->_do_close_source(); }
             ImGui::Separator();
             if (ImGui::MenuItem("Exit")) { SDL_Event e{}; e.type = SDL_EVENT_QUIT; ::SDL_PushEvent(&e); }
@@ -670,6 +738,7 @@ namespace gui
                 {
                     const float scale = ImGui::GetContentRegionAvail().x / _frame_texture.value().width();
                     ImGui::Image(_frame_texture.value().id(), ImVec2{ _frame_texture.value().width() * scale, _frame_texture.value().height() * scale });
+                    this->_handle_color_sample_click(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
                 }
                 else
                 {
@@ -764,14 +833,17 @@ namespace gui
         if (ImGui::CollapsingHeader("Control", ImGuiTreeNodeFlags_DefaultOpen))
         {
             // ----- Tag detection tuning (live; the worker rebuilds the detector on change) -----
-            ImGui::SeparatorText("Tag Detection");
+            // Shown only while the tag tracker is the one running, since these knobs describe it.
+            if (auto* tag_tracker = dynamic_cast<pose::apriltag_tracker*>(pipe.tracker()))
             {
-                double tag_size_m = pipe.tag_size_m();
+                ImGui::SeparatorText("Tag Detection");
+
+                double tag_size_m = tag_tracker->tag_size_m();
                 const double tag_min = 0.005, tag_max = 1.0;
                 if (ImGui::DragScalar("Tag size [m]", ImGuiDataType_Double, &tag_size_m,
                         0.001f, &tag_min, &tag_max, "%.3f", ImGuiSliderFlags_AlwaysClamp))
                 {
-                    pipe.set_tag_size_m(tag_size_m);
+                    tag_tracker->set_tag_size_m(tag_size_m);
                 }
                 ImGui::SetItemTooltip("Real black-square edge length of the printed tag [m].\n"
                                       "Fixes the metric scale of every estimated 3D position; must match the tag.\n"
@@ -779,7 +851,7 @@ namespace gui
                                       "Lower: they scale down.");
 
                 // Edit a copy of the current options, push it back only when something changed.
-                pose::tag_detector::options_t t = pipe.detector_options();
+                pose::tag_detector::options_t opt = tag_tracker->options();
                 bool changed = false;
 
                 // A sagittal run works off 2D tag centers, so the detector never solves a tag pose
@@ -787,9 +859,9 @@ namespace gui
                 const bool solves_tag_pose = (pipe.view_plane() == pose::view_plane_t::frontal);
                 ImGui::BeginDisabled(!solves_tag_pose);
                 const char* const methods[] = { "Orthogonal iteration", "Homography (closed form)" };
-                int mi = (t.pose_method == pose::tag_detector::pose_method_t::homography) ? 1 : 0;
+                int mi = (opt.pose_method == pose::tag_detector::pose_method_t::homography) ? 1 : 0;
                 if (ImGui::Combo("Pose method", &mi, methods, IM_ARRAYSIZE(methods))) {
-                    t.pose_method = (mi == 1) ? pose::tag_detector::pose_method_t::homography
+                    opt.pose_method = (mi == 1) ? pose::tag_detector::pose_method_t::homography
                                               : pose::tag_detector::pose_method_t::orthogonal_iteration;
                     changed = true;
                 }
@@ -798,41 +870,47 @@ namespace gui
                                       "Homography: closed-form; cheaper, translation/depth comparable.");
                 ImGui::EndDisabled();
 
-                changed |= ImGui::SliderFloat("quad_decimate", &t.quad_decimate, 1.0f, 4.0f, "%.1f", ImGuiSliderFlags_AlwaysClamp);
+                changed |= ImGui::SliderFloat("quad_decimate", &opt.quad_decimate, 1.0f, 4.0f, "%.1f", ImGuiSliderFlags_AlwaysClamp);
                 ImGui::SetItemTooltip("Image downsample factor before quad detection (1.0 = full res).\n"
                                       "The biggest detection CPU knob.\n"
                                       "Higher: much faster, but coarser corners (worse pose/depth) and\n"
                                       "        misses small/distant tags.\n"
                                       "Lower: slower, best corner accuracy.");
 
-                changed |= ImGui::SliderFloat("quad_sigma", &t.quad_sigma, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+                changed |= ImGui::SliderFloat("quad_sigma", &opt.quad_sigma, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
                 ImGui::SetItemTooltip("Gaussian blur applied before detection (0 = none).\n"
                                       "Higher: smooths sensor noise (helps low-res/noisy), but erases small tags.\n"
                                       "Lower: sharper corners, no denoising.");
 
-                changed |= ImGui::Checkbox("refine_edges", &t.refine_edges);
+                changed |= ImGui::Checkbox("refine_edges", &opt.refine_edges);
                 ImGui::SetItemTooltip("Snap quad edges to image gradients for sub-pixel corners.\n"
                                       "On: better pose/depth accuracy, small extra cost.\n"
                                       "Off: faster, coarser corners (fine when decimating hard).");
 
                 ImGui::BeginDisabled(!solves_tag_pose
-                    || t.pose_method != pose::tag_detector::pose_method_t::orthogonal_iteration);
-                changed |= ImGui::SliderInt("num_iters", &t.num_iters, 1, 100, "%d");
+                    || opt.pose_method != pose::tag_detector::pose_method_t::orthogonal_iteration);
+                changed |= ImGui::SliderInt("num_iters", &opt.num_iters, 1, 100, "%d");
                 ImGui::SetItemTooltip("Orthogonal-iteration steps for pose refinement (OI only).\n"
                                       "Higher: more accurate rotation, diminishing returns past ~50.\n"
                                       "Lower: faster, coarser pose.");
                 ImGui::EndDisabled();
 
-                changed |= ImGui::SliderInt("num_threads", &t.num_threads, 1, 16, "%d");
+                changed |= ImGui::SliderInt("num_threads", &opt.num_threads, 1, 16, "%d");
                 ImGui::SetItemTooltip("Detector worker threads (no effect on accuracy).\n"
                                       "Higher: faster detection on multi-core CPUs.\n"
                                       "Lower: fewer cores used.");
 
                 if (changed) {
-                    pipe.set_detector_options(t); // worker rebuilds the detector next frame
+                    tag_tracker->set_options(opt); // worker rebuilds the detector next frame
                 }
 
                 ImGui::TextDisabled("Applies live to an open source; rebuilds the detector.");
+            }
+
+            // ----- Color marker tuning, shown while that tracker is the one running -----
+            if (auto* color_tracker = dynamic_cast<pose::color_marker_tracker*>(pipe.tracker()))
+            {
+                this->_render_color_marker_control(*color_tracker);
             }
 
             // ----- Rest Pose calibration options -----
@@ -946,6 +1024,276 @@ namespace gui
                                   "Higher: keeps smoothing across longer pauses (may lurch on return).\n"
                                   "Lower: reseeds sooner after a pause (snappier, less overshoot).");
         }
+    }
+
+    // Clicking, or dragging across, a marker feeds the pixels under the cursor to the sampler. The
+    // view may be scaled to fit, so screen coordinates are unscaled back to image pixels. Sampled
+    // from the undrawn frame: the overlay sits on the markers and would contribute its own pixels.
+    void debugger_app::_handle_color_sample_click(const ImVec2& img_min, const ImVec2& img_max)
+    {
+        if (!_ui.color_sampling || _last_source_frame.empty()) { return; }
+        if (!ImGui::IsItemHovered() || !ImGui::IsMouseDown(ImGuiMouseButton_Left)) { return; }
+
+        const float span_x = img_max.x - img_min.x;
+        const float span_y = img_max.y - img_min.y;
+        if (!(span_x > 0.0f) || !(span_y > 0.0f)) { return; }
+
+        const ImVec2 m = ImGui::GetIO().MousePos;
+        const int px = static_cast<int>((m.x - img_min.x) / span_x * static_cast<float>(_last_source_frame.cols));
+        const int py = static_cast<int>((m.y - img_min.y) / span_y * static_cast<float>(_last_source_frame.rows));
+        if (px < 0 || py < 0 || px >= _last_source_frame.cols || py >= _last_source_frame.rows) { return; }
+
+        _color_sampler.add(_last_source_frame, cv::Point{ px, py }, _ui.color_sample_radius);
+
+        // Mark where the sample was taken, so a drag leaves a visible trail.
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const float r = static_cast<float>(_ui.color_sample_radius) * span_x
+                      / static_cast<float>(_last_source_frame.cols);
+        dl->AddCircle(m, std::max(3.0f, r), IM_COL32(255, 255, 0, 220), 0, 2.0f);
+    }
+
+    void debugger_app::_do_fit_color_model(pose::color_marker_tracker& tracker)
+    {
+        const std::optional<pose::color_model_t> model = _color_sampler.fit(_ui.color_max_distance);
+        if (!model.has_value()) {
+            spdlog::warn("color: {} sample(s) is not enough to estimate a 2D covariance ({} needed)",
+                _color_sampler.count(), pose::color_sampler::kMinSamples);
+            return;
+        }
+
+        // Installed on the running tracker, so the very next frame is classified by what was just
+        // measured and the operator judges the fit on the thing itself.
+        pose::color_marker_detector::options_t opt = tracker.detector_options();
+        opt.model = *model;
+        tracker.set_detector_options(opt);
+
+        spdlog::info("color: model fitted from {} samples, mean a*{:+.1f} b*{:+.1f}, sd {:.1f}/{:.1f}",
+            _color_sampler.count(), model->mean_ab.x(), model->mean_ab.y(),
+            std::sqrt(model->cov_ab(0, 0)), std::sqrt(model->cov_ab(1, 1)));
+    }
+
+    // Measuring this installation's colour: sample the marker, fit, save. It is done here because
+    // this window has the camera open with the profile that will run it, so the conditions the file
+    // records are the conditions production uses.
+    void debugger_app::_render_color_model_section(pose::color_marker_tracker& tracker)
+    {
+        ImGui::SeparatorText("Color Model");
+
+        const double kColorDistMin = 0.5, kColorDistMax = 8.0;
+
+        const pose::color_model_t model = tracker.detector_options().model;
+        if (model.valid) {
+            ImGui::Text("model       a*%+.1f b*%+.1f  sd %.1f/%.1f  d<%.1f",
+                model.mean_ab.x(), model.mean_ab.y(),
+                std::sqrt(model.cov_ab(0, 0)), std::sqrt(model.cov_ab(1, 1)), model.max_distance);
+        } else {
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "%s",
+                "model       none: sample a marker and fit, or nothing is detected");
+        }
+        ImGui::SetItemTooltip(
+            "The colour this installation's markers photograph as, as a mean and a spread\n"
+            "on the a*b* plane. It is measured here and kept in the profile, under\n"
+            "pose.detector.color_marker.calibration.");
+
+        // ----- What the camera view shows while sampling -----
+        const char* const backdrops[] = { "camera", "mask", "membership score" };
+        ImGui::Combo("Backdrop", &_ui.color_backdrop, backdrops, IM_ARRAYSIZE(backdrops));
+        ImGui::SetItemTooltip(
+            "camera            the frame with the detections drawn on it.\n"
+            "mask              white where the classifier accepted the pixel.\n"
+            "membership score  bright where it is sure, dark where it barely passed.\n"
+            "\n"
+            "The last two say why a marker is or is not being found, and cost a frame's\n"
+            "worth of pixels copied per frame, so they are only produced while shown.");
+
+        // ----- Collecting samples -----
+        ImGui::Checkbox("Sample on click", &_ui.color_sampling);
+        ImGui::SetItemTooltip(
+            "Dragging over the camera view collects the pixels under the cursor.\n"
+            "\n"
+            "Sample the marker across the whole swing, not in one pose: the spread this\n"
+            "fits has to cover the light the marker actually moves through, shadowed side\n"
+            "included. Fullscreen (F11) makes the marker easier to hit.");
+
+        ImGui::SliderInt("Sample radius", &_ui.color_sample_radius, 2, 40, "%d px");
+        ImGui::SetItemTooltip("Radius of the disc each click collects.\n"
+                              "Keep it inside the marker: one pixel of background widens the\n"
+                              "spread far more than a hundred good ones narrow it.");
+
+        const bool enough = _color_sampler.count() >= pose::color_sampler::kMinSamples;
+        ImGui::Text("samples     %zu  (need %zu)", _color_sampler.count(), pose::color_sampler::kMinSamples);
+        ImGui::SetItemTooltip("Pixels collected so far. The minimum is what a 2D covariance needs\n"
+                              "to exist at all; a model worth keeping wants thousands.");
+
+        ImGui::SliderScalar("Max distance", ImGuiDataType_Double, &_ui.color_max_distance,
+                            &kColorDistMin, &kColorDistMax, "%.2f");
+        ImGui::SetItemTooltip(
+            "How many standard deviations from the fitted mean still count as the marker.\n"
+            "Normally distributed, 2.0 covers about 86%% of the samples and 3.0 about 99%%.\n"
+            "\n"
+            "Applied by the next Fit.\n"
+            "Higher: survives shadow, admits background of a similar hue.\n"
+            "Lower: only the colour it was sampled at.");
+
+        ImGui::BeginDisabled(!enough);
+        if (ImGui::Button("Fit model")) { this->_do_fit_color_model(tracker); }
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("Computes the mean and covariance of the collected samples and\n"
+                              "installs them on the running detector, so the next frame is\n"
+                              "classified by them. Disabled until enough samples exist.");
+
+        ImGui::SameLine();
+        // Only the samples go. The installed model stays in force, so detection keeps running.
+        if (ImGui::Button("Clear samples")) { _color_sampler.clear(); }
+        ImGui::SetItemTooltip("Discards the collected samples. The installed model stays until the\n"
+                              "next Fit, so detection keeps running while you resample.");
+    }
+
+    void debugger_app::_render_color_marker_control(pose::color_marker_tracker& tracker)
+    {
+        this->_render_color_model_section(tracker);
+
+        // ----- Readout: has the leg been identified, and what did the last frame find -----
+        // These two together localize a stall. Nothing detected is a colour, exposure or lighting
+        // problem; detected but not identified is an ordering, radius or geometry problem.
+        ImGui::SeparatorText("Color Markers");
+
+        const pose::color_marker_assigner::stats_t& assignment = tracker.assigner_stats();
+        const std::size_t blobs_found = tracker.last_detection_count();
+
+        if (assignment.locked) {
+            ImGui::Text("assignment  locked  (%d/%d joint(s) this frame)",
+                assignment.assigned, assignment.candidates);
+        } else {
+            ImGui::TextDisabled("assignment  searching  (%zu blob(s) found)", blobs_found);
+        }
+        ImGui::SetItemTooltip(
+            "Whether the assigner is following markers it has already identified.\n"
+            "\n"
+            "Searching with 0 blobs  -> the detector finds nothing: check the colour model,\n"
+            "                           the exposure and the lighting.\n"
+            "Searching with blobs    -> they are found but not named: check the vertical\n"
+            "                           order, the search radius and the geometry check.\n"
+            "Locked                  -> normal.");
+
+        ImGui::Text("dropped     radius %d, geometry %s, reference %s",
+            assignment.out_of_radius,
+            assignment.bad_geometry ? "rejected this frame" : "ok",
+            assignment.has_reference ? "captured" : "not captured");
+        ImGui::SetItemTooltip(
+            "radius     slots with no candidate close enough to their last position.\n"
+            "geometry   the whole frame was thrown out because a bone length left its band.\n"
+            "reference  whether the rest-pose capture latched one. Without it the geometry\n"
+            "           check stays inactive, however it is configured.");
+
+        const pose::marker_reject_stats_t rejects = tracker.reject_stats();
+        ImGui::Text("rejected    %d  (small %d, large %d, unfilled %d, elongated %d, faint %d)",
+            rejects.total(), rejects.too_small, rejects.too_large,
+            rejects.not_filled, rejects.too_long, rejects.low_score);
+        ImGui::SetItemTooltip(
+            "Candidate blobs the detector's filters dropped, and which filter dropped them.\n"
+            "\n"
+            "  small     -> lower min area, or move closer / use a bigger marker\n"
+            "  large     -> lower max area, or a background region matches the colour\n"
+            "  unfilled  -> raise the close kernel, or lower min fill\n"
+            "  elongated -> shorten the exposure, or raise max aspect\n"
+            "  faint     -> lower min score, or resample the model under this light");
+
+        // ----- Blob filters (live; the worker rebuilds the detector on change) -----
+        pose::color_marker_detector::options_t detector = tracker.detector_options();
+        bool detector_changed = false;
+
+        const double kAreaMin = 1.0, kAreaMax = 200000.0, kZero = 0.0, kOne = 1.0;
+        const double kAspectMin = 1.0, kAspectMax = 8.0;
+
+        detector_changed |= ImGui::SliderScalar("min area [px]", ImGuiDataType_Double, &detector.min_area_px,
+                                                &kAreaMin, &kAreaMax, "%.0f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SetItemTooltip("Smallest blob accepted. A 20 px disc is about 314 px2.\n"
+                              "Higher: speckle is filtered out.\n"
+                              "Lower: distant or partly hidden markers survive.");
+
+        detector_changed |= ImGui::SliderScalar("max area [px]", ImGuiDataType_Double, &detector.max_area_px,
+                                                &kAreaMin, &kAreaMax, "%.0f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SetItemTooltip("Largest blob accepted. Blocks a wall or a garment whose colour matches.");
+
+        detector_changed |= ImGui::SliderScalar("min fill", ImGuiDataType_Double, &detector.min_fill,
+                                                &kZero, &kOne, "%.2f");
+        ImGui::SetItemTooltip("Blob area over its bounding box. A solid disc is about 0.785.\n"
+                              "A glossy marker falling below this wants a bigger close kernel\n"
+                              "before it wants a lower threshold: the hole is the real problem.");
+
+        detector_changed |= ImGui::SliderScalar("max aspect", ImGuiDataType_Double, &detector.max_aspect,
+                                                &kAspectMin, &kAspectMax, "%.2f");
+        ImGui::SetItemTooltip("Bounding box long side over short side. A circle is 1.0.\n"
+                              "A long exposure smears a swinging marker into a streak.");
+
+        detector_changed |= ImGui::SliderScalar("min score", ImGuiDataType_Double, &detector.min_score,
+                                                &kZero, &kOne, "%.2f");
+        ImGui::SetItemTooltip("Mean membership over the blob, 0 to 1. Size and shape can match by\n"
+                              "accident; this is the check on the colour itself.");
+
+        detector_changed |= ImGui::SliderInt("open kernel [px]", &detector.open_kernel_px, 0, 15, "%d");
+        ImGui::SetItemTooltip("Erode then dilate: removes specks outside the blob. 0 skips it.");
+
+        detector_changed |= ImGui::SliderInt("close kernel [px]", &detector.close_kernel_px, 0, 15, "%d");
+        ImGui::SetItemTooltip("Dilate then erode: fills holes inside the blob, which is what a\n"
+                              "specular highlight punches through a glossy marker. 0 skips it.");
+
+        if (detector_changed) { tracker.set_detector_options(detector); }
+
+        // ----- Joint assignment (live; runs on this thread, so it takes effect next frame) -----
+        pose::color_marker_assigner::options_t& assigner = tracker.assigner_options();
+
+        const double kRadiusMin = 5.0, kRadiusMax = 400.0;
+        const double kTolMin = 0.05, kTolMax = 0.95;
+        const double kDiaMin = 0.001, kDiaMax = 0.2;
+
+        // The chain of joint names is built from this, so a change drops the lock and the captured
+        // spacing with it, and the next frames name the markers from their vertical order again.
+        // `midline` is left out: the config refuses it for this field, so offering it here would
+        // make a state that cannot be saved and reopened.
+        const auto leg_radio = [&assigner](const char* label, pose::joint_side_t side) {
+            if (ImGui::RadioButton(label, assigner.leg == side)) { assigner.leg = side; }
+        };
+        ImGui::TextUnformatted("Marked leg");
+        ImGui::SameLine(); leg_radio("Left", pose::joint_side_t::left);
+        ImGui::SameLine(); leg_radio("Right", pose::joint_side_t::right);
+        ImGui::SetItemTooltip("Which leg carries the markers. A plain disc does not state one, so this does.\n"
+                              "Changing it renames every slot: the assignment unlocks and the bone length\n"
+                              "reference is dropped until the next rest-pose capture.");
+
+        // The geometry check is the first thing to switch off when the assignment will not settle,
+        // since it tells apart a broken rigid-body assumption from a broken order or radius.
+        ImGui::Checkbox("Bone length check", &assigner.enable_bone_length_check);
+        ImGui::SetItemTooltip(
+            "Rejects a frame whose marker spacing left the band captured at rest pose.\n"
+            "A one-slot slip shows up as roughly half or double, so it is caught here.\n"
+            "\n"
+            "Turn it off to tell a broken rigid-body assumption apart from an ordering\n"
+            "or radius problem. A visibly tilted camera wants a wider band, not this off.");
+
+        ImGui::BeginDisabled(!assigner.enable_bone_length_check);
+        ImGui::SliderScalar("length tolerance", ImGuiDataType_Double, &assigner.bone_length_tolerance,
+                            &kTolMin, &kTolMax, "%.2f");
+        ImGui::SetItemTooltip("Allowed band around the captured spacing. 0.35 accepts 0.65x to 1.35x.\n"
+                              "Raise it when the camera is not square to the sagittal plane: the leg's\n"
+                              "own swing then shortens the spacing by a few per cent.");
+        ImGui::EndDisabled();
+
+        ImGui::SliderScalar("search radius [px]", ImGuiDataType_Double, &assigner.search_radius_px,
+                            &kRadiusMin, &kRadiusMax, "%.0f");
+        ImGui::SetItemTooltip("How far from its last position a marker may be found.\n"
+                              "Must exceed what a marker travels in one frame.\n"
+                              "Higher: keeps up with fast motion, admits background objects.");
+
+        ImGui::SliderInt("lost frames", &assigner.lost_frames_before_full_search, 1, 120, "%d");
+        ImGui::SetItemTooltip("Frames of incomplete assignment before the whole frame is searched\n"
+                              "again from the vertical order.");
+
+        ImGui::SliderScalar("marker diameter [m]", ImGuiDataType_Double, &assigner.marker_diameter_m,
+                            &kDiaMin, &kDiaMax, "%.4f");
+        ImGui::SetItemTooltip("Printed disc diameter. Sets the metric scale of the reported\n"
+                              "positions only; the joint angles do not depend on it.");
     }
 
     void debugger_app::_render_sagittal_estimator_control(pose::sagittal_pose_estimator::options_t& opt)
@@ -1400,6 +1748,16 @@ namespace gui
                 ? "Lossy. Roughly 5-15 MB/s at 1080p30."
                 : "Lossless pixels, compressed per chunk. Much larger; meant for short clips.");
 
+            // JPEG subsamples chroma, which is the very thing a colour model is measured on. A
+            // recording meant for tuning it has to keep the colour the sensor saw.
+            if (is_jpeg && dynamic_cast<const pose::color_marker_tracker*>(_server->pipeline().tracker()))
+            {
+                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "%s",
+                    "JPEG halves the colour resolution again on top of the sensor's Bayer\n"
+                    "pattern. A colour model fitted live may not match this recording on\n"
+                    "playback. Record raw when the clip is for tuning the colour.");
+            }
+
             ImGui::Separator();
             ImGui::BeginDisabled(_ui.record_dlg_path.empty());
             if (ImGui::Button("Start", ImVec2(90, 0))) { this->_do_start_recording(); }
@@ -1416,18 +1774,38 @@ namespace gui
         ImGui::SetNextWindowSize(ImVec2(420, 0), ImGuiCond_Appearing);
         if (ImGui::Begin("Open Source", &_ui.open_dlg_show, ImGuiWindowFlags_NoCollapse))
         {
+            // What is stuck on the exo, which decides how a frame becomes joint measurements and
+            // what the camera has to deliver, so it is picked alongside the source.
+            const auto marker_kind_radio = [this](const char* label, app::marker_kind_t val) {
+                if (ImGui::RadioButton(label, _ui.open_dlg_marker_kind == val)) { _ui.open_dlg_marker_kind = val; }
+            };
+            ImGui::TextUnformatted("Markers");
+            marker_kind_radio("AprilTag", app::marker_kind_t::apriltag);
+            ImGui::SameLine();
+            marker_kind_radio("Color", app::marker_kind_t::color_marker);
+            ImGui::SetItemTooltip("AprilTag: each tag states its own id, so a detection names its joint.\n"
+                                  "Color:    plain discs, named by their order down the leg. The camera\n"
+                                  "          streams colour, and the colour itself is measured on site.");
+
+            const bool color_markers = (_ui.open_dlg_marker_kind == app::marker_kind_t::color_marker);
+            if (color_markers) { _ui.open_dlg_view_plane = pose::view_plane_t::sagittal; }
+
             // The viewing plane decides which estimator runs, and swapping it mid-stream would
             // invalidate the rest pose and the tracking state, so it is picked alongside the source.
             const auto view_plane_radio = [this](const char* label, pose::view_plane_t val) {
                 if (ImGui::RadioButton(label, _ui.open_dlg_view_plane == val)) { _ui.open_dlg_view_plane = val; }
             };
             ImGui::TextUnformatted("Viewing plane");
+            // A disc's distance is never solved, so it measures on the image plane and nowhere else.
+            ImGui::BeginDisabled(color_markers);
             view_plane_radio("Frontal", pose::view_plane_t::frontal);
             ImGui::SameLine();
             view_plane_radio("Sagittal", pose::view_plane_t::sagittal);
+            ImGui::EndDisabled();
             ImGui::SetItemTooltip("Frontal: camera faces the exo; both legs tagged, rig solved in 3D.\n"
-                                  "Sagittal: camera at the side; only the near leg is tagged and its\n"
+                                  "Sagittal: camera at the side; only the near leg is marked and its\n"
                                   "          angles are read off the image plane (no tag pose solve).");
+
             ImGui::Separator();
 
             const auto kind_radio = [this](const char* label, source_kind_t val) {

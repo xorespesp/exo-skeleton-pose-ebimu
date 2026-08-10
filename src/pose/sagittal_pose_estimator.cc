@@ -11,22 +11,10 @@ namespace pose
     {
         size_t index_of(joint_id_t jid) { return static_cast<size_t>(jid); }
 
-        std::optional<joint_id_t> child_of(joint_id_t parent) {
-            for (const auto& c : get_joint_defs()) {
-                if (!is_root_joint(c.joint_id) && c.parent == parent) { return c.joint_id; }
-            }
-            return std::nullopt;
-        }
-
-        // Entry point of one leg's chain: the root's child on `side`.
+        // Entry point of the tracked leg's chain, once a side has been settled on.
         std::optional<joint_id_t> knee_of_side(std::optional<joint_side_t> side) {
             if (!side.has_value()) { return std::nullopt; }
-            const joint_id_t root = get_root_joint();
-            for (const auto& c : get_joint_defs()) {
-                if (is_root_joint(c.joint_id) || c.parent != root) { continue; }
-                if (c.side == side.value()) { return c.joint_id; }
-            }
-            return std::nullopt;
+            return get_leg_root_joint(side.value());
         }
 
         // Direction of the bone from `start` to `end` in the image plane.
@@ -264,8 +252,8 @@ namespace pose
         {
             const joint_id_t root = get_root_joint();
             const joint_id_t knee = tracked_knee.value();
-            const std::optional<joint_id_t> ankle = child_of(knee);
-            const std::optional<joint_id_t> foot = ankle.has_value() ? child_of(ankle.value()) : std::nullopt;
+            const std::optional<joint_id_t> ankle = get_child_joint(knee);
+            const std::optional<joint_id_t> foot = ankle.has_value() ? get_child_joint(ankle.value()) : std::nullopt;
 
             if (ankle.has_value() && foot.has_value())
             {

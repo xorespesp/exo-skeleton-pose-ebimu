@@ -40,6 +40,24 @@ namespace pose
     // Which half of the exo's body a joint belongs to.
     enum class joint_side_t { midline, right, left };
 
+    constexpr std::string_view joint_side_name(joint_side_t s) {
+        switch (s) {
+        case joint_side_t::right: return "right";
+        case joint_side_t::left:  return "left";
+        case joint_side_t::midline: break;
+        }
+        return "midline";
+    }
+
+    // nullopt if `name` is none of them. The names round-trip through `joint_side_name()`,
+    // which is what a config file spells.
+    constexpr std::optional<joint_side_t> joint_side_from_name(std::string_view name) {
+        if (name == joint_side_name(joint_side_t::right))   { return joint_side_t::right; }
+        if (name == joint_side_name(joint_side_t::left))    { return joint_side_t::left; }
+        if (name == joint_side_name(joint_side_t::midline)) { return joint_side_t::midline; }
+        return std::nullopt;
+    }
+
     // Static per-joint definition: tag binding, parent, and left/right twin.
     struct joint_definition_t
     {
@@ -153,6 +171,27 @@ namespace pose
     constexpr bool is_root_joint(joint_id_t j) {
         const auto def = get_joint_def(j);
         return def.has_value() && def->parent == j;
+    }
+
+    // The child hanging off `j`; empty at the end of a chain. A leg is a single strand, so the
+    // first row that names `j` as its parent is the only one, and walking it repeatedly gives the
+    // whole limb.
+    constexpr std::optional<joint_id_t> get_child_joint(joint_id_t j) {
+        for (const auto& c : get_joint_defs()) {
+            if (!is_root_joint(c.joint_id) && c.parent == j) { return c.joint_id; }
+        }
+        return std::nullopt;
+    }
+
+    // Where one leg's chain starts: the root's child on `side`. 
+    // Empty for the midline, which owns no limb of its own.
+    constexpr std::optional<joint_id_t> get_leg_root_joint(joint_side_t side) {
+        const joint_id_t root = get_root_joint();
+        for (const auto& c : get_joint_defs()) {
+            if (is_root_joint(c.joint_id) || c.parent != root) { continue; }
+            if (c.side == side) { return c.joint_id; }
+        }
+        return std::nullopt;
     }
 
     // True for joints with a left/right twin; midline joints have none.

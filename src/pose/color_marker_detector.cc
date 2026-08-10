@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <functional>
 #include <numbers>
 #include <string>
 
@@ -117,7 +118,6 @@ namespace pose
         model.mean_ab = Eigen::Vector2d{ mean_a, mean_b };
         model.cov_ab << var_a, cov_ab,
                         cov_ab, var_b;
-        model.cov_inv_ab = invert_symmetric_2x2(var_a, cov_ab, var_b);
         model.max_distance = max_distance;
         model.valid = true;
         return model;
@@ -145,8 +145,20 @@ namespace pose
         if (!_opt.model.valid || _opt.model.max_distance <= 0.0) { return; }
 
         const Eigen::Vector2d& mu = _opt.model.mean_ab;
-        const Eigen::Matrix2d& inv = _opt.model.cov_inv_ab;
         const double threshold = _opt.model.max_distance;
+
+        // 아래에서 잴 마할라노비스 거리는 공분산의 역행렬을 쓴다.
+        //
+        //   d² = (p - 평균)ᵀ · 공분산⁻¹ · (p - 평균)
+        //
+        // 역행렬을 곱한다는 것은 "표본이 퍼진 만큼 나눈다" 는 뜻이다. 표본이 넓게 퍼진 방향으로는
+        // 같은 거리라도 작게 세어지고 좁은 방향으로는 크게 세어져서, 결과적으로 기울어진 타원을
+        // 원으로 편 자리에서 재게 된다. 공분산을 그대로 곱하면 정반대가 되어 버린다.
+        //
+        // 이 행렬은 모델 하나에 대해 고정이고 아래 65536 칸이 전부 같은 것을 쓰므로, 칸마다
+        // 다시 구하지 않고 루프 밖에서 한 번만 구한다.
+        const Eigen::Matrix2d& cov = _opt.model.cov_ab;
+        const Eigen::Matrix2d inv = invert_symmetric_2x2(cov(0, 0), cov(0, 1), cov(1, 1));
 
         // 가능한 (a, b) 조합이 256x256 뿐이므로 전부 미리 계산해 둔다.
         // 이 표 덕분에 픽셀마다 하는 일이 조회 한 번으로 줄어든다.
@@ -267,12 +279,16 @@ namespace pose
             }
             if (weight_sum <= 0.0) { continue; }
 
+            // 소속 점수 평균. 색이 얼마나 확실한가를 하나의 값으로 요약한 것이다.
+            const double score = weight_sum / (area * 255.0);
+            if (score < _opt.min_score) { ++_rejects.low_score; continue; }
+
             marker_detection_t d;
             d.center = cv::Point2f(static_cast<float>(weighted_x / weight_sum),
                                    static_cast<float>(weighted_y / weight_sum));
             d.area_px = static_cast<float>(area);
             d.diameter_px = static_cast<float>(circle_diameter_from_area(area));
-            d.score = static_cast<float>(weight_sum / (area * 255.0));
+            d.score = static_cast<float>(score);
             d.fill = static_cast<float>(fill);
             d.aspect = static_cast<float>(aspect);
             out.push_back(d);
@@ -281,6 +297,215 @@ namespace pose
         // 큰 것부터. 마커가 배경 잡음보다 큰 것이 보통이라 눈으로 볼 때 편하다.
         std::ranges::sort(out, std::ranges::greater{}, &marker_detection_t::area_px);
         return out;
+    }
+
+    // ---------------------------------------------------------------------------
+    // color_marker_assigner
+    // ---------------------------------------------------------------------------
+
+    color_marker_assigner::color_marker_assigner(const options_t& opt)
+        : _opt{ opt }
+    {
+        this->_rebuild_chain();
+    }
+
+    void color_marker_assigner::_rebuild_chain()
+    {
+        _chain.clear();
+        _chain.push_back(get_root_joint());
+        for (auto j = get_leg_root_joint(_opt.leg); j.has_value(); j = get_child_joint(j.value())) {
+            _chain.push_back(j.value());
+        }
+        _chain_side = _opt.leg;
+
+        _last_px.assign(_chain.size(), std::nullopt);
+        _reference_px.clear();
+        _locked = false;
+        _lost_frames = 0;
+    }
+
+    void color_marker_assigner::reset()
+    {
+        // 기준 거리는 여기서 건드리지 않는다. 그것은 rest pose 와 짝지어 잡고 짝지어 버리는
+        // 값이라 `clear_reference()` 가 맡고, 프레임이 튄 것만으로 뼈 길이가 달라지지는 않는다.
+        _last_px.assign(_chain.size(), std::nullopt);
+        _locked = false;
+        _lost_frames = 0;
+        _stats = stats_t{};
+    }
+
+    void color_marker_assigner::clear_reference()
+    {
+        _reference_px.clear();
+    }
+
+    bool color_marker_assigner::capture_reference()
+    {
+        if (_chain.size() < 2) { return false; }
+
+        // 전 구간이 배정돼 있어야 기준이 된다. 한 칸이라도 비면 그 뼈의 기준이 없어서,
+        // 이후 그 뼈만 검증에서 빠지는 어중간한 상태가 된다.
+        for (const auto& px : _last_px) {
+            if (!px.has_value()) { return false; }
+        }
+
+        _reference_px.resize(_chain.size() - 1);
+        for (std::size_t i = 0; i + 1 < _chain.size(); ++i) {
+            _reference_px[i] = (_last_px[i + 1].value() - _last_px[i].value()).norm();
+        }
+        return true;
+    }
+
+    std::vector<joint_2d_measurement_t> color_marker_assigner::assign(
+        const std::span<const marker_detection_t> detections)
+    {
+        if (_opt.leg != _chain_side) { this->_rebuild_chain(); }
+
+        const std::size_t slots = _chain.size();
+        _stats = stats_t{};
+        _stats.candidates = static_cast<int>(detections.size());
+        _stats.has_reference = !_reference_px.empty();
+
+        std::vector<joint_2d_measurement_t> out;
+        if (slots < 2 || detections.empty()) {
+            ++_lost_frames;
+            if (_lost_frames > _opt.lost_frames_before_full_search) { this->_unlock(); }
+            _stats.locked = _locked;
+            _stats.lost_frames = _lost_frames;
+            return out;
+        }
+
+        // 이번 프레임에 슬롯마다 어느 덩어리가 붙었나. 비어 있으면 그 관절은 이번에 안 나온다.
+        std::vector<const marker_detection_t*> picked(slots, nullptr);
+
+        if (!_locked)
+        {
+            // --- 처음 배정: 다리를 따라 늘어선 순서로 ---
+            // 슬롯 수만큼은 있어야 순서를 셀 수 있다. 그보다 많으면 색이 가장 확실한 것들만
+            // 남기는데, 크기와 모양까지 통과한 배경 물체를 가려내는 마지막 잣대가 색이라서다.
+            if (detections.size() < slots) {
+                ++_lost_frames;
+                if (_lost_frames > _opt.lost_frames_before_full_search) { this->_unlock(); }
+                _stats.locked = false;
+                _stats.lost_frames = _lost_frames;
+                return out;
+            }
+
+            std::vector<const marker_detection_t*> best;
+            best.reserve(detections.size());
+            for (const auto& d : detections) { best.push_back(&d); }
+            std::ranges::partial_sort(best, best.begin() + static_cast<std::ptrdiff_t>(slots),
+                std::ranges::greater{}, [](const marker_detection_t* d) { return d->score; });
+            best.resize(slots);
+
+            // 다리는 화면에서 위아래로 늘어서 있으므로 y 오름차순이 곧 골반부터 발까지다.
+            std::ranges::sort(best, {}, [](const marker_detection_t* d) { return d->center.y; });
+
+            for (std::size_t i = 0; i < slots; ++i) { picked[i] = best[i]; }
+        }
+        else
+        {
+            // --- 추적: 직전 위치에서 가장 가까운 덩어리 ---
+            // 슬롯 순서대로 집어 가며 이미 쓴 덩어리는 건너뛴다. 두 슬롯이 같은 덩어리를
+            // 두고 다투는 일은 마커 간격이 반경보다 넓은 한 생기지 않는다.
+            std::vector<bool> used(detections.size(), false);
+            const double radius2 = _opt.search_radius_px * _opt.search_radius_px;
+
+            for (std::size_t i = 0; i < slots; ++i)
+            {
+                if (!_last_px[i].has_value()) { continue; }
+                const Eigen::Vector2d& prev = _last_px[i].value();
+
+                double best_d2 = radius2;
+                std::size_t best_k = detections.size();
+                for (std::size_t k = 0; k < detections.size(); ++k)
+                {
+                    if (used[k]) { continue; }
+                    const Eigen::Vector2d c{ detections[k].center.x, detections[k].center.y };
+                    if (const double d2 = (c - prev).squaredNorm(); d2 < best_d2) {
+                        best_d2 = d2;
+                        best_k = k;
+                    }
+                }
+
+                if (best_k == detections.size()) { ++_stats.out_of_radius; continue; }
+                used[best_k] = true;
+                picked[i] = &detections[best_k];
+            }
+        }
+
+        // --- 뼈 길이비 검증 ---
+        // 기준이 있고 검사가 켜져 있을 때만 돈다. 한 군데라도 밴드를 벗어나면 이번 프레임의
+        // 배정을 통째로 버린다. 한 칸 밀림은 사슬 전체를 어긋나게 하므로 부분만 살릴 수 없다.
+        if (_opt.enable_bone_length_check && !_reference_px.empty())
+        {
+            const double lo = 1.0 - _opt.bone_length_tolerance;
+            const double hi = 1.0 + _opt.bone_length_tolerance;
+
+            for (std::size_t i = 0; i + 1 < slots; ++i)
+            {
+                if (!picked[i] || !picked[i + 1]) { continue; } // 한쪽이 비면 잴 것이 없다
+                if (_reference_px[i] < 1e-6) { continue; }
+
+                const Eigen::Vector2d p{ picked[i]->center.x, picked[i]->center.y };
+                const Eigen::Vector2d q{ picked[i + 1]->center.x, picked[i + 1]->center.y };
+                const double ratio = (q - p).norm() / _reference_px[i];
+                if (ratio < lo || ratio > hi) { _stats.bad_geometry = true; break; }
+            }
+
+            if (_stats.bad_geometry) {
+                ++_lost_frames;
+                if (_lost_frames > _opt.lost_frames_before_full_search) { this->_unlock(); }
+                _stats.locked = _locked;
+                _stats.lost_frames = _lost_frames;
+                return out; // 직전 위치는 그대로 두어 다음 프레임이 같은 자리에서 다시 시도한다
+            }
+        }
+
+        // --- 결과 확정 ---
+        // 못 이은 슬롯은 직전 위치를 **그대로 둔다.** 그것이 다음 프레임의 예측 중심이라,
+        // 잠깐 가려졌던 마커가 다시 나타나면 같은 자리에서 도로 붙는다. 지워 버리면 lock 이
+        // 풀릴 때까지 그 관절을 영영 되찾지 못한다.
+        out.reserve(slots);
+        for (std::size_t i = 0; i < slots; ++i)
+        {
+            if (!picked[i]) { continue; }
+
+            const Eigen::Vector2d c{ picked[i]->center.x, picked[i]->center.y };
+            _last_px[i] = c;
+
+            joint_2d_measurement_t m{};
+            m.joint_id = _chain[i];
+            m.center_px = c;
+            if (picked[i]->diameter_px > 1e-6f) {
+                m.meters_per_pixel = _opt.marker_diameter_m / picked[i]->diameter_px;
+            }
+            out.push_back(m);
+            ++_stats.assigned;
+        }
+
+        // lock 은 전 구간이 이어진 프레임에서만 선다. 한 칸이라도 비면 계수기가 올라가는데,
+        // 한 관절이 계속 안 잡힌다는 것은 배정 자체가 의심스럽다는 뜻이므로 그 상태가
+        // 이어지면 lock 을 풀고 늘어선 순서부터 다시 찾는다. 그 사이에도 이어진 슬롯은
+        // 계속 나가므로, 잠깐 가려진 관절 하나가 나머지를 끊지는 않는다.
+        if (_stats.assigned == static_cast<int>(slots)) {
+            _locked = true;
+            _lost_frames = 0;
+        } else {
+            ++_lost_frames;
+            if (_lost_frames > _opt.lost_frames_before_full_search) { this->_unlock(); }
+        }
+
+        _stats.locked = _locked;
+        _stats.lost_frames = _lost_frames;
+        return out;
+    }
+
+    void color_marker_assigner::_unlock()
+    {
+        _locked = false;
+        _lost_frames = 0;
+        _last_px.assign(_chain.size(), std::nullopt);
     }
 
     // ---------------------------------------------------------------------------

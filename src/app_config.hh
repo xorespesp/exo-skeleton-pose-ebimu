@@ -1,7 +1,9 @@
 #pragma once
 #include "source_address.hh"
 
+#include "hw/frame_format.hh"
 #include "hw/roi.hh"
+#include "pose/color_marker_detector.hh"
 #include "pose/frontal_pose_estimator.hh"
 #include "pose/sagittal_pose_estimator.hh"
 #include "pose/tag_detector.hh"
@@ -32,6 +34,69 @@ namespace app
         std::string intrinsics_file;
     };
 
+    // What is printed on the exo, which decides how a frame becomes per-joint measurements.
+    enum class marker_kind_t
+    {
+        apriltag,     // tags carry an id, so a detection names its own joint
+        color_marker, // plain coloured discs, placed by their order along the limb
+    };
+
+    constexpr std::string_view marker_kind_name(marker_kind_t k) {
+        return (k == marker_kind_t::color_marker) ? "color_marker" : "apriltag";
+    }
+
+    // nullopt if `name` is neither kind. The names round-trip through `marker_kind_name()`,
+    // which is what the config file spells.
+    constexpr std::optional<marker_kind_t> marker_kind_from_name(std::string_view name) {
+        if (name == marker_kind_name(marker_kind_t::apriltag))     { return marker_kind_t::apriltag; }
+        if (name == marker_kind_name(marker_kind_t::color_marker)) { return marker_kind_t::color_marker; }
+        return std::nullopt;
+    }
+
+    // What a source has to deliver for `k` to be detectable, which is what an open programs into
+    // the camera. Colour classification needs the colour; reading a printed pattern takes luminance
+    // alone, and asking for one channel there keeps the link bandwidth and the demosaic cost off.
+    constexpr hw::frame_format_t marker_frame_format(marker_kind_t k) {
+        return (k == marker_kind_t::color_marker) ? hw::frame_format_t::bgr8 : hw::frame_format_t::gray8;
+    }
+
+    // What this installation's markers photograph as, measured on site by the debugger's colour
+    // panel. Written back into the profile it came from, so what a run detects with and what the
+    // file says are the same thing.
+    //
+    // The blob filters ride with the colour because they are decided in the same sitting and by the
+    // same physical facts: how many pixels a marker covers at this distance and frame size, how the
+    // light glances off it, how far a swing smears it. `min_score` goes further and is stated
+    // against the colour model itself, so it means something different the moment that changes.
+    struct color_marker_calibration_t
+    {
+        pose::color_marker_detector::options_t detector; // blob filters, and the colour model inside
+
+        // What the camera delivered while this was measured, which the `camera` block above does
+        // not state: a ROI, a binned mode or another sensor all change how many pixels a marker
+        // covers, and the blob gates are counted in pixels. Compared at open.
+        Eigen::Vector2i frame_resolution{ 0, 0 };
+    };
+
+    // The colour-marker path.
+    struct color_marker_config_t
+    {
+        // Empty until someone has measured this installation, which is the state a profile is
+        // authored in. Nothing is detected without it, and the colour panel is where it comes from.
+        std::optional<color_marker_calibration_t> calibration;
+
+        pose::color_marker_assigner::options_t assigner; // which blob is which joint
+    };
+
+    // Both marker kinds are kept, so switching loses neither one's tuning.
+    struct detector_config_t
+    {
+        marker_kind_t kind{ marker_kind_t::apriltag };
+
+        pose::tag_detector::options_t apriltag;
+        color_marker_config_t color_marker;
+    };
+
     // Turning frames into joint angles. Both planes are kept, so switching loses neither.
     struct pose_config_t
     {
@@ -40,7 +105,7 @@ namespace app
 
         double tag_size_m{ 0.05 }; // printed black-square edge length [m]
 
-        pose::tag_detector::options_t detector;
+        detector_config_t detector;
         pose::frontal_pose_estimator::options_t frontal;
         pose::sagittal_pose_estimator::options_t sagittal;
     };
@@ -63,10 +128,11 @@ namespace app
     [[nodiscard]] std::filesystem::path project_dir(std::string_view name);
 
     // Every key the schema names must be present, `config_version` included; a default standing in
-    // for an omitted one is the failure this guards against. Keys it does not name are ignored, so
-    // a file may carry notes of its own. On failure `err` names the key and `out` is untouched.
+    // for an omitted one is the failure this guards against. Keys it does not name are ignored.
+    // On failure `err` names the key and `out` is untouched.
     [[nodiscard]] bool load_config(const std::filesystem::path& path, app_config_t& out, std::string& err);
 
+    // Written from the schema, so the file that comes out holds the keys it names and nothing else.
     [[nodiscard]] bool save_config(const app_config_t& config, const std::filesystem::path& path, std::string& err);
 
     // The JSON text `save_config()` would write. (--dump-config)

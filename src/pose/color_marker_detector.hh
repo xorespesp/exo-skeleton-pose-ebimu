@@ -1,10 +1,14 @@
-#pragma once
+﻿#pragma once
+#include "joint_measurement.hh"
+#include "joints_def.hh"
+
 #include <Eigen/Core>
 #include <opencv2/core.hpp>
 
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -29,6 +33,20 @@
 //
 // 여기서 **L* 을 버리고 (a*, b*) 평면만 쓴다.** 밝기를 빼고 색감만 남기는 것이라, 그림자가
 // 지거나 조명이 조금 어두워져도 같은 색으로 판정된다. 이것이 이 방식의 핵심이다.
+//
+// ## 다만 밝기에 완전히 불변인 것은 아니다
+//
+// a*, b* 를 구하는 식에 세제곱근이 들어 있다.
+//
+//   a* = 500 · ( f(X/Xn) − f(Y/Yn) ) ,   f(t) ≈ t^(1/3)
+//
+// 밝기가 k 배가 되면 X, Y, Z 가 함께 k 배가 되고, 세제곱근을 지나면서 **a*, b* 가 k^(1/3) 배로
+// 이동한다.** 노출을 두 배로 올리면 약 1.26 배, 즉 mean_a 가 +62 였다면 +78 로 간다. 표준편차가
+// 3~5 인 모델에서는 몇 표준편차 밖이라 마커를 통째로 놓친다.
+//
+// 그늘처럼 국소적이고 폭이 작은 변동은 공분산이 흡수하지만, 노출이나 게인을 바꾸는 것은 다른
+// 색으로 바꾸는 것과 같다. 그래서 모델은 자기를 적합할 때 쓴 노출·게인과 같은 설정 파일에
+// 들어 있고, 그 값을 고치면 모델도 다시 재야 한다.
 //
 // ## 마할라노비스 거리
 //
@@ -80,16 +98,15 @@ namespace pose
     // 색 클래스 하나를 정의하는 모델. 마커 픽셀을 표본으로 모아 적합해서 만든다.
     struct color_model_t
     {
-        Eigen::Vector2d mean_ab{ 0.0, 0.0 };                        // 표본의 (a*, b*) 평균
-        Eigen::Matrix2d cov_ab{ Eigen::Matrix2d::Identity() };      // 표본이 퍼진 모양 (공분산)
-        Eigen::Matrix2d cov_inv_ab{ Eigen::Matrix2d::Identity() };  // 위의 역행렬. 거리 계산에 쓴다
+        Eigen::Vector2d mean_ab{ 0.0, 0.0 };                   // 표본의 (a*, b*) 평균
+        Eigen::Matrix2d cov_ab{ Eigen::Matrix2d::Identity() }; // 표본이 퍼진 모양 (공분산)
         // 마할라노비스 거리가 이 값보다 가까우면 마커 색으로 본다.
         // 정규분포라면 2.0 은 표본의 약 86%, 3.0 은 약 99% 를 덮는다.
         double max_distance{ 3.0 };
         bool valid{ false }; // 적합 전에는 false. 이 상태에서는 검출이 아무것도 내지 않는다
     };
 
-    // 검출된 마커 하나. `center` 가 최종 산출물이고 나머지는 진단용이다.
+    // 검출된 마커 하나. (NOTE: `center` 가 최종 산출물, 나머지 필드는 디버깅용)
     struct marker_detection_t
     {
         cv::Point2f center{};        // 서브픽셀 중심 [px]
@@ -100,14 +117,15 @@ namespace pose
         float aspect{ 1.0f };        // 외접 사각형의 긴 변 / 짧은 변. 원이면 1
     };
 
-    // 필터에서 걸러진 후보의 사유별 개수. "왜 안 잡히는가" 를 즉답하기 위한 계측이다.
+    // 필터에서 걸러진 후보의 사유별 개수. (왜 안 잡혔는지를 추적하기 위한 디버깅 목적)
     struct marker_reject_stats_t
     {
         int too_small{ 0 };  // 면적이 min_area_px 미만
         int too_large{ 0 };  // 면적이 max_area_px 초과
         int not_filled{ 0 }; // 채움율 미달 (가운데가 뚫렸거나 모양이 찌그러짐)
         int too_long{ 0 };   // 종횡비 초과 (모션 블러로 늘어난 경우가 대부분)
-        int total() const { return too_small + too_large + not_filled + too_long; }
+        int low_score{ 0 };  // 색은 맞지만 모델 중심에서 먼, 자신 없는 덩어리
+        int total() const { return too_small + too_large + not_filled + too_long + low_score; }
     };
 
     // ---------------------------------------------------------------------------
@@ -158,8 +176,9 @@ namespace pose
     {
     public:
         // 아래 필터들이 왜 필요한가: 색만 맞으면 배경의 붉은 물체나 옷도 함께 걸린다.
-        // 색이 맞는 픽셀 덩어리를 찾은 뒤, 그 덩어리가 마커처럼 생겼는지 크기와 모양으로
-        // 한 번 더 거른다. 네 게이트 중 하나라도 어긋나면 그 덩어리는 통째로 버려진다.
+        // 색이 맞는 픽셀 덩어리를 찾은 뒤, 그 덩어리가 마커처럼 생겼는지 크기와 모양으로,
+        // 그리고 색이 얼마나 확실한지로 한 번 더 거른다.
+        // 다섯 게이트 중 하나라도 어긋나면 그 덩어리는 통째로 버려진다.
         //
         // 여기서 말하는 **외접 사각형**은 덩어리를 감싸는 가장 작은 직사각형이다. 원을 직접
         // 찾는 것이 아니라, 찾은 덩어리가 원처럼 생겼는지를 이 사각형으로 검사한다.
@@ -204,6 +223,13 @@ namespace pose
             //   지름 20 px, 이미지 상 속도 3478 px/s 기준
             //   노출 2 ms -> 27x20 -> 1.35        노출 8 ms -> 48x20 -> 2.4
             double max_aspect{ 3.0 };
+
+            // --- 확신: 색이 얼마나 "맞나" ---
+            //
+            // 덩어리 안 픽셀들의 소속 점수 평균이 이 값에 못 미치면 버린다. 크기와 모양이
+            // 우연히 맞은 배경 물체는 대개 모델 타원의 가장자리에 걸쳐 있어서 여기서 걸린다.
+            // 올리면 확실한 것만 남고, 마커가 그늘에 들어갔을 때 놓치기 쉬워진다.
+            double min_score{ 0.15 };
 
             // --- 마스크 정리: 두 연산의 목적은 서로 반대다 ---
             //
@@ -259,6 +285,121 @@ namespace pose
         cv::Mat _lab, _score, _mask;
         cv::Mat _labels, _stats, _centroids;
         marker_reject_stats_t _rejects{};
+    };
+
+    // ---------------------------------------------------------------------------
+    // 관절 배정기
+    // ---------------------------------------------------------------------------
+    //
+    // 검출기는 "화면 어딘가에 이런 덩어리가 있다" 까지만 말한다. 그 덩어리가 무릎인지 발목인지는
+    // 여기서 정한다. AprilTag 은 태그마다 id 가 찍혀 있어 이 단계가 필요 없지만, 단색 원반은
+    // 서로 구별할 표식이 없으므로 **놓인 자리**로 알아내야 한다.
+    //
+    // ## 어떻게 알아내나
+    //
+    //   1. 처음 (lock 전)   다리를 따라 늘어선 순서로 배정한다. 골반이 맨 위, 발이 맨 아래다.
+    //   2. 그 다음 프레임들  직전 위치에서 search_radius_px 안에 있는 가장 가까운 덩어리를 잇는다.
+    //   3. 놓치면            전 구간을 잇지 못한 프레임이 lost_frames_before_full_search 만큼
+    //                        연속되면 lock 을 풀고 1 번부터 다시 한다.
+    //
+    // 2번이 배경 오검출을 거의 없앤다. 화면 구석의 붉은 물체가 크기와 모양까지 통과하더라도,
+    // 직전 프레임의 무릎 자리에서 멀면 후보에 들지 못한다.
+    //
+    // ## 뼈 길이비 검증
+    //
+    // 로봇은 강체라 골반-무릎, 무릎-발목, 발목-발의 이미지 거리가 걷는 내내 거의 고정이다.
+    // 배정이 한 칸 밀리면 "허벅지" 자리에 골반→발목이 들어와 거리가 두 배쯤 되므로 즉시 걸린다.
+    //
+    // 기준 거리는 `capture_reference()` 로 잡는데, **rest pose 를 보정하는 순간**에 부르도록
+    // 되어 있다. 그 순간이 조작자가 화면을 보며 배정이 맞는지 직접 확인하는 유일한 시점이라서다.
+    // 기준을 그 프레임에서 뽑으므로 카메라가 비스듬히 설치돼 생긴 왜곡은 기준과 측정 양쪽에
+    // 똑같이 실려 상쇄된다. 남는 것은 다리 자세에 따라 변하는 부분뿐이고, 그 폭은 한 칸 밀림이
+    // 만드는 차이보다 훨씬 작다.
+    class color_marker_assigner
+    {
+    public:
+        struct options_t
+        {
+            // 마커를 붙인 다리. 색은 어느 다리인지 말해 주지 않으므로 설치가 정해 준다.
+            joint_side_t leg{ joint_side_t::left };
+
+            // 인쇄한 원반의 지름 [m]. 겉보기 지름과 함께 미터 스케일이 된다.
+            double marker_diameter_m{ 0.018 };
+
+            // 직전 위치에서 이 반경 안의 덩어리만 후보로 본다.
+            // 올리면 빠르게 움직여도 따라가고, 배경 오검출이 들어올 여지가 생긴다.
+            // 마커가 한 프레임에 움직이는 거리보다 넉넉해야 한다.
+            double search_radius_px{ 60.0 };
+
+            // 강체 가정에 기댄 배정 검증. 마커가 휘는 부위에 붙었거나 카메라 거리가 변하는
+            // 설치에서는 정상 배정을 계속 거부하게 되므로, 원인을 가를 때 이것을 끈다.
+            bool enable_bone_length_check{ true };
+
+            // 기준 거리 대비 허용 폭. 0.35 면 0.65 ~ 1.35 배까지 인정한다.
+            // 한 칸 밀림은 0.5 배나 2.0 배쯤으로 나타나므로 이 밴드 밖이다.
+            // 카메라가 눈에 띄게 비스듬하면 자세에 따른 변동이 커지므로 0.45 정도로 올린다.
+            double bone_length_tolerance{ 0.35 };
+
+            // 전 구간을 잇지 못한 프레임이 이만큼 연속되면 lock 을 풀고 처음부터 다시 찾는다.
+            int lost_frames_before_full_search{ 10 };
+        };
+
+        // 한 프레임의 배정 결과 요약. (왜 관절이 안 잡혔는지에 대한 디버깅 목적)
+        struct stats_t
+        {
+            int candidates{ 0 };     // 검출기가 넘긴 덩어리 수
+            int assigned{ 0 };       // 그중 관절에 배정된 수
+            int out_of_radius{ 0 };  // 예측 반경 안에 후보가 없어 이번에 못 이은 슬롯 수
+            // 전 구간을 잇지 못한 채 지난 연속 프레임 수. 재탐색에 들어가면서 0 으로 돌아가므로
+            // 0 에서 lost_frames_before_full_search 사이를 오간다.
+            int lost_frames{ 0 };
+            bool locked{ false };    // 배정이 잡혀 추적 중인지
+            bool bad_geometry{ false }; // 이번 프레임이 뼈 길이비 검증에서 버려졌는지
+            bool has_reference{ false }; // 기준 거리가 잡혀 있는지
+        };
+
+        explicit color_marker_assigner(const options_t& opt = {});
+
+        options_t& options() noexcept { return _opt; }
+        const options_t& options() const noexcept { return _opt; }
+
+        // 한 프레임의 덩어리들을 관절에 배정한다. 배정된 것만 돌려주므로,
+        // 가려진 관절은 결과에서 빠지고 그 처리는 추정기의 홀드가 맡는다.
+        std::vector<joint_2d_measurement_t> assign(std::span<const marker_detection_t> detections);
+
+        // 가장 최근에 이어진 위치들의 뼈 거리를 기준으로 삼는다. 전 구간이 이어져 있어야 하며,
+        // 아니면 false 를 돌려주고 기존 기준을 그대로 둔다.
+        bool capture_reference();
+        void clear_reference();
+
+        // lock 과 직전 위치를 버리고 다음 프레임부터 늘어선 순서로 다시 찾는다.
+        // 영상이 다른 지점으로 건너뛰어 예측 위치가 더는 다음 프레임을 설명하지 못할 때 부른다.
+        // 기준 거리는 남는다. 그것은 `clear_reference()` 로만 버린다.
+        void reset();
+
+        const stats_t& stats() const noexcept { return _stats; }
+
+        // 이 배정기가 채우는 관절 사슬 (골반 -> 무릎 -> 발목 -> 발).
+        std::span<const joint_id_t> chain() const noexcept { return _chain; }
+
+    private:
+        void _rebuild_chain();
+        void _unlock(); // 다음 프레임이 늘어선 순서부터 다시 찾도록 되돌린다
+
+        options_t _opt;
+
+        std::vector<joint_id_t> _chain;
+        joint_side_t _chain_side{ joint_side_t::midline }; // _chain 을 만들 때 쓴 다리
+
+        // 슬롯별 직전 배정 위치. 다음 프레임의 예측 중심이 된다.
+        std::vector<std::optional<Eigen::Vector2d>> _last_px;
+
+        // 이웃한 두 슬롯 사이의 기준 거리 [px]. 크기는 사슬 길이 - 1.
+        std::vector<double> _reference_px;
+
+        bool _locked{ false };
+        int _lost_frames{ 0 };
+        stats_t _stats{};
     };
 
     // 화면 전체의 (a*, b*) 분포를 세어 256x256 히스토그램(CV_32S)으로 돌려준다.

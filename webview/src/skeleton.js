@@ -24,8 +24,9 @@ export const BONE_BY_JOINT_ID = [
     'mixamorigLeftFoot',   // 6 LFoot
 ];
 
-// The exo's lateral axis in the rig frame. Every leg joint hinges about it, 
-// and the sagittal angles are measured about it.
+// The exo's lateral axis in the rig frame, which the schema defines and states is fixed, so it
+// is not carried in any message. Every leg joint hinges about it and the sagittal angles are
+// measured about it.
 const HINGE_AXIS = new THREE.Vector3(1, 0, 0);
 
 // Snapshot each driven bone's rest (bind) quaternion so deltas apply on top of it.

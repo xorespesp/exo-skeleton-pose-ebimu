@@ -170,7 +170,7 @@ namespace net
         }
 
         const app::source_address& source_addr = *config.camera.source;
-        const pose::view_plane_t view_plane = config.pose.view_plane;
+        const pose::view_plane_t view_plane = config.pose.estimator.view_plane;
         const app::marker_kind_t marker_kind = config.pose.detector.kind;
 
         const std::optional<int32_t> exposure_us = config.camera.exposure_us;
@@ -307,8 +307,8 @@ namespace net
         else
         {
             _tracker = std::make_shared<pose::apriltag_tracker>(
-                config.pose.detector.apriltag, 
-                config.pose.tag_size_m, 
+                config.pose.detector.apriltag.detector,
+                config.pose.detector.apriltag.tag_size_m,
                 std::move(intrinsics)
             );
         }
@@ -327,11 +327,11 @@ namespace net
         // `_select_estimator` leaves an estimator of the same plane standing, so the config's
         // options are assigned out here, where every open reaches them.
         if (_frontal) {
-            _frontal->options() = config.pose.frontal;
+            _frontal->options() = config.pose.estimator.frontal;
         }
 
         if (_sagittal) {
-            _sagittal->options() = config.pose.sagittal;
+            _sagittal->options() = config.pose.estimator.sagittal;
         }
 
         _active->clear_rest_pose(); // a new source invalidates the captured rest reference

@@ -21,6 +21,15 @@ enum JointId : ubyte {
     LFoot
 }
 
+// Rig frame, which every rotation and angle below is expressed in. It is anchored to the exo
+// rather than to any camera, so it is the same whatever the camera sees the exo from:
+//
+//   +X  the exo's left       +Y  down       +Z  behind the exo
+//
+// Every leg joint is a forward/back hinge about +X, and both angles below are signed by the
+// right-hand rule about it. A client driving a rig from the angles turns each bone about +X.
+// The axis is fixed, so it is not carried in any message.
+
 // ---------------------------------------------------------------------------
 // Client -> Server commands
 // ---------------------------------------------------------------------------
@@ -58,6 +67,11 @@ table JointPose {
 
     // Flexion in the exo's sagittal plane from the captured rest pose [rad], 0 at rest.
     // Positive bends the knee back, negative swings the leg forward.
+    //
+    // NOTE: these and `local_anim_rot` can disagree. They are measured in the hinge plane, while
+    //       the rotation is whatever the estimator solved, and a solve left free of a 1-DOF hinge
+    //       constraint carries off-hinge components the angles do not see. Reading a flexion back
+    //       out of the rotation then returns less than these state. Drive a rig from one form.
     local_sagittal_angle: double = null;    // relative to the parent bone: this joint's own bend
     absolute_sagittal_angle: double = null; // relative to the exo: the sum of `local_sagittal_angle` down the chain
 }

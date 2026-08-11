@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "joints_def.hh"
 
 #include <Eigen/Geometry>
@@ -17,7 +17,12 @@ namespace pose
     // The rotation and both angles express motion measured from the captured rest pose: they read
     // identity and zero while the exo holds the pose that was captured, and grow as it leaves it.
     // The two angles are flexion in the exo's sagittal plane [rad], signed by the right-hand rule
-    // about the rig's lateral axis.
+    // about the rig's lateral axis. (`kRigLateralAxis`)
+    //
+    // NOTE: the rotation and the angles can disagree. The angles are measured in the hinge plane,
+    //       while the rotation is whatever the estimator solved: a solve left free of a 1-DOF hinge
+    //       constraint carries off-hinge components, and `quat_hinge_angle()` over it then returns
+    //       less than the angles state. A reader picks one form rather than mixing them.
     struct joint_state_t
     {
         std::optional<Eigen::Vector3d> raw_position;      // raw position this frame (fresh detection)
@@ -53,6 +58,17 @@ namespace pose
     class pose_estimator_base
     {
     public:
+        // The rig frame's lateral axis, pointing to the exo's left (see joints_def.hh). Every leg
+        // joint hinges about this one axis and every rotation and angle below is expressed about
+        // it, so a reader takes a flexion back out of `local_anim_rot` about this and nothing else.
+        //
+        // It names a direction on the exo, not on any camera, so it holds for every viewpoint. What
+        // differs per viewpoint is where it falls in camera coordinates: a frontal camera's frame is
+        // the rig frame outright, which is why that mount is installed level and square; a side view
+        // looks along it, and the estimator working from one carries its measurements over itself.
+        static inline const Eigen::Vector3d kRigLateralAxis{ Eigen::Vector3d::UnitX() };
+
+    public:
         virtual ~pose_estimator_base() = default;
 
         pose_estimator_base(const pose_estimator_base&) = delete;
@@ -81,11 +97,6 @@ namespace pose
         // rather than this frame's raw measurement. A viewer uses this to pick which of the two to
         // draw without reaching into implementation-specific options.
         virtual bool uses_smoothed_positions() const = 0;
-
-        // The rig axis `local_anim_rot` turns about, which is the axis a flexion read back out of
-        // it has to be taken about. Only the estimator that built the rotation knows it, so a
-        // reader asks here rather than guessing from implementation-specific options.
-        virtual Eigen::Vector3d hinge_axis() const = 0;
 
     protected:
         pose_estimator_base() = default;

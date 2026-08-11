@@ -296,8 +296,8 @@ namespace gui
         // Only the running tracker has live values to read back; the other kind's block keeps
         // whatever the config profile was loaded with.
         if (auto* tag_tracker = dynamic_cast<pose::apriltag_tracker*>(pipe.tracker())) {
-            config.pose.detector.apriltag = tag_tracker->options();
-            config.pose.tag_size_m = tag_tracker->tag_size_m();
+            config.pose.detector.apriltag.detector = tag_tracker->options();
+            config.pose.detector.apriltag.tag_size_m = tag_tracker->tag_size_m();
         }
         if (auto* color_tracker = dynamic_cast<pose::color_marker_tracker*>(pipe.tracker()))
         {
@@ -315,8 +315,8 @@ namespace gui
                 };
             }
         }
-        if (const auto o = pipe.frontal_options())  { config.pose.frontal = *o; }
-        if (const auto o = pipe.sagittal_options()) { config.pose.sagittal = *o; }
+        if (const auto o = pipe.frontal_options())  { config.pose.estimator.frontal = *o; }
+        if (const auto o = pipe.sagittal_options()) { config.pose.estimator.sagittal = *o; }
 
         std::string err;
         if (!app::save_config(config, path, err)) {
@@ -379,7 +379,9 @@ namespace gui
             if (const auto o = pipe.frontal_options()) {
                 gates.max_hold_ms = o->max_hold.count();
                 gates.reset_gap_ms = o->reset_gap.count();
-                if (o->enable_hinge_constraint) { gates.hinge_axis = o->hinge_axis_world; }
+                if (o->enable_hinge_constraint) {
+                    gates.hinge_axis = pose::pose_estimator_base::kRigLateralAxis;
+                }
             }
             else if (const auto o = pipe.sagittal_options()) {
                 gates.max_hold_ms = o->max_hold.count();
@@ -656,18 +658,6 @@ namespace gui
                                   "as tag-position error. Needs a captured rest pose.\n"
                                   "On: clean 1-DOF swing per joint.\n"
                                   "Off: free minimal-swing (also picks up lateral wobble).");
-
-            ImGui::BeginDisabled(!opt.enable_hinge_constraint);
-            float axis[3]{ static_cast<float>(opt.hinge_axis_world.x()),
-                           static_cast<float>(opt.hinge_axis_world.y()),
-                           static_cast<float>(opt.hinge_axis_world.z()) };
-            if (ImGui::DragFloat3("Hinge axis (cam)", axis, 0.01f, -1.0f, 1.0f, "%.2f")) {
-                opt.hinge_axis_world = Eigen::Vector3d{ axis[0], axis[1], axis[2] };
-            }
-            ImGui::SetItemTooltip("Lateral hinge axis in the rig frame, shared by all leg joints.\n"
-                                  "~(1,0,0) for a frontal view, ~(0,0,1) for a sagittal (side) view.\n"
-                                  "It is normalized internally; direction matters, length does not.");
-            ImGui::EndDisabled();
         }
 
         // ----- Position pipeline (rig-space 3D position track) -----

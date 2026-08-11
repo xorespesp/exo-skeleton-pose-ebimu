@@ -86,7 +86,6 @@ namespace app
         json to_json_leaf(pose::tag_detector::pose_method_t v)  { return json(std::string{ pose::pose_method_to_str(v) }); }
         json to_json_leaf(pose::joint_side_t v)                 { return json(std::string{ pose::joint_side_name(v) }); }
         json to_json_leaf(marker_kind_t v)                      { return json(std::string{ marker_kind_name(v) }); }
-        json to_json_leaf(const Eigen::Vector3d& v)             { return json::array({ v.x(), v.y(), v.z() }); }
         json to_json_leaf(const Eigen::Vector2d& v)             { return json::array({ v.x(), v.y() }); }
         json to_json_leaf(const Eigen::Vector2i& v)             { return json::array({ v.x(), v.y() }); }
 
@@ -192,22 +191,6 @@ namespace app
                 return false;
             }
             out = *parsed;
-            return true;
-        }
-
-        bool from_json_leaf(const json& node, std::string_view name, Eigen::Vector3d& out, std::string& err)
-        {
-            if (!node.is_array() || node.size() != 3) {
-                err = std::format("'{}' must be an array of three numbers", name);
-                return false;
-            }
-            try {
-                out = Eigen::Vector3d{ node[0].get<double>(), node[1].get<double>(), node[2].get<double>() };
-            }
-            catch (const std::exception&) {
-                err = std::format("'{}' holds something other than numbers", name);
-                return false;
-            }
             return true;
         }
 
@@ -355,8 +338,8 @@ namespace app
 
         bool validate(const app_config_t& cfg, std::string& err)
         {
-            if (cfg.pose.tag_size_m <= 0.0) {
-                err = "'pose.tag_size_m' must be greater than zero";
+            if (cfg.pose.detector.apriltag.tag_size_m <= 0.0) {
+                err = "'pose.detector.apriltag.tag_size_m' must be greater than zero";
                 return false;
             }
             if (cfg.server.port == 0) {
@@ -367,25 +350,21 @@ namespace app
                 err = "'camera.roi' has no area";
                 return false;
             }
-            if (cfg.pose.detector.apriltag.quad_decimate < 1.0f) {
-                err = "'pose.detector.apriltag.quad_decimate' must be at least 1.0 (1.0 = full resolution)";
+            const pose::tag_detector::options_t& apriltag = cfg.pose.detector.apriltag.detector;
+            if (apriltag.quad_decimate < 1.0f) {
+                err = "'pose.detector.apriltag.detector.quad_decimate' must be at least 1.0 (1.0 = full resolution)";
                 return false;
             }
-            if (cfg.pose.detector.apriltag.num_iters < 1 || cfg.pose.detector.apriltag.num_threads < 1) {
-                err = "'pose.detector.apriltag.num_iters' and '...num_threads' must be at least 1";
+            if (apriltag.num_iters < 1 || apriltag.num_threads < 1) {
+                err = "'pose.detector.apriltag.detector.num_iters' and '...num_threads' must be at least 1";
                 return false;
             }
-            if (cfg.pose.frontal.hinge_axis_world.norm() <= 0.0) {
-                err = "'pose.frontal.hinge_axis' has zero length";
-                return false;
-            }
-
             // Colour markers are read off the image plane, which is the sagittal estimator's input.
             // A frontal run needs a marker whose distance can be solved, and a plain disc is not one.
             if (cfg.pose.detector.kind == marker_kind_t::color_marker
-                && cfg.pose.view_plane != pose::view_plane_t::sagittal)
+                && cfg.pose.estimator.view_plane != pose::view_plane_t::sagittal)
             {
-                err = "'pose.detector.kind' color_marker requires 'pose.view_plane' sagittal";
+                err = "'pose.detector.kind' color_marker requires 'pose.estimator.view_plane' sagittal";
                 return false;
             }
 

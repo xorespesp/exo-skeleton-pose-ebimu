@@ -106,12 +106,27 @@ namespace app
         )
     };
 
-    // Both marker kinds are kept, so switching loses neither one's tuning.
+    // The AprilTag path.
+    struct apriltag_config_t
+    {
+        // Printed black-square edge length [m], which turns a tag quad's pixel size into a metric scale.
+        double tag_size_m{ 0.05 };
+
+        pose::tag_detector::options_t detector;
+
+        DECLARE_SERIALIZABLE_FIELDS(
+            v("tag_size_m", o.tag_size_m);
+            v("detector",   o.detector);
+        )
+    };
+
+    // Frames -> per-joint measurements. Both marker kinds are kept, so switching loses neither's tuning.
     struct detector_config_t
     {
+        // What is printed on the exo, which picks the detection path that runs.
         marker_kind_t kind{ marker_kind_t::apriltag };
 
-        pose::tag_detector::options_t apriltag;
+        apriltag_config_t apriltag;
         color_marker_config_t color_marker;
 
         DECLARE_SERIALIZABLE_FIELDS(
@@ -121,24 +136,31 @@ namespace app
         )
     };
 
-    // Turning frames into joint angles. Both planes are kept, so switching loses neither.
-    struct pose_config_t
+    // Measurements -> joint angles. Both planes are kept, so switching loses neither's tuning.
+    struct estimator_config_t
     {
         // Where the camera stands relative to the exo, which picks the estimator that runs.
         pose::view_plane_t view_plane{ pose::view_plane_t::frontal };
 
-        double tag_size_m{ 0.05 }; // printed black-square edge length [m]
-
-        detector_config_t detector;
         pose::frontal_pose_estimator::options_t frontal;
         pose::sagittal_pose_estimator::options_t sagittal;
 
         DECLARE_SERIALIZABLE_FIELDS(
             v("view_plane", o.view_plane);
-            v("tag_size_m", o.tag_size_m);
-            v("detector",   o.detector);
             v("frontal",    o.frontal);
             v("sagittal",   o.sagittal);
+        )
+    };
+
+    // The two halves of the pose pipeline: what finds the markers, and what solves the angles.
+    struct pose_config_t
+    {
+        detector_config_t detector;
+        estimator_config_t estimator;
+
+        DECLARE_SERIALIZABLE_FIELDS(
+            v("detector",  o.detector);
+            v("estimator", o.estimator);
         )
     };
 
@@ -155,7 +177,7 @@ namespace app
     {
         // The current config schema version. (YYMMDDRR) 
         // It has to be updated whenever any field list nested below this one changes.
-        static constexpr int config_version = 26081000;
+        static constexpr int config_version = 26081100;
 
         server_config_t server;
         camera_config_t camera;

@@ -31,7 +31,7 @@ namespace gui
         _manual_gain = cam.gain.has_value();
         if (cam.gain.has_value()) { _gain = *cam.gain; }
 
-        _view_plane = config.pose.view_plane;
+        _view_plane = config.pose.estimator.view_plane;
         _marker_kind = config.pose.detector.kind;
         _marked_leg = config.pose.detector.color_marker.assigner.leg;
         _intrinsics = cam.intrinsics_file;
@@ -72,7 +72,7 @@ namespace gui
                 : app::source_address::k4a_device(index);
         }
 
-        config.pose.view_plane = _view_plane;
+        config.pose.estimator.view_plane = _view_plane;
         config.pose.detector.kind = _marker_kind;
         config.pose.detector.color_marker.assigner.leg = _marked_leg;
         return true;

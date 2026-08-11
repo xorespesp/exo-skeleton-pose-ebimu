@@ -16,8 +16,8 @@ Under AprilTag, each lower-limb joint carries one marker.
 > Generated from: https://shiqiliu-67.github.io/apriltag-generator/
 
 Print the sheet, cut the tags out, and stick one on each joint per the table below. 
-The black-square edge length is what the estimator needs (default 0.05 m): `pose.tag_size_m` in
-the installation config, or `--tag-size` when running without one.
+The black-square edge length is what the estimator needs (default 0.05 m):
+`pose.detector.apriltag.tag_size_m` in the installation config.
 Measure your printed tags and set it to match.
 
 ## Tag to joint mapping
@@ -46,8 +46,24 @@ What does matter:
 - Visibility: Keep the tag facing the camera enough to be detected reliably throughout the motion.
 
 Every leg joint is modeled as a 1-DOF forward/back hinge about a single lateral axis shared by all joints.
-That axis is a camera-frame setting (frontal view ≈ camera X, sagittal/side view ≈ camera Z), chosen in the debugger's Leg Hinge control; 
-it is a property of the viewing geometry, not of how a tag is attached.
+That axis is fixed: it is the rig frame's `+X`, pointing to the exo's left, and every reported angle is
+signed by the right-hand rule about it. It names a direction on the exo, so it is the same for every
+camera position. What each viewpoint decides is only where that axis falls in its own coordinates:
+
+| View | Hinge axis in that camera's coordinates |
+| --- | --- |
+| Frontal | camera `+X` (the frames coincide) |
+| Sagittal, camera on the exo's left | camera `-Z` (the optical axis) |
+| Sagittal, camera on the exo's right | camera `+Z` |
+
+A sagittal run converts its measurements into the rig frame itself, and which side it converts from
+follows from the marked leg. A frontal run does no conversion at all: it takes camera space as rig
+space, which makes the mount an installation requirement.
+
+**Install a frontal camera level and square to the exo.** Roll about the optical axis is the one that
+reaches the angles, and there is no setting that compensates for it. The error is second order, so
+eyeballing it against a horizontal reference in the live view is enough: a 5 degree roll costs about
+0.1 degrees of flexion, 10 degrees costs about 0.4.
 
 Capture the rest pose (`Calibrate`) with the joints in a clean neutral stance.
 The stance can be any neutral pose (e.g. with the foot already 90 degrees forward of the shank); 

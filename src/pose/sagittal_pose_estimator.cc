@@ -1,4 +1,4 @@
-#include "sagittal_pose_estimator.hh"
+﻿#include "sagittal_pose_estimator.hh"
 #include "hinge_angle.hh"
 
 #include <algorithm>
@@ -57,7 +57,9 @@ namespace pose
         // NOTE: `side` ties this sign to the one in to_rig_space(). Mirroring the view flips both
         // together, and getting them out of step shows up as legs swinging opposite to the footage.
         Eigen::Quaterniond flexion_rotation(double angle, double side) {
-            return Eigen::Quaterniond{ Eigen::AngleAxisd{ -side * angle, Eigen::Vector3d::UnitX() } };
+            return Eigen::Quaterniond{
+                Eigen::AngleAxisd{ -side * angle, pose_estimator_base::kRigLateralAxis } 
+            };
         }
 
     } // namespace

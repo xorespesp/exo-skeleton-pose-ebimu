@@ -47,13 +47,12 @@ namespace pose
             seconds_f64 dt_max{ 0.100 };   // dt clamp ceiling [s] (avoids a jump after a long pause)
 
             // --- leg IK (1-DOF hinge) ---
-            // Constrain every leg joint (hip/knee/ankle) to a single forward/back hinge about the
-            // lateral axis below, dropping off-hinge components as tag-position error. When off, each
-            // joint gets the free minimal-swing rotation.
+            // Constrain every leg joint (hip/knee/ankle) to a single forward/back hinge about
+            // `kRigLateralAxis`, dropping off-hinge components as tag-position error. When off,
+            // each joint gets the free minimal-swing rotation.
+            // NOTE: off, `local_anim_rot` keeps components the reported flexion angles cannot see,
+            //       so a rig driven by the rotation and one driven by the angles differ.
             bool enable_hinge_constraint{ false };
-            // Lateral hinge axis in the rig frame: ~(1,0,0) for a frontal view, ~(0,0,1) for a
-            // sagittal (side) view. All leg joints share this axis.
-            Eigen::Vector3d hinge_axis_world{ Eigen::Vector3d::UnitX() };
 
             DECLARE_SERIALIZABLE_FIELDS(
                 v("enable_position_smoothing", o.enable_position_smoothing);
@@ -63,7 +62,6 @@ namespace pose
                 v("dt_min_s",                  o.dt_min);
                 v("dt_max_s",                  o.dt_max);
                 v("enable_hinge_constraint",   o.enable_hinge_constraint);
-                v("hinge_axis",                o.hinge_axis_world);
             )
         };
 
@@ -98,10 +96,6 @@ namespace pose
         std::optional<Eigen::Vector3d> get_rest_position(joint_id_t j) const override;
 
         bool uses_smoothed_positions() const override { return _opt.enable_position_smoothing; }
-
-        // The leg hinge the IK swings every joint about, whether or not the 1-DOF constraint that
-        // names it is in force.
-        Eigen::Vector3d hinge_axis() const override { return _opt.hinge_axis_world; }
 
     private:
         struct context_t;

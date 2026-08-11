@@ -1,4 +1,4 @@
-#include "frontal_pose_estimator.hh"
+﻿#include "frontal_pose_estimator.hh"
 #include "hinge_angle.hh"
 #include "leg_ik.hh"
 
@@ -140,8 +140,8 @@ namespace pose
 
             const joint_id_t root = get_root_joint();
 
-            const std::optional<Eigen::Vector3d> hinge = _opt.enable_hinge_constraint
-                ? std::optional<Eigen::Vector3d>{ ik_normalize(_opt.hinge_axis_world) } : std::nullopt;
+            const auto hinge_axis = _opt.enable_hinge_constraint
+                ? std::make_optional(kRigLateralAxis) : std::nullopt;
 
             // Pelvis is the fixed base: identity animation, no flexion.
             _ctx->last_frame_joint_states[index_of(root)].local_anim_rot = Eigen::Quaterniond::Identity();
@@ -172,7 +172,7 @@ namespace pose
                     hip_pos.value(), knee_pos.value(), ankle_pos.value(), foot_pos.value(),
                     thigh_rest, shin_rest, foot_rest,
                     Eigen::Quaterniond::Identity(),
-                    hinge
+                    hinge_axis
                 );
 
                 // Bone->joint map (matches the rig it drives): knee joint drives the thigh, ankle the
@@ -183,16 +183,15 @@ namespace pose
 
                 // Flexion per joint, taken from the measured positions so the reading follows the
                 // observed bone directions. Each bone's turn since rest within the plane
-                // perpendicular to `hinge_axis_world` is its absolute angle; subtracting its parent
+                // perpendicular to `kRigLateralAxis` is its absolute angle; subtracting its parent
                 // bone's turn leaves the joint's own.
                 const Eigen::Vector3d thigh_dir = ik_normalize(knee_pos.value() - hip_pos.value());
                 const Eigen::Vector3d shin_dir = ik_normalize(ankle_pos.value() - knee_pos.value());
                 const Eigen::Vector3d foot_dir = ik_normalize(foot_pos.value() - ankle_pos.value());
 
-                const Eigen::Vector3d axis = _opt.hinge_axis_world;
-                const double d_thigh = hinge_plane_angle(thigh_rest, thigh_dir, axis);
-                const double d_shin = hinge_plane_angle(shin_rest, shin_dir, axis);
-                const double d_foot = hinge_plane_angle(foot_rest, foot_dir, axis);
+                const double d_thigh = hinge_plane_angle(thigh_rest, thigh_dir, kRigLateralAxis);
+                const double d_shin = hinge_plane_angle(shin_rest, shin_dir, kRigLateralAxis);
+                const double d_foot = hinge_plane_angle(foot_rest, foot_dir, kRigLateralAxis);
 
                 _ctx->last_frame_joint_states[index_of(knee)].absolute_sagittal_angle = d_thigh;
                 _ctx->last_frame_joint_states[index_of(ankle.value())].absolute_sagittal_angle = d_shin;

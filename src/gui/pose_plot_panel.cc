@@ -1,4 +1,4 @@
-#include "pose_plot_panel.hh"
+﻿#include "pose_plot_panel.hh"
 
 #include "pose/hinge_angle.hh"
 
@@ -212,9 +212,6 @@ namespace gui
         // Smoothed+held when the estimator smooths, raw when it does not.
         const bool smoothed_positions = est.uses_smoothed_positions();
 
-        // The axis these rotations were built about, so reading a flexion back out matches.
-        const Eigen::Vector3d hinge_axis = est.hinge_axis();
-
         // Running total of the rotation-derived flexion down each leg, which is the rig-frame
         // reading. `get_joint_defs()` lists a parent before its children, so one forward pass fills it.
         std::array<double, pose::kNumJoints> quat_angle_sum{};
@@ -228,7 +225,8 @@ namespace gui
             if (p.has_value()) { _pos_plot_buffers.push(ji, rig_to_display(p.value())); }
 
             const double quat_angle = st.local_anim_rot.has_value()
-                ? pose::quat_hinge_angle(st.local_anim_rot.value(), hinge_axis) : 0.0;
+                ? pose::quat_hinge_angle(st.local_anim_rot.value(), pose::pose_estimator_base::kRigLateralAxis) 
+                : 0.0;
             quat_angle_sum[ji] = pose::is_root_joint(def.joint_id)
                 ? quat_angle : quat_angle_sum[static_cast<std::size_t>(def.parent)] + quat_angle;
 

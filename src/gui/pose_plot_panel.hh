@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "plot_buffer.hh"
 
 #include "pose/joints_def.hh"
@@ -84,19 +84,22 @@ namespace gui
 
         plot_type_t _plot_type{ plot_type_t::raw_skeleton };
 
-        grid_plot_ui_t _pos_grid{};   // positions
-        grid_plot_ui_t _angle_grid{}; // sagittal_angles
-        bool _angle_relative{ true }; // draw each joint's turn from its parent bone, else its turn in the rig frame
+        grid_plot_ui_t _pos_plot_grid{};   // positions
+        grid_plot_ui_t _angle_plot_grid{}; // sagittal_angles
+        bool _angle_plot_relative{ true }; // draw each joint's turn from its parent bone, else its turn in the rig frame
 
         skeleton_plot_ui_t _raw_skel{};
         skeleton_plot_ui_t _rig_skel{};
         float _raw_skel_fk_bone_color[4]{ 0.95f, 0.85f, 0.20f, 1.0f }; // only the raw view draws a second skeleton
 
         std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints> _raw_skel_positions{};
-        plot_buffer<Eigen::Vector3f, pose::kNumJoints> _pos_bufs; // display-space positions
+        plot_buffer<Eigen::Vector3f, pose::kNumJoints> _pos_plot_buffers; // display-space positions
         // Flexion [deg], the pair (estimator's measured angle, the angle read back out of
         // `local_anim_rot`) twice over: channels 0-1 from the parent bone, 2-3 in the rig frame.
-        plot_buffer<Eigen::Vector4f, pose::kNumJoints> _angle_bufs;
+        plot_buffer<Eigen::Vector4f, pose::kNumJoints> _angle_plot_buffers;
+        // Newest sample of each, for the subplot titles: 
+        // the buffer's view is strided for plotting and does not hand a single value back.
+        std::array<std::optional<Eigen::Vector4f>, pose::kNumJoints> _latest_angles{};
 
         int _autofit_frames{ kAutofitFrames };
     };

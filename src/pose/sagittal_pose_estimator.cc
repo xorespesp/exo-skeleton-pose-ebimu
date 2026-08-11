@@ -17,6 +17,15 @@ namespace pose
             return get_leg_root_joint(side.value());
         }
 
+        // One frame's flexion of the tracked leg, as measured in the image plane. A step on the way
+        // to the per-joint state: the sign that carries these into the rig frame is applied after.
+        struct leg_angles_t
+        {
+            double hip{ 0.0 };   // thigh swing [rad]
+            double knee{ 0.0 };  // shin vs thigh [rad]
+            double ankle{ 0.0 }; // foot vs shin [rad]
+        };
+
         // Direction of the bone from `start` to `end` in the image plane.
         double bone_angle(const Eigen::Vector2d& start, const Eigen::Vector2d& end) {
             const Eigen::Vector2d d = end - start;
@@ -90,8 +99,6 @@ namespace pose
         // image plane into rig space). Held across frames so a frame that detects nothing keeps the
         // last answer.
         std::optional<joint_side_t> tracked_side;
-
-        std::optional<leg_angles_t> angles; // this frame's angles; empty until rest + full chain
     };
 
     sagittal_pose_estimator::sagittal_pose_estimator(const options_t& opt)
@@ -139,11 +146,6 @@ namespace pose
         return knee_of_side(_ctx->tracked_side);
     }
 
-    std::optional<sagittal_pose_estimator::leg_angles_t> sagittal_pose_estimator::leg_angles() const
-    {
-        return _ctx->angles;
-    }
-
     void sagittal_pose_estimator::update(
         const std::span<const joint_2d_measurement_t> measurements,
         const hw::timestamp_t sensor_timestamp)
@@ -155,7 +157,6 @@ namespace pose
         _ctx->last_frame_raw_px = {};
         _ctx->last_frame_px = {};
         _ctx->last_frame_detection_flags = {};
-        _ctx->angles.reset();
 
         // ----- Pass 1: which leg is in view -----
         // Only one leg is marked, so counting the sides of this frame's joints answers it outright.
@@ -305,7 +306,6 @@ namespace pose
                     states[at(ankle.value())].absolute_sagittal_angle = -side * d_shin;
                     states[at(foot.value())].absolute_sagittal_angle = -side * d_foot;
 
-                    _ctx->angles = a;
                 }
             }
         }
@@ -363,7 +363,6 @@ namespace pose
         _ctx->last_frame_px = {};
         _ctx->last_frame_detection_flags = {};
         _ctx->meters_per_pixel = 0.0;
-        _ctx->angles.reset();
 
         _ctx->tracked_side.reset();
     }

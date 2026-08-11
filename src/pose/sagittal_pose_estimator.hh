@@ -52,16 +52,6 @@ namespace pose
     class sagittal_pose_estimator final : public pose_estimator_base
     {
     public:
-        // Per-joint flexion relative to the rest pose, as measured in the image plane. These are the
-        // raw in-plane readings: the sign that carries them into the rig frame is applied separately,
-        // so a value here may run opposite to the rotation the same joint reports.
-        struct leg_angles_t
-        {
-            double hip{ 0.0 };   // thigh swing [rad]
-            double knee{ 0.0 };  // shin vs thigh [rad]
-            double ankle{ 0.0 }; // foot vs shin [rad]
-        };
-
         struct options_t
         {
             // --- position track (image-plane points) ---
@@ -132,10 +122,6 @@ namespace pose
         // empty until a leg joint has been measured. 
         // Its `get_joint_name()` identifies the side for an operator.
         std::optional<joint_id_t> tracked_leg_knee() const;
-
-        // This frame's joint angles for the tracked leg. Empty until a rest pose is captured and the
-        // whole chain is visible.
-        std::optional<leg_angles_t> leg_angles() const;
 
     private:
         // +1 or -1, applied wherever the image plane is carried into rig space.

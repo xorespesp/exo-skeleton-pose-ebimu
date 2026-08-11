@@ -153,7 +153,7 @@ namespace gui
         }
 
         // One square subplot per rig joint, packed to fill the panel or laid out at a fixed cell size.
-        template <typename _GetView>
+        template <typename _GetLabel, typename _GetView>
         void draw_joint_plot_grid(
             grid_plot_ui_t& g,
             float dpi_scale,
@@ -163,6 +163,7 @@ namespace gui
             const char* const* names,
             std::size_t first_channel,
             std::size_t channel_count,
+            _GetLabel&& get_label, // what each subplot shows above itself; its id stays the joint's
             _GetView&& get_view)
         {
             const int n = static_cast<int>(pose::kNumJoints);
@@ -188,7 +189,7 @@ namespace gui
             for (std::size_t i = 0; i < pose::kNumJoints; ++i)
             {
                 const auto name = pose::get_joint_name(static_cast<pose::joint_id_t>(i));
-                const std::string title = std::format("{}###{}", name, name);
+                const std::string title = std::format("{}###{}", get_label(i), name);
                 if (col != 0) { ImGui::SameLine(); }
                 ImGui::PushID(static_cast<int>(i));
                 ImGui::BeginGroup();
@@ -205,8 +206,8 @@ namespace gui
 
     void pose_plot_panel::push(const pose::pose_estimator_base& est, double t_now)
     {
-        _pos_bufs.advance(t_now);
-        _angle_bufs.advance(t_now);
+        _pos_plot_buffers.advance(t_now);
+        _angle_plot_buffers.advance(t_now);
 
         // Smoothed+held when the estimator smooths, raw when it does not.
         const bool smoothed_positions = est.uses_smoothed_positions();
@@ -224,7 +225,7 @@ namespace gui
             const auto& st = est.get_joint_state(def.joint_id);
             const std::optional<Eigen::Vector3d> p = smoothed_positions ? st.position : st.raw_position;
             _raw_skel_positions[ji] = p;
-            if (p.has_value()) { _pos_bufs.push(ji, rig_to_display(p.value())); }
+            if (p.has_value()) { _pos_plot_buffers.push(ji, rig_to_display(p.value())); }
 
             const double quat_angle = st.local_anim_rot.has_value()
                 ? pose::quat_hinge_angle(st.local_anim_rot.value(), hinge_axis) : 0.0;
@@ -234,12 +235,14 @@ namespace gui
             // Every trace comes from the same solved joint, so they are plotted only together.
             if (st.local_sagittal_angle.has_value() && st.absolute_sagittal_angle.has_value() && st.local_anim_rot.has_value())
             {
-                _angle_bufs.push(ji, Eigen::Vector4f{
+                const Eigen::Vector4f v{
                     static_cast<float>(st.local_sagittal_angle.value() * kRadToDeg),
                     static_cast<float>(quat_angle * kRadToDeg),
                     static_cast<float>(st.absolute_sagittal_angle.value() * kRadToDeg),
                     static_cast<float>(quat_angle_sum[ji] * kRadToDeg),
-                });
+                };
+                _angle_plot_buffers.push(ji, v);
+                _latest_angles[ji] = v;
             }
             ++ji;
         }
@@ -247,8 +250,9 @@ namespace gui
 
     void pose_plot_panel::reset()
     {
-        _pos_bufs.clear();
-        _angle_bufs.clear();
+        _pos_plot_buffers.clear();
+        _angle_plot_buffers.clear();
+        _latest_angles = {};
         _raw_skel_positions = {};
         _autofit_frames = kAutofitFrames;
     }
@@ -300,19 +304,19 @@ namespace gui
 
         case plot_type_t::positions:
             ImGui::SameLine();
-            draw_grid_range_controls(_pos_grid);
+            draw_grid_range_controls(_pos_plot_grid);
             break;
 
         case plot_type_t::sagittal_angles:
             ImGui::SameLine();
-            ImGui::Checkbox("Relative", &_angle_relative);
+            ImGui::Checkbox("Relative", &_angle_plot_relative);
             ImGui::SetItemTooltip("Which flexion the traces draw. Both are recorded, so toggling\n"
                                   "switches the view and keeps either history.\n"
                                   "On: each joint's turn from its parent bone (local_sagittal_angle).\n"
                                   "Off: the joint's own bone turn in the exo's frame\n"
                                   "     (absolute_sagittal_angle), the running total down the leg.");
             ImGui::SameLine();
-            draw_grid_range_controls(_angle_grid);
+            draw_grid_range_controls(_angle_plot_grid);
             break;
 
         default: throw std::runtime_error{ "unknown plot type" };
@@ -347,8 +351,8 @@ namespace gui
             break;
         }
 
-        case plot_type_t::positions:        draw_grid_layout_controls(_pos_grid); break;
-        case plot_type_t::sagittal_angles:  draw_grid_layout_controls(_angle_grid); break;
+        case plot_type_t::positions:        draw_grid_layout_controls(_pos_plot_grid); break;
+        case plot_type_t::sagittal_angles:  draw_grid_layout_controls(_angle_plot_grid); break;
 
         default: throw std::runtime_error{ "unknown plot type" };
         }
@@ -440,25 +444,27 @@ namespace gui
     void pose_plot_panel::_render_positions_plot(float dpi_scale)
     {
         constexpr float kYLo = -1.2f, kYHi = 1.2f; // default position range [m], display space
-        const ImPlotCond y_cond = (_pos_grid.lock || _pos_grid.reset) ? ImPlotCond_Always : ImPlotCond_Once;
+        const ImPlotCond y_cond = (_pos_plot_grid.lock || _pos_plot_grid.reset) ? ImPlotCond_Always : ImPlotCond_Once;
 
         // Plot space: rig X, rig Z, and -rig Y, which the 3D views label right / depth / up.
         const ImVec4 axis_col[3]{ { 0.95f, 0.35f, 0.35f, 1 }, { 0.45f, 0.85f, 0.45f, 1 }, { 0.45f, 0.55f, 0.95f, 1 } };
         const char* const axis_nm[3]{ "x", "y", "z" };
 
         draw_joint_plot_grid(
-            _pos_grid, dpi_scale, kYLo, kYHi, y_cond,
+            _pos_plot_grid, dpi_scale, kYLo, kYHi, y_cond,
             axis_col, axis_nm, /*first_channel*/0, /*channel_count*/3,
-            [this](std::size_t i) { return _pos_bufs.view(i); }
+            // A position is the joint's own, so the name alone says what the subplot holds.
+            [](std::size_t i) { return std::string{ pose::get_joint_name(static_cast<pose::joint_id_t>(i)) }; },
+            [this](std::size_t i) { return _pos_plot_buffers.view(i); }
         );
 
-        _pos_grid.reset = false;
+        _pos_plot_grid.reset = false;
     }
 
     void pose_plot_panel::_render_sagittal_angles_plot(float dpi_scale)
     {
         constexpr float kYLo = -90.0f, kYHi = 90.0f; // default flexion range [deg], frames a walk without clipping
-        const ImPlotCond y_cond = (_angle_grid.lock || _angle_grid.reset) ? ImPlotCond_Always : ImPlotCond_Once;
+        const ImPlotCond y_cond = (_angle_plot_grid.lock || _angle_plot_grid.reset) ? ImPlotCond_Always : ImPlotCond_Once;
 
         // "angle" is the estimator's, measured on the bone directions in the hinge plane, and is what
         // the protocol carries. "quat" is the turn a client recovers from `local_anim_rot` about the
@@ -468,15 +474,34 @@ namespace gui
             { 0.95f, 0.65f, 0.25f, 1 }, { 0.35f, 0.75f, 0.90f, 1 },
         };
         const char* const ch_nm[4]{ "angle", "quat", "angle", "quat" };
-        const std::size_t first_channel = _angle_relative ? 0u : 2u;
+        const std::size_t first_channel = _angle_plot_relative ? 0u : 2u;
+
+        // A joint's flexion turns the bone that ends at it, so each subplot names that bone rather
+        // than the joint alone, and carries the estimator's newest reading for it. The second line
+        // is always present so every cell keeps the same plot height.
+        const auto label = [this, first_channel](std::size_t i) {
+            const auto jid = static_cast<pose::joint_id_t>(i);
+            const auto name = pose::get_joint_name(jid);
+            const auto def = pose::get_joint_def(jid);
+
+            std::string s = (def.has_value() && !pose::is_root_joint(jid))
+                ? std::format("{} -- {}", name, pose::get_joint_name(def->parent))
+                : std::string{ name };
+
+            s += _latest_angles[i].has_value()
+                ? std::format("\n{:+.1f} deg", (*_latest_angles[i])[first_channel])
+                : std::string{ "\nn/a" };
+            return s;
+        };
 
         draw_joint_plot_grid(
-            _angle_grid, dpi_scale, kYLo, kYHi, y_cond,
+            _angle_plot_grid, dpi_scale, kYLo, kYHi, y_cond,
             ch_col, ch_nm, first_channel, /*channel_count*/2,
-            [this](std::size_t i) { return _angle_bufs.view(i); }
+            label,
+            [this](std::size_t i) { return _angle_plot_buffers.view(i); }
         );
 
-        _angle_grid.reset = false;
+        _angle_plot_grid.reset = false;
     }
 
     void pose_plot_panel::_render_skeleton_3d(

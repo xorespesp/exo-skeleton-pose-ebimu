@@ -1003,15 +1003,6 @@ namespace gui
             ImGui::SetItemTooltip("Read off the detected tag ids: only one leg carries tags.\n"
                                   "It also tells which side the camera stands on, hence which way\n"
                                   "the legs swing.");
-
-            const auto angles = est ? est->leg_angles() : std::nullopt;
-            if (angles.has_value()) {
-                ImGui::TextUnformatted(std::format("Hip   {:+7.2f} deg", angles->hip * kRadToDeg).c_str());
-                ImGui::TextUnformatted(std::format("Knee  {:+7.2f} deg", angles->knee * kRadToDeg).c_str());
-                ImGui::TextUnformatted(std::format("Ankle {:+7.2f} deg", angles->ankle * kRadToDeg).c_str());
-            } else {
-                ImGui::TextDisabled("Angles: n/a (needs a rest pose and the full chain visible)");
-            }
         }
 
         // ----- Position track (image-plane points; angles are read off them) -----

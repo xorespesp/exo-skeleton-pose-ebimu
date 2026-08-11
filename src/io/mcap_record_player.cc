@@ -68,13 +68,7 @@ namespace io
         if (!_opened) { return std::nullopt; }
 
         std::optional<recording_reader::frame_t> frame = _reader.fetch_next_frame(_stream_id);
-
-        if (!frame.has_value()) {
-            if (!_auto_repeat) { return std::nullopt; } // EOF; the provider reports the stream end
-            _reader.seek_timestamp(_stream_id, _reader.first_timestamp());
-            frame = _reader.fetch_next_frame(_stream_id);
-            if (!frame.has_value()) { return std::nullopt; }
-        }
+        if (!frame.has_value()) { return std::nullopt; } // EOF; what follows is the provider's to decide
 
         cv::Mat image = std::move(frame->image);
         if (_color_roi.has_value()) {
@@ -119,18 +113,6 @@ namespace io
     {
         std::scoped_lock lk{ _mtx };
         if (_opened) { _reader.seek_timestamp(_stream_id, timestamp); }
-    }
-
-    bool mcap_record_player::auto_repeat_enabled() const
-    {
-        std::scoped_lock lk{ _mtx };
-        return _auto_repeat;
-    }
-
-    void mcap_record_player::enable_auto_repeat(const bool enable)
-    {
-        std::scoped_lock lk{ _mtx };
-        _auto_repeat = enable;
     }
 
 } // namespace io

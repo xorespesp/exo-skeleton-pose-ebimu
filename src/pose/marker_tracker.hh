@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "color_marker_detector.hh"
 #include "joint_measurement.hh"
 #include "tag_detector.hh"
@@ -68,10 +68,10 @@ namespace pose
     // what a rest-pose capture means for it. A holder drives one without naming its kind, and
     // reaches a technology's own readouts by asking for that type.
     //
-    // Two threads share one tracker, and each member below says which it belongs to.
-    // `process_frame()` runs wherever frames arrive; everything else runs on the thread that steps
-    // the estimator. An implementation carries what has to cross in one guarded member and
-    // publishes it at the end of a frame, so a reader gets a whole frame's worth or nothing.
+    // Two threads share one tracker, and the sections below say which member belongs to which:
+    // one runs wherever frames arrive, the other on the thread that steps the estimator. An
+    // implementation carries what has to cross in one guarded member and publishes it at the end
+    // of a frame, so a reader gets a whole frame's worth or nothing.
     class marker_tracker_base
     {
     public:
@@ -124,8 +124,10 @@ namespace pose
         virtual void on_rest_pose_captured() {}
         virtual void on_rest_pose_cleared() {}
 
-        // Drop whatever is carried between frames. Called when the stream jumps or is replaced.
-        virtual void reset() {}
+        // The stream jumped to another position, so whatever this tracker followed from frame to
+        // frame describes where the stream no longer is. A technology whose markers state their
+        // own identity carries nothing across frames and has nothing to do here.
+        virtual void on_stream_reset() {}
 
     protected:
         marker_tracker_base() = default;
@@ -171,7 +173,6 @@ namespace pose
         bool try_get_3d_measurements(std::vector<joint_3d_measurement_t>& out, hw::timestamp_t& timestamp) override;
 
         std::size_t last_detection_count() const override;
-        void reset() override;
 
     private:
         const std::optional<hw::intrinsic_t> _intrinsics;
@@ -191,8 +192,8 @@ namespace pose
     // Colour markers
     // ---------------------------------------------------------------------------
     //
-    // A plain disc states nothing, so a second stage names it from where it sits among its
-    // neighbours. That stage carries state across frames and a reference latched at rest-pose
+    // A marker carries no identity of its own, so a second stage names it from where it sits among
+    // its neighbours. That stage carries state across frames and a reference latched at rest-pose
     // capture, both of which live on the estimator thread beside the calibration they follow.
     class color_marker_tracker final : public marker_tracker_base
     {
@@ -241,10 +242,9 @@ namespace pose
         std::size_t last_detection_count() const override;
         bool is_tracking() const override { return _assigner.stats().locked; }
 
-        void reset() override;
-
         void on_rest_pose_captured() override;
         void on_rest_pose_cleared() override;
+        void on_stream_reset() override;
 
     private:
         std::optional<color_marker_detector> _detector; // frame thread; rebuilt when `_dirty`

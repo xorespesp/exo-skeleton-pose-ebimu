@@ -148,6 +148,12 @@ namespace net
         // --- recording playback (no-op without an open recording source) ---------------
         bool is_source_paused() const;
         void set_source_paused(bool paused);
+
+        // Whether reaching the end starts the recording over. Off, playback stops there and a seek
+        // is what starts it going again.
+        bool is_auto_repeat_enabled() const;
+        void set_auto_repeat(bool enable);
+
         void seek_to_begin();
         void seek_to_end();
 

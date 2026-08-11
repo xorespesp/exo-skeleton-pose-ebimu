@@ -819,6 +819,14 @@ namespace gui
                     if (ImGui::Button("|<")) { pipe.seek_to_begin(); }
                     ImGui::SameLine();
                     if (ImGui::Button(">|")) { pipe.seek_to_end(); }
+                    ImGui::SameLine();
+                    if (bool loop = pipe.is_auto_repeat_enabled(); ImGui::Checkbox("Loop", &loop)) {
+                        pipe.set_auto_repeat(loop);
+                    }
+                    ImGui::SetItemTooltip("Off: playback stops at the end, and |< starts it again.\n"
+                                          "Each restart drops the tracking that described the last "
+                                          "position, so a colour tuned frame by frame is steadier "
+                                          "without it.");
                 }
 
                 this->_render_recording_status();

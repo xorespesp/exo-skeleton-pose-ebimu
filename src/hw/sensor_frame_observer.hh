@@ -23,7 +23,9 @@ namespace hw
         // NOTE: This method may be called from a worker thread.
         virtual void on_sensor_frame_update(const std::shared_ptr<sensor_frame>& new_sensor_frame) = 0;
 
-        // Called when the stream is reset (e.g., on playback start or seek).
+        // Called when the stream position jumps: a source being installed, a seek, or a recording
+        // starting over at its end. Raised where no frame of the old position can follow, so an
+        // observer drops what it carries between frames here and needs no test of its own.
         // NOTE: This method may be called from a worker thread.
         virtual void on_sensor_stream_reset() = 0;
 

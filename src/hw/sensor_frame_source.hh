@@ -47,9 +47,6 @@ namespace hw
         virtual void seek_begin() = 0;
         virtual void seek_end() = 0;
         virtual void seek_timestamp(timestamp_t timestamp) = 0;
-
-        virtual bool auto_repeat_enabled() const = 0;
-        virtual void enable_auto_repeat(bool enable) = 0;
     };
 
 } // namespace hw

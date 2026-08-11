@@ -457,6 +457,7 @@ struct joint_2d_measurement_t {
 | 필요한 프레임 | gray8 | bgr8 |
 | 관절 이름 붙이기 | `id` 표 조회 | `color_marker_assigner` |
 | rest pose 보정 때 | 없음 | 뼈 길이 기준 latch |
+| 스트림 점프 때 | 없음 | 배정기 |
 
 `pose_estimator_base`가 `update()`를 기반 클래스에서 뺀 이유가 정확히 이것이므로 이 코드베이스의
 관용에 맞는다.

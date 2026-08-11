@@ -38,9 +38,6 @@ namespace io
         void seek_end() override;
         void seek_timestamp(hw::timestamp_t timestamp) override;
 
-        bool auto_repeat_enabled() const override;
-        void enable_auto_repeat(bool enable) override;
-
     private:
         mutable std::mutex _mtx;
         recording_reader _reader;
@@ -51,7 +48,6 @@ namespace io
         std::optional<hw::roi_t> _color_roi; // nullopt: whole frames
         hw::timestamp_t _first_timestamp{};
         hw::timestamp_t _last_timestamp{};
-        bool _auto_repeat{ false };
     };
 
 } // namespace io

@@ -1,4 +1,4 @@
-#include "sensor_frame_provider.hh"
+﻿#include "sensor_frame_provider.hh"
 
 #include "backends/k4a_frame_source.hh"
 #ifdef EXO_HAS_VZ_BACKEND
@@ -11,6 +11,7 @@
 
 #include <exception>
 #include <format>
+#include <utility>
 #include <vector>
 
 namespace hw
@@ -72,7 +73,6 @@ namespace hw
             [](const recording_config_t& c) -> std::unique_ptr<sensor_frame_source> {
                 auto s = std::make_unique<io::mcap_record_player>();
                 if (!s->open(c.file)) { return nullptr; }
-                s->enable_auto_repeat(true);
                 return s;
             },
         }, config);
@@ -144,6 +144,11 @@ namespace hw
         _update_rate.store(0.0f);
         _paused.store(false);
         _need_repace.store(true);
+        {
+            // A seek posted for the source being replaced has nowhere to land.
+            std::scoped_lock lk{ _wake_cv_mtx };
+            _pending_seek_req.reset();
+        }
 
         {
             std::scoped_lock lk{ _source_mtx };
@@ -183,7 +188,8 @@ namespace hw
 
     void sensor_frame_provider::_stop_thread()
     {
-        _running.store(false);
+        { std::scoped_lock lk{ _wake_cv_mtx }; _running.store(false); }
+        _wake_cv.notify_all(); // out of whichever sleep it is in, rather than waiting the sleep out
         if (_thread.joinable())
         {
             _thread.join();
@@ -192,6 +198,38 @@ namespace hw
 
     void sensor_frame_provider::_polling_thread_proc()
     {
+        // Carries out a posted seek, if one is waiting. True when the position moved.
+        const auto apply_pending_seek = [this] {
+            std::optional<seek_request_t> request;
+            {
+                std::scoped_lock lk{ _wake_cv_mtx };
+                request = std::exchange(_pending_seek_req, std::nullopt);
+            }
+            if (!request.has_value()) { return false; }
+
+            std::scoped_lock lk{ _source_mtx };
+            if (!_player) { return false; } // a live camera has nowhere to seek to
+
+            switch (request->kind) {
+            case seek_request_t::kind_t::begin:    _player->seek_begin(); break;
+            case seek_request_t::kind_t::end:      _player->seek_end(); break;
+            case seek_request_t::kind_t::timeline: _player->seek_timestamp(request->at); break;
+            }
+            return true;
+        };
+
+        // Sleeps until `until`, waking early on a stop, a seek, or playback moving away from
+        // `paused_now`. Each is written under `_wake_cv_mtx`, so none of them is left to time out.
+        const auto sleep_until = [this](
+            const std::chrono::steady_clock::time_point until,
+            const bool paused_now)
+        {
+            std::unique_lock lk{ _wake_cv_mtx };
+            _wake_cv.wait_until(lk, until, [&] {
+                return !_running.load() || _pending_seek_req.has_value() || _paused.load() != paused_now;
+            });
+        };
+
         // Playback pacing anchor (recording playback only)
         bool anchor_set = false;
         std::chrono::steady_clock::time_point anchor_wall{};
@@ -201,12 +239,26 @@ namespace hw
         bool have_last_wall = false;
         std::chrono::steady_clock::time_point last_wall{};
 
+        // The stream has been sent back to its start and has yet to yield a frame.
+        bool restarted = false;
+
         while (_running.load())
         {
-            if (_paused.load())
+            // Only this thread moves the source, so the fetch below can only return the position
+            // seeked to here. The jump is announced ahead of that frame.
+            const bool seeked = apply_pending_seek();
+            if (seeked)
             {
                 _need_repace.store(true);
-                std::this_thread::sleep_for(kIdlePollSleep);
+                this->_notify_sensor_stream_reset();
+            }
+
+            // Paused with nothing asking for a frame. A seek does ask, which is what shows where
+            // it landed; one frame later the loop idles here again.
+            if (_paused.load() && !seeked)
+            {
+                _need_repace.store(true);
+                sleep_until(std::chrono::steady_clock::now() + kIdlePollSleep, true);
                 continue;
             }
 
@@ -221,17 +273,25 @@ namespace hw
 
             if (!fs.has_value())
             {
-                if (_player)
-                {
-                    // A recording returns nothing at EOF (auto-repeat off)
-                    spdlog::info("provider: end of recording stream");
-                    _notify_sensor_stream_end();
-                    _paused.store(true); // idle until close / seek / play
-                }
-                else
+                if (!_player)
                 {
                     spdlog::warn("provider: no frame from device (timeout), retrying");
+                    continue;
                 }
+
+                // Going around is a seek like any other, so the next pass carries it out. A restart
+                // that yields nothing says the recording holds nothing, so it ends instead.
+                if (_auto_repeat.load() && !restarted)
+                {
+                    restarted = true;
+                    spdlog::debug("provider: recording reached its end, starting over");
+                    this->_post_seek_request({ .kind = seek_request_t::kind_t::begin });
+                    continue;
+                }
+
+                spdlog::info("provider: end of recording stream");
+                this->_notify_sensor_stream_end();
+                this->pause(); // idle until close / seek / play
                 continue;
             }
 
@@ -242,6 +302,7 @@ namespace hw
                 continue;
             }
 
+            restarted = false; // the stream is delivering, so the next end is one to go around
             _frame_seq.fetch_add(1);
 
             // EMA fps (wall-clock based)
@@ -259,7 +320,7 @@ namespace hw
             last_wall = now;
             have_last_wall = true;
 
-            _notify_sensor_frame_update(new_frame);
+            this->_notify_sensor_frame_update(new_frame);
 
             // Pace playback to real-time * speed from the timestamps the frames carry.
             if (_player)
@@ -277,7 +338,7 @@ namespace hw
                     const double rel_ns = static_cast<double>((new_frame->timestamp() - anchor_ts).count()) / speed;
                     const auto target = anchor_wall + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                         std::chrono::duration<double, std::nano>{ rel_ns });
-                    std::this_thread::sleep_until(target);
+                    sleep_until(target, false);
                 }
             }
         }
@@ -307,30 +368,40 @@ namespace hw
     void sensor_frame_provider::play()
     {
         _need_repace.store(true);
-        _paused.store(false);
+        { std::scoped_lock lk{ _wake_cv_mtx }; _paused.store(false); }
+        _wake_cv.notify_all();
     }
 
     void sensor_frame_provider::pause()
     {
-        _paused.store(true);
+        { std::scoped_lock lk{ _wake_cv_mtx }; _paused.store(true); }
+        _wake_cv.notify_all();
     }
 
     void sensor_frame_provider::seek_recording_to_begin()
     {
-        std::scoped_lock lk{ _source_mtx };
-        if (_player) { _player->seek_begin(); _need_repace.store(true); }
+        this->_post_seek_request({ .kind = seek_request_t::kind_t::begin });
     }
 
     void sensor_frame_provider::seek_recording_to_end()
     {
-        std::scoped_lock lk{ _source_mtx };
-        if (_player) { _player->seek_end(); _need_repace.store(true); }
+        this->_post_seek_request({ .kind = seek_request_t::kind_t::end });
     }
 
     void sensor_frame_provider::seek_recording_timeline(const timestamp_t timestamp)
     {
-        std::scoped_lock lk{ _source_mtx };
-        if (_player) { _player->seek_timestamp(timestamp); _need_repace.store(true); }
+        this->_post_seek_request({ .kind = seek_request_t::kind_t::timeline, .at = timestamp });
+    }
+
+    void sensor_frame_provider::_post_seek_request(const seek_request_t& request)
+    {
+        {
+            // Overwritten rather than queued: a drag posts one of these per mouse move and only
+            // the position it ends on is worth reading frames from.
+            std::scoped_lock lk{ _wake_cv_mtx };
+            _pending_seek_req = request;
+        }
+        _wake_cv.notify_all();
     }
 
     std::chrono::nanoseconds sensor_frame_provider::get_recording_length() const
@@ -355,18 +426,6 @@ namespace hw
     {
         _speed.store(factor > 0.0f ? factor : 1.0f);
         _need_repace.store(true);
-    }
-
-    bool sensor_frame_provider::is_auto_repeat_enabled() const
-    {
-        std::scoped_lock lk{ _source_mtx };
-        return _player ? _player->auto_repeat_enabled() : false;
-    }
-
-    void sensor_frame_provider::set_auto_repeat(bool enable)
-    {
-        std::scoped_lock lk{ _source_mtx };
-        if (_player) { _player->enable_auto_repeat(enable); }
     }
 
 } // namespace hw

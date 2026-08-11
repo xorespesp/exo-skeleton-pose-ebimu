@@ -1,4 +1,4 @@
-#include "marker_tracker.hh"
+﻿#include "marker_tracker.hh"
 
 #include <spdlog/spdlog.h>
 
@@ -144,11 +144,6 @@ namespace pose
         }
 
         _latch.publish(std::move(found), timestamp);
-    }
-
-    void apriltag_tracker::reset()
-    {
-        _seen_tag_mask = 0;
     }
 
     bool apriltag_tracker::try_get_2d_measurements(
@@ -327,8 +322,10 @@ namespace pose
         _assigner.clear_reference(); // captured together, so dropped together
     }
 
-    void color_marker_tracker::reset()
+    void color_marker_tracker::on_stream_reset()
     {
+        // A marker carries no identity of its own, so the assigner names it from where its
+        // neighbours were last frame. Across a jump they were somewhere else entirely.
         _assigner.reset();
     }
 

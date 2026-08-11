@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "calibration.hh"
 #include "sensor_frame_source.hh"
 #include "sensor_frame_observer.hh"
@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -58,7 +59,9 @@ namespace hw
         void play();
         void pause();
 
-        // Recording sources only (no-op / 0 otherwise).
+        // Recording sources only (no-op / 0 otherwise). Posted for the polling thread to carry
+        // out, so a seek never lands between a frame being read and delivered, and each serves one
+        // frame of the position it lands on even while playback is paused. The newest post wins.
         void seek_recording_to_begin();
         void seek_recording_to_end();
         void seek_recording_timeline(timestamp_t timestamp);
@@ -70,10 +73,20 @@ namespace hw
         float get_update_speed() const { return _speed.load(); }
         void  set_update_speed(float factor);
 
-        bool is_auto_repeat_enabled() const;
-        void set_auto_repeat(bool enable);
+        // A recording reaching its end starts over instead of ending the stream. Playback policy,
+        // like pausing and speed, so it is answered here rather than by the file being played.
+        bool is_auto_repeat_enabled() const { return _auto_repeat.load(); }
+        void set_auto_repeat(bool enable) { _auto_repeat.store(enable); }
 
     private:
+        // What a posted seek asks for; the polling thread is what carries it out.
+        struct seek_request_t
+        {
+            enum class kind_t { begin, end, timeline };
+            kind_t kind{ kind_t::begin };
+            timestamp_t at{}; // `timeline` only
+        };
+
         void _install_source(
             std::unique_ptr<sensor_frame_source> source,
             source_backend_t source_backend,
@@ -84,6 +97,11 @@ namespace hw
         void _start_thread();
         void _stop_thread();
         void _polling_thread_proc();
+
+        // Leaves a seek for the polling thread, which is what carries it out. 
+        // Callable from anywhere, including that thread. 
+        // (a repeating recording posts one at its end, taking the same path an outside seek does)
+        void _post_seek_request(const seek_request_t& request);
 
         std::vector<std::shared_ptr<sensor_frame_observer>> _snapshot_observers() const;
         void _notify_sensor_frame_update(const std::shared_ptr<sensor_frame>& frame);
@@ -98,7 +116,14 @@ namespace hw
         std::thread _thread;
         std::atomic<bool> _running{ false };
         std::atomic<bool> _paused{ false };
+        std::atomic<bool> _auto_repeat{ true }; // a recording starts over at its end
         std::atomic<bool> _need_repace{ false }; // request playback pacing anchor reset
+
+        // A seek waiting to be carried out, and the wakeup that gets the polling thread to it
+        // without waiting out a sleep.
+        std::optional<seek_request_t> _pending_seek_req;
+        std::condition_variable _wake_cv;
+        mutable std::mutex _wake_cv_mtx;
 
         std::vector<std::shared_ptr<sensor_frame_observer>> _observers;
         mutable std::mutex _observers_mtx;

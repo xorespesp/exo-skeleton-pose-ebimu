@@ -69,6 +69,11 @@ namespace net
             return _stream_ended.exchange(false);
         }
 
+        // True once per stream-jump signal (consumes the latched flag).
+        bool consume_stream_reset_signal() noexcept {
+            return _stream_reset.exchange(false);
+        }
+
     public:
         void on_sensor_frame_update(const std::shared_ptr<hw::sensor_frame>& frame) override
         {
@@ -96,7 +101,12 @@ namespace net
             ++_seq;
         }
 
-        void on_sensor_stream_reset() override {}
+        void on_sensor_stream_reset() override {
+            // Called from the worker thread; what the jump invalidates is dropped on the estimator thread, 
+            // so this only raises the flag that poll() acts on.
+            _stream_reset = true;
+        }
+
         void on_sensor_stream_end() override {
             spdlog::debug("pipeline: worker signalled end of stream");
             _stream_ended = true;
@@ -111,6 +121,7 @@ namespace net
         cv::Mat _source; // the same capture undrawn, for anything reading original pixels
         uint64_t _seq{ 0 };
         std::atomic<bool> _stream_ended{ false }; // set by the worker thread on stream end
+        std::atomic<bool> _stream_reset{ false }; // set by the worker thread when the position jumps
     };
 
     // --- exo_pose_pipeline -------------------------------------------------------
@@ -518,23 +529,43 @@ namespace net
     {
         poll_result_t r{};
 
-        // Take the newest frame the tracker published and recompute joint states.
-        //
-        // update() is not part of the estimator base: each one takes the input its algorithm needs,
-        // so the tracker is asked for the shape the built estimator consumes, and answers false
-        // when it has nothing new or cannot produce that shape at all.
-        if (_tracker)
         {
-            if (std::vector<pose::joint_3d_measurement_t> m3;
-                _frontal && _tracker->try_get_3d_measurements(m3, _last_timestamp))
+            // Take the newest frame the tracker published, ahead of stepping the estimator on it.
+            //
+            // NOTE: `update()` is not part of the estimator base; each one takes the input its algorithm
+            // needs, so the tracker is asked for the shape the built estimator consumes, and answers
+            // false when it has nothing new or cannot produce that shape at all.
+            hw::timestamp_t taken_at{};
+            std::vector<pose::joint_3d_measurement_t> m3;
+            std::vector<pose::joint_2d_measurement_t> m2;
+            bool took_3d = false;
+            bool took_2d = false;
+            if (_tracker)
             {
+                took_3d = _frontal && _tracker->try_get_3d_measurements(m3, taken_at);
+                took_2d = !took_3d && _sagittal && _tracker->try_get_2d_measurements(m2, taken_at);
+            }
+
+            // The stream jumped. Reading this after the take is what makes the two agree: the
+            // frame thread raises it before publishing anything of the new position, so a step
+            // that took the first such frame is a step that sees it. What it took goes with it.
+            if (_observer && _observer->consume_stream_reset_signal())
+            {
+                spdlog::debug("pipeline: the stream position jumped; dropping what described the last one");
+                if (_tracker) { _tracker->on_stream_reset(); }
+                if (_active) { _active->reset_tracking(); }
+                took_3d = took_2d = false;
+            }
+
+            if (took_3d)
+            {
+                _last_timestamp = taken_at;
                 _frontal->update(m3, _last_timestamp);
                 r.new_pose = true;
             }
-            else if (
-                std::vector<pose::joint_2d_measurement_t> m2; 
-                _sagittal && _tracker->try_get_2d_measurements(m2, _last_timestamp))
+            else if (took_2d)
             {
+                _last_timestamp = taken_at;
                 _sagittal->update(m2, _last_timestamp);
                 r.new_pose = true;
             }
@@ -700,16 +731,24 @@ namespace net
         paused ? _provider->pause() : _provider->play();
     }
 
+    bool exo_pose_pipeline::is_auto_repeat_enabled() const
+    {
+        return _provider && _provider->is_auto_repeat_enabled();
+    }
+
+    void exo_pose_pipeline::set_auto_repeat(bool enable)
+    {
+        if (!_provider) { return; }
+        spdlog::info("pipeline: playback {} at the end of the recording",
+            enable ? "starts over" : "stops");
+        _provider->set_auto_repeat(enable);
+    }
+
     void exo_pose_pipeline::seek_to_begin()
     {
         if (!_provider) { return; }
         spdlog::info("pipeline: seek to the beginning of the recording");
         _provider->seek_recording_to_begin();
-
-        // The jump lands the exo somewhere else entirely, so neither the filters nor the assigner's
-        // predicted marker positions describe the frame that arrives next.
-        if (_active) { _active->reset_tracking(); }
-        if (_tracker) { _tracker->reset(); }
     }
 
     void exo_pose_pipeline::seek_to_end()
@@ -717,9 +756,6 @@ namespace net
         if (!_provider) { return; }
         spdlog::info("pipeline: seek to the end of the recording");
         _provider->seek_recording_to_end();
-
-        if (_active) { _active->reset_tracking(); }
-        if (_tracker) { _tracker->reset(); }
     }
 
 } // namespace net

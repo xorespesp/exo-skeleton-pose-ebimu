@@ -32,6 +32,16 @@ namespace net { class exo_pose_server; }
 
 namespace gui
 {
+    // What the camera window is open for. One canvas and one mouse, so one at a time: each tool
+    // takes the whole frame, and two of them live would fight over every drag. The window renders
+    // only the tool it was opened with, so this is what it dispatches on and never a mode to pick.
+    enum class view_tool_t
+    {
+        none,         // the window is closed
+        color_sample, // dragging feeds the pixels under the cursor to the colour sampler
+        roi_edit,     // the pending ROI is drawn over the frame and dragged into place
+    };
+
     // Debugger GUI for the pose server: starts/stops the WebSocket listener and drives the pose
     // pipeline (source open/close, rest-pose calibration) while visualizing the annotated frame
     // and the per-joint 3D positions / reconstructed skeleton. Owns the server; the listener starts stopped.
@@ -79,9 +89,22 @@ namespace gui
         // through the config profile, like every other control on this panel.
         void _render_color_model_section(pose::color_marker_tracker& tracker);
 
+        // The one place a drag lands on the frame: the panel's preview and the fullscreen view
+        // only display. Renders whichever tool it was opened with, never a choice between them.
+        void _render_camera_window();
+        void _render_color_sample_tools(pose::color_marker_tracker& tracker);
+        bool _render_roi_tools(); // false once there is no source left to place an ROI in
+
         // Feeds the pixels under the cursor to the colour sampler, over the camera view drawn
         // between `img_min` and `img_max`.
         void _handle_color_sample_click(const ImVec2& img_min, const ImVec2& img_max);
+
+        // The pending ROI over that same view: dragging the interior moves it, the corner grips
+        // resize it, and the overlay dims what it would cut away. The view shows the ROI in force
+        // while the pending one is in full-frame pixels, so `_shown_window()` rebases between them.
+        void _handle_roi_interaction(const ImVec2& img_min, const ImVec2& img_max);
+        void _draw_roi_overlay(const ImVec2& img_min, const ImVec2& img_max);
+        hw::roi_t _shown_window() const; // the part of the full frame the camera view covers
 
         // Fits the collected samples and installs the result on the running tracker, so the next
         // frame is classified by what was just measured.
@@ -104,15 +127,16 @@ namespace gui
             // view / visualization
             bool camera_fullscreen{ false };
 
+            // What the camera window is open for; `none` is what closed means.
+            view_tool_t view_tool{ view_tool_t::none };
+
             // colour sampling (the panel that measures this installation's colour)
-            bool color_sampling{ false }; // clicking the camera view feeds the sampler
             int color_sample_radius{ 6 }; // pixels collected around each click [px]
             double color_max_distance{ 3.0 }; // how far into the fitted ellipse still counts
             int color_backdrop{ 0 };      // 0 camera, 1 mask, 2 membership score
 
-            // ROI being composed. The fields mirror what the source took until someone edits them,
-            // and go back to mirroring once that edit is applied or the source changes.
-            bool roi_edit_dirty{ false };
+            // ROI being composed, in full-frame pixels. Live only while `roi_edit` is the tool:
+            // entering seeds them from what the source took, and Apply or Cancel leaves.
             int roi_size[2]{ 0, 0 };
             int roi_offset[2]{ 0, 0 };
 

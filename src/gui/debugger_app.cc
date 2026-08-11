@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <format>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace gui
@@ -71,6 +72,9 @@ namespace gui
         constexpr float kLogMinH = 60.0f;  // min height for both the content and log panes [px]
         constexpr float kPlotMinW = 200.0f; // min width for the plots pane [px]
         constexpr float kSideMinW = 200.0f; // min width for the control pane [px]
+
+        constexpr float kRoiGrip = 18.0f;      // edge/corner grip band on the camera view [px]
+        constexpr float kRoiMinExtent = 16.0f; // smallest ROI a drag can leave [full-frame px]
 
     } // namespace
 
@@ -170,7 +174,6 @@ namespace gui
                 const ImVec2 cur = ImGui::GetCursorPos();
                 ImGui::SetCursorPos(ImVec2{ cur.x + (avail.x - sz.x) * 0.5f, cur.y + (avail.y - sz.y) * 0.5f });
                 ImGui::Image(_frame_texture.value().id(), sz);
-                this->_handle_color_sample_click(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
             }
         }
         else
@@ -208,6 +211,7 @@ namespace gui
         if (req.load_config) { this->_do_load_config(*req.load_config); }
         if (req.open_source) { this->_open_source(); }
 
+        this->_render_camera_window();
         this->_render_record_dialog();
 
         _recording_save_browser.Display();
@@ -249,7 +253,7 @@ namespace gui
         }
 
         _last_seq = 0;
-        _ui.roi_edit_dirty = false; // an unapplied edit describes the source being replaced
+        _ui.view_tool = view_tool_t::none; // a live tool describes the source being replaced
         _plot_panel.reset(); // the new source does not continue the plotted samples
     }
 
@@ -337,7 +341,7 @@ namespace gui
     {
         _server->pipeline().close_source();
         _last_seq = 0;
-        _ui.roi_edit_dirty = false;
+        _ui.view_tool = view_tool_t::none;
         _plot_panel.reset();
     }
 
@@ -470,7 +474,6 @@ namespace gui
                 {
                     const float scale = ImGui::GetContentRegionAvail().x / _frame_texture.value().width();
                     ImGui::Image(_frame_texture.value().id(), ImVec2{ _frame_texture.value().width() * scale, _frame_texture.value().height() * scale });
-                    this->_handle_color_sample_click(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
                 }
                 else
                 {
@@ -669,47 +672,30 @@ namespace gui
             return;
         }
 
-        // Absent an edit the fields mirror what the source took, which lands a frame or more after
-        // an apply: they then show the increments it snapped to, or the old ROI if it refused.
         const std::optional<hw::roi_t> effective = pipe.effective_roi();
-        if (!_ui.roi_edit_dirty)
-        {
-            _ui.roi_size[0] = effective ? effective->width : full.x();
-            _ui.roi_size[1] = effective ? effective->height : full.y();
-            _ui.roi_offset[0] = effective ? effective->x : 0;
-            _ui.roi_offset[1] = effective ? effective->y : 0;
-        }
-
-        const int extent = std::max(full.x(), full.y());
-        if (ImGui::DragInt2("size##roi", _ui.roi_size, 8.0f, 1, extent)) { _ui.roi_edit_dirty = true; }
-        if (ImGui::DragInt2("offset##roi", _ui.roi_offset, 8.0f, 0, extent)) { _ui.roi_edit_dirty = true; }
-        ImGui::SetItemTooltip("Top-left corner of the ROI within the full frame.");
-
-        // A recording declares one frame size for the whole file, so the pipeline refuses a move
-        // while one is being written.
-        ImGui::BeginDisabled(pipe.is_recording());
-        if (ImGui::Button("Apply ROI"))
-        {
-            pipe.set_roi(hw::roi_t{ _ui.roi_offset[0], _ui.roi_offset[1], _ui.roi_size[0], _ui.roi_size[1] });
-            _ui.roi_edit_dirty = false;
-        }
-        ImGui::SetItemTooltip("Narrow delivered frames to this region. A camera reads out and sends\n"
-                              "less of the sensor, and detection has less to search.\n"
-                              "A sagittal run loses its captured rest pose with it.");
-        ImGui::SameLine();
-        if (ImGui::Button("Full Frame"))
-        {
-            pipe.set_roi(std::nullopt);
-            _ui.roi_edit_dirty = false;
-        }
-        ImGui::EndDisabled();
-
         ImGui::Text("In force: %dx%d+%d+%d"
             , effective ? effective->width : full.x()
             , effective ? effective->height : full.y()
             , effective ? effective->x : 0
             , effective ? effective->y : 0
         );
+
+        // Placing one takes seeing the frame, so the rect and its numbers live over the camera
+        // window. A recording declares one frame size for the file, so there is nothing to compose.
+        ImGui::SameLine();
+        ImGui::BeginDisabled(pipe.is_recording());
+        if (ImGui::Button("Edit..."))
+        {
+            _ui.roi_size[0] = effective ? effective->width : full.x();
+            _ui.roi_size[1] = effective ? effective->height : full.y();
+            _ui.roi_offset[0] = effective ? effective->x : 0;
+            _ui.roi_offset[1] = effective ? effective->y : 0;
+            _ui.view_tool = view_tool_t::roi_edit;
+        }
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("Opens the camera window with the ROI drawn over the frame:\n"
+                              "the interior moves it, a corner resizes it.\n"
+                              "Nothing reaches the source until Apply.");
     }
 
     void debugger_app::_render_frontal_estimator_control(pose::frontal_pose_estimator::options_t& opt)
@@ -768,7 +754,7 @@ namespace gui
     // from the undrawn frame: the overlay sits on the markers and would contribute its own pixels.
     void debugger_app::_handle_color_sample_click(const ImVec2& img_min, const ImVec2& img_max)
     {
-        if (!_ui.color_sampling || _last_source_frame.empty()) { return; }
+        if (_last_source_frame.empty()) { return; }
         if (!ImGui::IsItemHovered() || !ImGui::IsMouseDown(ImGuiMouseButton_Left)) { return; }
 
         const float span_x = img_max.x - img_min.x;
@@ -787,6 +773,343 @@ namespace gui
         const float r = static_cast<float>(_ui.color_sample_radius) * span_x
                       / static_cast<float>(_last_source_frame.cols);
         dl->AddCircle(m, std::max(3.0f, r), IM_COL32(255, 255, 0, 220), 0, 2.0f);
+    }
+
+    void debugger_app::_render_color_sample_tools(pose::color_marker_tracker& tracker)
+    {
+        constexpr double kDistMin = 0.5, kDistMax = 8.0;
+
+        const char* const backdrops[] = { "camera", "mask", "membership score" };
+        ImGui::SetNextItemWidth(180.0f);
+        ImGui::Combo("Backdrop", &_ui.color_backdrop, backdrops, IM_ARRAYSIZE(backdrops));
+        ImGui::SetItemTooltip(
+            "camera            the frame with the detections drawn on it.\n"
+            "mask              white where the classifier accepted the pixel.\n"
+            "membership score  bright where it is sure, dark where it barely passed.\n"
+            "\n"
+            "The last two say why a marker is or is not being found, and cost a frame's\n"
+            "worth of pixels copied per frame, so they are only produced while shown.");
+
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(180.0f);
+        ImGui::SliderInt("Radius", &_ui.color_sample_radius, 2, 40, "%d px");
+        ImGui::SetItemTooltip("Radius of the disc each click collects.\n"
+                              "Keep it inside the marker: one pixel of background widens the\n"
+                              "spread far more than a hundred good ones narrow it.");
+
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(180.0f);
+        ImGui::SliderScalar("Max distance", ImGuiDataType_Double, &_ui.color_max_distance,
+                            &kDistMin, &kDistMax, "%.2f");
+        ImGui::SetItemTooltip(
+            "How many standard deviations from the fitted mean still count as the marker.\n"
+            "Normally distributed, 2.0 covers about 86%% of the samples and 3.0 about 99%%.\n"
+            "\n"
+            "Applied by the next Fit.\n"
+            "Higher: survives shadow, admits background of a similar hue.\n"
+            "Lower: only the colour it was sampled at.");
+
+        const bool enough = _color_sampler.count() >= pose::color_sampler::kMinSamples;
+        ImGui::Text("samples %zu (need %zu)", _color_sampler.count(), pose::color_sampler::kMinSamples);
+        ImGui::SetItemTooltip("Pixels collected so far. The minimum is what a 2D covariance needs\n"
+                              "to exist at all; a model worth keeping wants thousands.");
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!enough);
+        if (ImGui::Button("Fit model")) { this->_do_fit_color_model(tracker); }
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("Computes the mean and covariance of the collected samples and\n"
+                              "installs them on the running detector, so the next frame is\n"
+                              "classified by them. Disabled until enough samples exist.");
+
+        ImGui::SameLine();
+        // Only the samples go. The installed model stays in force, so detection keeps running.
+        if (ImGui::Button("Clear samples")) { _color_sampler.clear(); }
+        ImGui::SetItemTooltip("Discards the collected samples. The installed model stays until the\n"
+                              "next Fit, so detection keeps running while you resample.");
+
+        ImGui::TextDisabled("Drag over a marker to collect. Sample it across the whole swing, not "
+                            "in one pose: the spread has to cover the light it moves through.");
+    }
+
+    bool debugger_app::_render_roi_tools()
+    {
+        net::exo_pose_pipeline& pipe = _server->pipeline();
+
+        const Eigen::Vector2i full = pipe.source_full_resolution();
+        if (full.x() <= 0 || full.y() <= 0) { return false; } // nothing left to place an ROI in
+
+        const int extent = std::max(full.x(), full.y());
+        ImGui::SetNextItemWidth(180.0f);
+        ImGui::DragInt2("size", _ui.roi_size, 8.0f, 1, extent);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(180.0f);
+        ImGui::DragInt2("offset", _ui.roi_offset, 8.0f, 0, extent);
+        ImGui::SetItemTooltip("Top-left corner of the ROI within the full frame.");
+
+        if (ImGui::Button("Apply"))
+        {
+            pipe.set_roi(hw::roi_t{ _ui.roi_offset[0], _ui.roi_offset[1], _ui.roi_size[0], _ui.roi_size[1] });
+            _ui.view_tool = view_tool_t::none;
+        }
+        ImGui::SetItemTooltip("Narrow delivered frames to this region. A camera reads out and sends\n"
+                              "less of the sensor, and detection has less to search.\n"
+                              "A sagittal run loses its captured rest pose with it.");
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) { _ui.view_tool = view_tool_t::none; }
+        ImGui::SameLine();
+        if (ImGui::Button("Full Frame"))
+        {
+            pipe.set_roi(std::nullopt);
+            _ui.view_tool = view_tool_t::none;
+        }
+
+        // The reference the rect above is being composed against.
+        const std::optional<hw::roi_t> effective = pipe.effective_roi();
+        ImGui::SameLine();
+        ImGui::TextDisabled("in force: %dx%d+%d+%d"
+            , effective ? effective->width : full.x()
+            , effective ? effective->height : full.y()
+            , effective ? effective->x : 0
+            , effective ? effective->y : 0
+        );
+        return true;
+    }
+
+    void debugger_app::_render_camera_window()
+    {
+        if (_ui.view_tool == view_tool_t::none) { return; }
+
+        net::exo_pose_pipeline& pipe = _server->pipeline();
+
+        // The tool names the window; the id after ### is fixed, so size and position survive it.
+        const char* title = (_ui.view_tool == view_tool_t::color_sample)
+            ? "Sample Colour###camera_tool" : "Edit ROI###camera_tool";
+
+        bool open = true;
+        ImGui::SetNextWindowSize(ImVec2{ 900.0f, 720.0f }, ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin(title, &open))
+        {
+            ImGui::End();
+            if (!open) { _ui.view_tool = view_tool_t::none; }
+            return;
+        }
+
+        bool tool_alive = true;
+        switch (_ui.view_tool)
+        {
+        case view_tool_t::color_sample:
+            if (auto* color_tracker = dynamic_cast<pose::color_marker_tracker*>(pipe.tracker())) {
+                this->_render_color_sample_tools(*color_tracker);
+            } else {
+                tool_alive = false; // the tracker it measures for is not the one running
+            }
+            break;
+        case view_tool_t::roi_edit:
+            tool_alive = this->_render_roi_tools();
+            break;
+        case view_tool_t::none:
+        default:
+            break;
+        }
+        ImGui::Separator();
+
+        if (!pipe.is_source_open() || !_frame_texture.value().valid())
+        {
+            ImGui::TextDisabled("Waiting for sensor frames...");
+            ImGui::End();
+            if (!open) { _ui.view_tool = view_tool_t::none; }
+            return;
+        }
+
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        const float tw = static_cast<float>(_frame_texture.value().width());
+        const float th = static_cast<float>(_frame_texture.value().height());
+        const float scale = std::min(avail.x / tw, avail.y / th);
+        if (scale > 0.0f)
+        {
+            ImGui::Image(_frame_texture.value().id(), ImVec2{ tw * scale, th * scale });
+            const ImVec2 img_min = ImGui::GetItemRectMin();
+            const ImVec2 img_max = ImGui::GetItemRectMax();
+
+            // The one place a tool submits hit areas, so two cannot claim the same drag.
+            switch (_ui.view_tool)
+            {
+            case view_tool_t::color_sample:
+                this->_handle_color_sample_click(img_min, img_max);
+                break;
+            case view_tool_t::roi_edit:
+                this->_handle_roi_interaction(img_min, img_max);
+                this->_draw_roi_overlay(img_min, img_max);
+                break;
+            case view_tool_t::none:
+            default:
+                break;
+            }
+        }
+
+        ImGui::End();
+
+        // A tool outliving its canvas would leave the panel showing an edit nothing can reach.
+        if (!open || !tool_alive) { _ui.view_tool = view_tool_t::none; }
+    }
+
+    hw::roi_t debugger_app::_shown_window() const
+    {
+        const net::exo_pose_pipeline& pipe = _server->pipeline();
+        if (const std::optional<hw::roi_t> roi = pipe.effective_roi()) { return *roi; }
+
+        const Eigen::Vector2i full = pipe.source_full_resolution();
+        return hw::roi_t{ 0, 0, full.x(), full.y() };
+    }
+
+    void debugger_app::_handle_roi_interaction(const ImVec2& img_min, const ImVec2& img_max)
+    {
+        const hw::roi_t shown = this->_shown_window();
+        if (shown.is_empty()) { return; }
+
+        const float sx = (img_max.x - img_min.x) / static_cast<float>(shown.width);
+        const float sy = (img_max.y - img_min.y) / static_cast<float>(shown.height);
+        if (!(sx > 0.0f) || !(sy > 0.0f)) { return; }
+
+        const auto to_screen = [&](float x, float y) {
+            return ImVec2{ img_min.x + (x - static_cast<float>(shown.x)) * sx,
+                           img_min.y + (y - static_cast<float>(shown.y)) * sy };
+        };
+
+        float x0 = static_cast<float>(_ui.roi_offset[0]);
+        float y0 = static_cast<float>(_ui.roi_offset[1]);
+        float x1 = x0 + static_cast<float>(_ui.roi_size[0]);
+        float y1 = y0 + static_cast<float>(_ui.roi_size[1]);
+
+        const ImVec2 p0 = to_screen(x0, y0);
+        const ImVec2 p1 = to_screen(x1, y1);
+        const ImVec2 saved_cursor = ImGui::GetCursorScreenPos();
+        const ImVec2 io_delta = ImGui::GetIO().MouseDelta;
+        bool changed = false;
+
+        // Hit areas reaching past the image would grow the window, so every one is clamped to it.
+        const auto submit = [&](const char* id, ImVec2 lo, ImVec2 hi, ImGuiMouseCursor cursor) {
+            lo = ImVec2{ std::clamp(lo.x, img_min.x, img_max.x), std::clamp(lo.y, img_min.y, img_max.y) };
+            hi = ImVec2{ std::clamp(hi.x, img_min.x, img_max.x), std::clamp(hi.y, img_min.y, img_max.y) };
+            if (hi.x - lo.x < 1.0f || hi.y - lo.y < 1.0f) { return false; }
+
+            ImGui::SetCursorScreenPos(lo);
+            ImGui::InvisibleButton(id, ImVec2{ hi.x - lo.x, hi.y - lo.y });
+            if (ImGui::IsItemHovered() || ImGui::IsItemActive()) { ImGui::SetMouseCursor(cursor); }
+            return ImGui::IsItemActive();
+        };
+
+        // ImGui gives an overlap to whichever item claimed the hover first, so the move region is
+        // held short of the border band rather than submitted under it: covering the band would
+        // take every grip below with it.
+        constexpr float h = kRoiGrip * 0.5f;
+        bool moved = false;
+        if (submit("##roi_move", ImVec2{ p0.x + h, p0.y + h }, ImVec2{ p1.x - h, p1.y - h },
+                   ImGuiMouseCursor_ResizeAll))
+        {
+            const float dx = io_delta.x / sx, dy = io_delta.y / sy;
+            x0 += dx; x1 += dx; y0 += dy; y1 += dy;
+            changed = true;
+            moved = true;
+        }
+
+        // One table for all eight: an edge names the single coordinate it drags, a corner both.
+        struct handle_t { const char* id; ImVec2 lo, hi; float* x; float* y; ImGuiMouseCursor cursor; };
+        const handle_t handles[] = {
+            { "##roi_l",  { p0.x - h, p0.y     }, { p0.x + h, p1.y     }, &x0, nullptr, ImGuiMouseCursor_ResizeEW },
+            { "##roi_r",  { p1.x - h, p0.y     }, { p1.x + h, p1.y     }, &x1, nullptr, ImGuiMouseCursor_ResizeEW },
+            { "##roi_t",  { p0.x,     p0.y - h }, { p1.x,     p0.y + h }, nullptr, &y0, ImGuiMouseCursor_ResizeNS },
+            { "##roi_b",  { p0.x,     p1.y - h }, { p1.x,     p1.y + h }, nullptr, &y1, ImGuiMouseCursor_ResizeNS },
+            { "##roi_tl", { p0.x - h, p0.y - h }, { p0.x + h, p0.y + h }, &x0, &y0, ImGuiMouseCursor_ResizeNWSE },
+            { "##roi_tr", { p1.x - h, p0.y - h }, { p1.x + h, p0.y + h }, &x1, &y0, ImGuiMouseCursor_ResizeNESW },
+            { "##roi_bl", { p0.x - h, p1.y - h }, { p0.x + h, p1.y + h }, &x0, &y1, ImGuiMouseCursor_ResizeNESW },
+            { "##roi_br", { p1.x - h, p1.y - h }, { p1.x + h, p1.y + h }, &x1, &y1, ImGuiMouseCursor_ResizeNWSE },
+        };
+        for (const handle_t& g : handles)
+        {
+            if (!submit(g.id, g.lo, g.hi, g.cursor)) { continue; }
+            if (g.x) { *g.x += io_delta.x / sx; }
+            if (g.y) { *g.y += io_delta.y / sy; }
+            changed = true;
+        }
+
+        // A zero-size item validates the restored cursor; ImGui asserts on the extent without it.
+        ImGui::SetCursorScreenPos(saved_cursor);
+        ImGui::Dummy(ImVec2{ 0.0f, 0.0f });
+
+        if (!changed) { return; }
+
+        const Eigen::Vector2i full = _server->pipeline().source_full_resolution();
+        const float max_w = static_cast<float>(full.x());
+        const float max_h = static_cast<float>(full.y());
+
+        if (moved)
+        {
+            // A move keeps the size, so the frame edge stops the rect rather than eating into it:
+            // the offset is what gets clamped and the extents ride along.
+            const float w = x1 - x0, hgt = y1 - y0;
+            x0 = std::clamp(x0, 0.0f, std::max(0.0f, max_w - w));
+            y0 = std::clamp(y0, 0.0f, std::max(0.0f, max_h - hgt));
+            x1 = x0 + w;
+            y1 = y0 + hgt;
+        }
+        else
+        {
+            // A grip can drag one edge past the other: normalize, then hold each inside the frame.
+            // The source snaps to its own increments on apply, so nothing rounds here.
+            if (x1 < x0) { std::swap(x0, x1); }
+            if (y1 < y0) { std::swap(y0, y1); }
+
+            x0 = std::clamp(x0, 0.0f, max_w - kRoiMinExtent);
+            y0 = std::clamp(y0, 0.0f, max_h - kRoiMinExtent);
+            x1 = std::clamp(x1, x0 + kRoiMinExtent, max_w);
+            y1 = std::clamp(y1, y0 + kRoiMinExtent, max_h);
+        }
+
+        _ui.roi_offset[0] = static_cast<int>(x0);
+        _ui.roi_offset[1] = static_cast<int>(y0);
+        _ui.roi_size[0] = static_cast<int>(x1 - x0);
+        _ui.roi_size[1] = static_cast<int>(y1 - y0);
+    }
+
+    void debugger_app::_draw_roi_overlay(const ImVec2& img_min, const ImVec2& img_max)
+    {
+        const hw::roi_t shown = this->_shown_window();
+        if (shown.is_empty()) { return; }
+
+        const float sx = (img_max.x - img_min.x) / static_cast<float>(shown.width);
+        const float sy = (img_max.y - img_min.y) / static_cast<float>(shown.height);
+
+        ImVec2 p0{
+            img_min.x + static_cast<float>(_ui.roi_offset[0] - shown.x) * sx,
+            img_min.y + static_cast<float>(_ui.roi_offset[1] - shown.y) * sy
+        };
+        ImVec2 p1{ p0.x + static_cast<float>(_ui.roi_size[0]) * sx,
+                   p0.y + static_cast<float>(_ui.roi_size[1]) * sy };
+        p0.x = std::clamp(p0.x, img_min.x, img_max.x);
+        p0.y = std::clamp(p0.y, img_min.y, img_max.y);
+        p1.x = std::clamp(p1.x, img_min.x, img_max.x);
+        p1.y = std::clamp(p1.y, img_min.y, img_max.y);
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        constexpr ImU32 kDim = IM_COL32(0, 0, 0, 120);
+        constexpr ImU32 kMark = IM_COL32(255, 210, 0, 255);
+        dl->AddRectFilled(img_min, ImVec2{ img_max.x, p0.y }, kDim);              // above
+        dl->AddRectFilled(ImVec2{ img_min.x, p1.y }, img_max, kDim);              // below
+        dl->AddRectFilled(ImVec2{ img_min.x, p0.y }, ImVec2{ p0.x, p1.y }, kDim); // left
+        dl->AddRectFilled(ImVec2{ p1.x, p0.y }, ImVec2{ img_max.x, p1.y }, kDim); // right
+        dl->AddRect(p0, p1, kMark, 0.0f, ImDrawFlags_None, 2.0f);
+
+        // Corner grips, matching the hit areas in `_handle_roi_interaction()`.
+        for (const ImVec2& c : { p0, ImVec2{ p1.x, p0.y }, ImVec2{ p0.x, p1.y }, p1 }) {
+            dl->AddRectFilled(ImVec2{ c.x - kRoiGrip * 0.5f, c.y - kRoiGrip * 0.5f },
+                              ImVec2{ c.x + kRoiGrip * 0.5f, c.y + kRoiGrip * 0.5f }, kMark);
+        }
+
+        const std::string label = std::format("{} x {} @ {},{}",
+            _ui.roi_size[0], _ui.roi_size[1], _ui.roi_offset[0], _ui.roi_offset[1]);
+        dl->AddText(ImVec2{ p0.x + 6.0f, p0.y + 4.0f }, kMark, label.c_str());
     }
 
     void debugger_app::_do_fit_color_model(pose::color_marker_tracker& tracker)
@@ -816,8 +1139,6 @@ namespace gui
     {
         ImGui::SeparatorText("Color Model");
 
-        const double kColorDistMin = 0.5, kColorDistMax = 8.0;
-
         const pose::color_model_t model = tracker.detector_options().model;
         if (model.valid) {
             ImGui::Text("model       a*%+.1f b*%+.1f  sd %.1f/%.1f  d<%.1f",
@@ -832,58 +1153,14 @@ namespace gui
             "on the a*b* plane. It is measured here and kept in the config, under\n"
             "pose.detector.color_marker.calibration.");
 
-        // ----- What the camera view shows while sampling -----
-        const char* const backdrops[] = { "camera", "mask", "membership score" };
-        ImGui::Combo("Backdrop", &_ui.color_backdrop, backdrops, IM_ARRAYSIZE(backdrops));
-        ImGui::SetItemTooltip(
-            "camera            the frame with the detections drawn on it.\n"
-            "mask              white where the classifier accepted the pixel.\n"
-            "membership score  bright where it is sure, dark where it barely passed.\n"
-            "\n"
-            "The last two say why a marker is or is not being found, and cost a frame's\n"
-            "worth of pixels copied per frame, so they are only produced while shown.");
-
-        // ----- Collecting samples -----
-        ImGui::Checkbox("Sample on click", &_ui.color_sampling);
-        ImGui::SetItemTooltip(
-            "Dragging over the camera view collects the pixels under the cursor.\n"
-            "\n"
-            "Sample the marker across the whole swing, not in one pose: the spread this\n"
-            "fits has to cover the light the marker actually moves through, shadowed side\n"
-            "included. Fullscreen (F11) makes the marker easier to hit.");
-
-        ImGui::SliderInt("Sample radius", &_ui.color_sample_radius, 2, 40, "%d px");
-        ImGui::SetItemTooltip("Radius of the disc each click collects.\n"
-                              "Keep it inside the marker: one pixel of background widens the\n"
-                              "spread far more than a hundred good ones narrow it.");
-
-        const bool enough = _color_sampler.count() >= pose::color_sampler::kMinSamples;
-        ImGui::Text("samples     %zu  (need %zu)", _color_sampler.count(), pose::color_sampler::kMinSamples);
-        ImGui::SetItemTooltip("Pixels collected so far. The minimum is what a 2D covariance needs\n"
-                              "to exist at all; a model worth keeping wants thousands.");
-
-        ImGui::SliderScalar("Max distance", ImGuiDataType_Double, &_ui.color_max_distance,
-                            &kColorDistMin, &kColorDistMax, "%.2f");
-        ImGui::SetItemTooltip(
-            "How many standard deviations from the fitted mean still count as the marker.\n"
-            "Normally distributed, 2.0 covers about 86%% of the samples and 3.0 about 99%%.\n"
-            "\n"
-            "Applied by the next Fit.\n"
-            "Higher: survives shadow, admits background of a similar hue.\n"
-            "Lower: only the colour it was sampled at.");
-
-        ImGui::BeginDisabled(!enough);
-        if (ImGui::Button("Fit model")) { this->_do_fit_color_model(tracker); }
-        ImGui::EndDisabled();
-        ImGui::SetItemTooltip("Computes the mean and covariance of the collected samples and\n"
-                              "installs them on the running detector, so the next frame is\n"
-                              "classified by them. Disabled until enough samples exist.");
-
-        ImGui::SameLine();
-        // Only the samples go. The installed model stays in force, so detection keeps running.
-        if (ImGui::Button("Clear samples")) { _color_sampler.clear(); }
-        ImGui::SetItemTooltip("Discards the collected samples. The installed model stays until the\n"
-                              "next Fit, so detection keeps running while you resample.");
+        // Measuring it takes dragging over a marker on the frame, so the sampling controls sit
+        // with the frame in the camera window.
+        if (ImGui::Button("Sample..."))
+        {
+            _ui.view_tool = view_tool_t::color_sample;
+        }
+        ImGui::SetItemTooltip("Opens the camera window with the sampler live: drag over a marker\n"
+                              "to collect the pixels under the cursor, then fit them into a model.");
     }
 
     void debugger_app::_render_color_marker_control(pose::color_marker_tracker& tracker)

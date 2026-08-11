@@ -66,6 +66,7 @@ namespace gui
         void _render_control_panel();
 
         // Estimator tuning, one function per viewing plane.
+        void _render_roi_control();
         void _render_frontal_estimator_control(pose::frontal_pose_estimator::options_t& opt);
         void _render_sagittal_estimator_control(pose::sagittal_pose_estimator::options_t& opt);
 
@@ -108,6 +109,12 @@ namespace gui
             int color_sample_radius{ 6 }; // pixels collected around each click [px]
             double color_max_distance{ 3.0 }; // how far into the fitted ellipse still counts
             int color_backdrop{ 0 };      // 0 camera, 1 mask, 2 membership score
+
+            // ROI being composed. The fields mirror what the source took until someone edits them,
+            // and go back to mirroring once that edit is applied or the source changes.
+            bool roi_edit_dirty{ false };
+            int roi_size[2]{ 0, 0 };
+            int roi_offset[2]{ 0, 0 };
 
             // record dialog
             bool record_dlg_show{ false };

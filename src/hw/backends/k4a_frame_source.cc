@@ -100,7 +100,7 @@ namespace hw
     bool k4a_device_capturer::open(
         const uint32_t device_index,
         const color_controls_t& controls,
-        const frame_format_t color_format) noexcept try
+        const frame_format_t frame_format) noexcept try
     {
         std::scoped_lock lk{ _mtx };
         if (_device) { throw std::runtime_error{ "k4a_device_capturer: already opened" }; }
@@ -168,12 +168,12 @@ namespace hw
         _config = config;
         _calib = k4a_to_calibration(k4a_calib);
         _serialnum = std::move(serialnum);
-        _color_format = color_format;
-        _color_roi.reset();
+        _frame_format = frame_format;
+        _roi.reset();
 
         spdlog::info("k4a device opened (S/N: {}, {})"
             , _serialnum.empty() ? "<unknown>" : _serialnum
-            , frame_format_to_str(_color_format)
+            , frame_format_to_str(_frame_format)
         );
         return true;
     }
@@ -199,7 +199,7 @@ namespace hw
         }
     }
 
-    std::optional<roi_t> k4a_device_capturer::try_set_color_roi(const roi_t& roi)
+    std::optional<roi_t> k4a_device_capturer::try_set_roi(const roi_t& roi)
     {
         std::scoped_lock lk{ _mtx };
 
@@ -210,8 +210,8 @@ namespace hw
 
         if (clipped.is_empty()) { return std::nullopt; }
 
-        _color_roi = clipped;
-        return _color_roi;
+        _roi = clipped;
+        return _roi;
     }
 
     std::optional<sensor_frameset> k4a_device_capturer::fetch_next_sensor_frameset()
@@ -243,8 +243,8 @@ namespace hw
 
         // Make a new sensor frameset and return it. (deep copied)
         return sensor_frameset{ std::make_shared<sensor_frame>(
-            k4a_color_to_mat(color, _color_format, _color_roi),
-            _color_format,
+            k4a_color_to_mat(color, _frame_format, _roi),
+            _frame_format,
             _clock_anchor.to_unix(color.get_device_timestamp())
         ) };
     }

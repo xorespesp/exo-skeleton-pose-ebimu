@@ -42,12 +42,19 @@ namespace hw
         source_backend_t get_source_backend() const { return _source_backend; }
         const std::string& get_source_name() const { return _source_name; }
 
-        // Describes the images observers actually receive, not the raw sensor:
+        // Describes the images observers actually receive, not the raw sensor: 
         // an ROI shifts the principal point and shrinks the resolution these report.
-        const calibration_t& get_calibration() const { return _calib; }
-        Eigen::Vector2i get_color_frame_resolution() const { return _color_frame_resolution; }
-        frame_format_t get_color_format() const { return _color_format; }
-        std::optional<roi_t> get_color_roi() const { return _color_roi; } // nullopt: whole frames
+        calibration_t get_calibration() const;
+        
+        frame_format_t get_frame_format() const { return _frame_format; }
+        Eigen::Vector2i get_frame_resolution() const;
+        Eigen::Vector2i get_full_frame_resolution() const;
+
+        std::optional<roi_t> get_effective_roi() const; // nullopt: whole frames
+
+        // Narrows delivered images to `roi`, whole frames when empty. Applied between frames, and a
+        // camera may snap it to its own increments, so `get_effective_roi()` can differ.
+        void set_roi(const std::optional<roi_t>& roi);
 
         float get_current_update_rate() const { return _update_rate.load(); } // EMA-smoothed fps
 
@@ -87,12 +94,30 @@ namespace hw
             timestamp_t at{}; // `timeline` only
         };
 
+        // What a posted ROI asks for. Wrapped so that "nothing posted" stays distinct from a
+        // request to restore whole frames.
+        struct roi_request_t
+        {
+            std::optional<roi_t> window; // empty: whole frames
+        };
+
         void _install_source(
             std::unique_ptr<sensor_frame_source> source,
             source_backend_t source_backend,
             std::string source_name,
             const std::optional<roi_t>& requested_roi
         );
+
+        // The only writer of the frame geometry, so it cannot change behind a caller's back.
+        // Announcing the change is the caller's, since an open already says it.
+        void _install_frame_geometry(
+            sensor_frame_source& source, 
+            const std::optional<roi_t>& requested_roi
+        );
+
+        // Carries out a posted ROI, if one is waiting. True when the pixel frame actually changed,
+        // which a request the source refused or snapped onto the ROI already in force does not.
+        bool _apply_pending_roi();
 
         void _start_thread();
         void _stop_thread();
@@ -106,6 +131,7 @@ namespace hw
         std::vector<std::shared_ptr<sensor_frame_observer>> _snapshot_observers() const;
         void _notify_sensor_frame_update(const std::shared_ptr<sensor_frame>& frame);
         void _notify_sensor_stream_reset();
+        void _notify_sensor_frame_geometry_changed();
         void _notify_sensor_stream_end();
 
     private:
@@ -119,22 +145,28 @@ namespace hw
         std::atomic<bool> _auto_repeat{ true }; // a recording starts over at its end
         std::atomic<bool> _need_repace{ false }; // request playback pacing anchor reset
 
-        // A seek waiting to be carried out, and the wakeup that gets the polling thread to it
-        // without waiting out a sleep.
+        // A seek or an ROI waiting to be carried out, and the wakeup that gets the polling thread
+        // to them without waiting out a sleep. The newest post of each wins.
         std::optional<seek_request_t> _pending_seek_req;
+        std::optional<roi_request_t> _pending_roi_req;
         std::condition_variable _wake_cv;
         mutable std::mutex _wake_cv_mtx;
 
         std::vector<std::shared_ptr<sensor_frame_observer>> _observers;
         mutable std::mutex _observers_mtx;
 
-        // Cached at open(); immutable while streaming.
+        // Written by `_install_frame_geometry()` alone: at open, and again on a posted ROI. The
+        // polling thread is one of those writers, so they are published and read under a lock.
+        mutable std::mutex _geometry_mtx;
         calibration_t _calib{};
-        Eigen::Vector2i _color_frame_resolution{ Eigen::Vector2i::Zero() };
+        Eigen::Vector2i _frame_resolution{ Eigen::Vector2i::Zero() };
+        Eigen::Vector2i _full_frame_resolution{ Eigen::Vector2i::Zero() };
+        std::optional<roi_t> _roi; // ROI in force
+
+        // Cached at open(); immutable while streaming.
         source_backend_t _source_backend{};
         std::string _source_name;
-        frame_format_t _color_format{};
-        std::optional<roi_t> _color_roi; // ROI in force
+        frame_format_t _frame_format{};
 
         std::atomic<uint32_t> _frame_seq{ 0 };
         std::atomic<float> _update_rate{ 0.0f };

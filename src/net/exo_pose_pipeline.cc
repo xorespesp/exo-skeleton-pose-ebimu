@@ -74,6 +74,11 @@ namespace net
             return _stream_reset.exchange(false);
         }
 
+        // True once per geometry-change signal (consumes the latched flag).
+        bool consume_frame_geometry_signal() noexcept {
+            return _frame_geometry_changed.exchange(false);
+        }
+
     public:
         void on_sensor_frame_update(const std::shared_ptr<hw::sensor_frame>& frame) override
         {
@@ -81,30 +86,34 @@ namespace net
             // drawn on. Detection publishes itself; nothing comes back to be latched.
             cv::Mat annotated;
             if (_annotate) {
-                if (frame->color_format() == hw::frame_format_t::gray8) {
-                    cv::cvtColor(frame->color_image(), annotated, cv::COLOR_GRAY2BGR);
+                if (frame->format() == hw::frame_format_t::gray8) {
+                    cv::cvtColor(frame->image(), annotated, cv::COLOR_GRAY2BGR);
                 } else {
-                    annotated = frame->color_image().clone();
+                    annotated = frame->image().clone();
                 }
             }
 
             _tracker->process_frame(
-                frame->color_image(), 
-                frame->color_format(), 
+                frame->image(), 
+                frame->format(), 
                 frame->timestamp(),
                 _annotate ? &annotated : nullptr
             );
 
             std::scoped_lock lk{ _mtx };
             _annotated = std::move(annotated);
-            _source = frame->color_image();
+            _source = frame->image();
             ++_seq;
         }
 
         void on_sensor_stream_reset() override {
-            // Called from the worker thread; what the jump invalidates is dropped on the estimator thread, 
+            // Called from the worker thread; what the jump invalidates is dropped on the estimator thread,
             // so this only raises the flag that poll() acts on.
             _stream_reset = true;
+        }
+
+        void on_sensor_frame_geometry_changed() override {
+            _frame_geometry_changed = true;
         }
 
         void on_sensor_stream_end() override {
@@ -122,6 +131,7 @@ namespace net
         uint64_t _seq{ 0 };
         std::atomic<bool> _stream_ended{ false }; // set by the worker thread on stream end
         std::atomic<bool> _stream_reset{ false }; // set by the worker thread when the position jumps
+        std::atomic<bool> _frame_geometry_changed{ false }; // ... and when the ROI changes
     };
 
     // --- exo_pose_pipeline -------------------------------------------------------
@@ -175,13 +185,13 @@ namespace net
 
         const std::optional<int32_t> exposure_us = config.camera.exposure_us;
         const std::optional<int32_t> gain = config.camera.gain;
-        const std::optional<hw::roi_t> color_roi = config.camera.roi;
+        const std::optional<hw::roi_t> roi = config.camera.roi;
 
         this->stop_recording();
 
         // A recording ignores this and replays the layout it was written with, which is what makes
         // a gray recording opened under a color profile something the tracker has to refuse.
-        const auto kCameraColorFormat = app::marker_frame_format(marker_kind);
+        const auto kCameraFrameFormat = app::marker_frame_format(marker_kind);
 
         hw::source_config_t source_config;
         if (source_addr.is_k4a_device())
@@ -190,8 +200,8 @@ namespace net
                 .device_index = source_addr.k4a_device_index(),
                 .exposure_us = exposure_us,
                 .gain = gain,
-                .color_format = kCameraColorFormat,
-                .color_roi = color_roi,
+                .frame_format = kCameraFrameFormat,
+                .roi = roi,
             };
         }
         else if (source_addr.is_vz_device())
@@ -200,8 +210,8 @@ namespace net
                 .device_index = source_addr.vz_device_index(),
                 .exposure_us = to_optional_double(exposure_us),
                 .gain = to_optional_double(gain),
-                .color_format = kCameraColorFormat,
-                .color_roi = color_roi,
+                .frame_format = kCameraFrameFormat,
+                .roi = roi,
             };
 
             if (!config.camera.intrinsics_file.empty())
@@ -228,7 +238,7 @@ namespace net
         {
             source_config = hw::recording_config_t{
                 .file = source_addr.recording_path(),
-                .color_roi = color_roi,
+                .roi = roi,
             };
         }
 
@@ -238,7 +248,7 @@ namespace net
             , source_addr.to_string()
             , pose::view_plane_name(view_plane)
             , app::marker_kind_name(marker_kind)
-            , hw::frame_format_to_str(kCameraColorFormat)
+            , hw::frame_format_to_str(kCameraFrameFormat)
             , exposure_us.has_value() ? std::format("{} us", exposure_us.value()) : "auto"
             , gain.has_value() ? std::format("{}", gain.value()) : "auto"
         );
@@ -264,7 +274,7 @@ namespace net
         std::optional<hw::intrinsic_t> intrinsics;
         if (view_plane == pose::view_plane_t::frontal)
         {
-            if (const hw::intrinsic_t& intr = new_provider->get_calibration().intrinsic;
+            if (const hw::intrinsic_t intr = new_provider->get_calibration().intrinsic;
                 intr.fx > 0.0f && intr.fy > 0.0f) {
                 intrinsics = intr;
             } else {
@@ -290,7 +300,7 @@ namespace net
 
             // The blob gates are counted in pixels, so they only mean what they meant if a marker
             // still covers as many of them. A different frame size moves every one of them at once.
-            if (const Eigen::Vector2i frame_resolution = new_provider->get_color_frame_resolution();
+            if (const Eigen::Vector2i frame_resolution = new_provider->get_frame_resolution();
                 calibration.has_value() && calibration->frame_resolution != frame_resolution)
             {
                 spdlog::warn("pipeline: the color was measured on {}x{} frames but this source "
@@ -338,7 +348,7 @@ namespace net
         _active->reset_tracking();  // and its position filters/held points must not carry over
         _frame_log.reset();
 
-        const auto res = _provider->get_color_frame_resolution();
+        const auto res = _provider->get_frame_resolution();
         spdlog::info("pipeline: {} '{}' opened ({}x{} color, {} estimator); rest pose cleared, awaiting first frame",
             kind, _provider->get_source_name(), res.x(), res.y(), pose::view_plane_name(_view_plane));
         return true;
@@ -390,7 +400,7 @@ namespace net
         const io::camera_stream_info_t color_stream_info{
             .stream_name = "color0", // first color stream
             .calibration = _provider->get_calibration(),
-            .color_format = _provider->get_color_format(),
+            .color_format = _provider->get_frame_format(),
             .source_backend = _provider->get_source_backend(),
             .source_name = _provider->get_source_name(),
             .exposure_us = _exposure_us,
@@ -557,6 +567,12 @@ namespace net
                 took_3d = took_2d = false;
             }
 
+            if (_observer && _observer->consume_frame_geometry_signal())
+            {
+                spdlog::debug("pipeline: the ROI changed; dropping what described the last one");
+                if (_active) { _active->on_frame_geometry_changed(); }
+            }
+
             if (took_3d)
             {
                 _last_timestamp = taken_at;
@@ -698,7 +714,30 @@ namespace net
 
     Eigen::Vector2i exo_pose_pipeline::source_resolution() const
     {
-        return _provider ? _provider->get_color_frame_resolution() : Eigen::Vector2i::Zero();
+        return _provider ? _provider->get_frame_resolution() : Eigen::Vector2i::Zero();
+    }
+
+    Eigen::Vector2i exo_pose_pipeline::source_full_resolution() const
+    {
+        return _provider ? _provider->get_full_frame_resolution() : Eigen::Vector2i::Zero();
+    }
+
+    std::optional<hw::roi_t> exo_pose_pipeline::effective_roi() const
+    {
+        return _provider ? _provider->get_effective_roi() : std::nullopt;
+    }
+
+    void exo_pose_pipeline::set_roi(const std::optional<hw::roi_t>& roi)
+    {
+        if (!_provider) { return; }
+
+        // A recording declares one calibration up front, frame size included, so the frames that
+        // follow have to keep it.
+        if (this->is_recording()) {
+            spdlog::error("pipeline: cannot move the ROI while a recording is being written");
+            return;
+        }
+        _provider->set_roi(roi);
     }
 
     float exo_pose_pipeline::source_fps() const

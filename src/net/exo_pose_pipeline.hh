@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "app_config.hh"
 #include "source_address.hh"
 
@@ -131,8 +131,20 @@ namespace net
         hw::source_backend_t source_backend() const;
         std::string source_name() const;
         Eigen::Vector2i source_resolution() const;
+        Eigen::Vector2i source_full_resolution() const;
         float source_fps() const;
         std::optional<hw::intrinsic_t> intrinsics() const; // color intrinsics of the open source (empty if none)
+
+        // --- ROI ----------------------------------------------------------------------
+
+        // The window in force, which a camera may have snapped to its own increments or refused
+        // outright. nullopt: whole frames.
+        std::optional<hw::roi_t> effective_roi() const;
+
+        // Narrows delivered images, or restores whole frames when empty. Takes effect between
+        // frames, and the estimator drops whatever it held in the old pixel frame.
+        // Refused while a recording is being written, which declares one frame size for the file.
+        void set_roi(const std::optional<hw::roi_t>& roi);
 
         // Position of the newest frame in the open source's stream; restarts on every open.
         uint32_t current_frame_seq() const;

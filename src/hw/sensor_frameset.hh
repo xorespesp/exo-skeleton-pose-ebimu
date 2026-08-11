@@ -10,15 +10,15 @@ namespace hw
     class sensor_frameset final
     {
     public:
-        explicit sensor_frameset(std::shared_ptr<sensor_frame> color_frame)
-            : _color_frame{ std::move(color_frame) }
+        explicit sensor_frameset(std::shared_ptr<sensor_frame> frame)
+            : _frame{ std::move(frame) }
         { }
 
-        // Null when the capture carried no colour image.
-        const std::shared_ptr<sensor_frame>& color_frame() const noexcept { return _color_frame; }
+        // Null when the capture carried no image.
+        const std::shared_ptr<sensor_frame>& frame() const noexcept { return _frame; }
 
     private:
-        std::shared_ptr<sensor_frame> _color_frame;
+        std::shared_ptr<sensor_frame> _frame;
     };
 
 } // namespace hw

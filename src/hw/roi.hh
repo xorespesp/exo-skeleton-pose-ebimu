@@ -15,6 +15,8 @@ namespace hw
 
         bool is_empty() const { return width <= 0 || height <= 0; }
 
+        bool operator==(const roi_t&) const = default;
+
         DECLARE_SERIALIZABLE_FIELDS(
             v("x",      o.x);
             v("y",      o.y);

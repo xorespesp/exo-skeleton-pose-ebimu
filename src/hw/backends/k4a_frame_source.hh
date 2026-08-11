@@ -48,17 +48,17 @@ namespace hw
         [[nodiscard]] bool open(
             uint32_t device_index,
             const color_controls_t& controls = {},
-            frame_format_t color_format = frame_format_t::bgr8 // what delivered frames carry
+            frame_format_t frame_format = frame_format_t::bgr8 // what delivered frames carry
         ) noexcept;
 
         bool is_valid() const override;
         void close() override;
 
         const calibration_t& get_calibration() const override { return _calib; }
-        frame_format_t get_color_format() const override { return _color_format; }
+        frame_format_t get_frame_format() const override { return _frame_format; }
 
         // NOTE: The k4a device supports no hardware ROI, so this is a software crop.
-        std::optional<roi_t> try_set_color_roi(const roi_t& roi) override;
+        std::optional<roi_t> try_set_roi(const roi_t& roi) override;
 
         [[nodiscard]] std::optional<sensor_frameset> fetch_next_sensor_frameset() override;
 
@@ -68,8 +68,8 @@ namespace hw
         k4a_device_configuration_t _config{ K4A_DEVICE_CONFIG_INIT_DISABLE_ALL };
         calibration_t _calib{};
         std::string _serialnum;
-        frame_format_t _color_format{ frame_format_t::bgr8 };
-        std::optional<roi_t> _color_roi; // nullopt: whole frames
+        frame_format_t _frame_format{ frame_format_t::bgr8 };
+        std::optional<roi_t> _roi; // nullopt: whole frames
         clock_anchor_t _clock_anchor;    // maps the device clock onto Unix time
     };
 

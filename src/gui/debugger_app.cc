@@ -249,6 +249,7 @@ namespace gui
         }
 
         _last_seq = 0;
+        _ui.roi_edit_dirty = false; // an unapplied edit describes the source being replaced
         _plot_panel.reset(); // the new source does not continue the plotted samples
     }
 
@@ -293,6 +294,11 @@ namespace gui
         net::exo_pose_pipeline& pipe = _server->pipeline();
         app::app_config_t& config = _server->config();
 
+        // The ROI the source took, not the one that was asked for: a camera snaps a request to its
+        // own increments and can refuse it, and the file should say what actually ran. With nothing
+        // open there is no such answer, so the loaded value stands.
+        if (pipe.is_source_open()) { config.camera.roi = pipe.effective_roi(); }
+
         // Only the running tracker has live values to read back; the other kind's block keeps
         // whatever the config profile was loaded with.
         if (auto* tag_tracker = dynamic_cast<pose::apriltag_tracker*>(pipe.tracker())) {
@@ -331,6 +337,7 @@ namespace gui
     {
         _server->pipeline().close_source();
         _last_seq = 0;
+        _ui.roi_edit_dirty = false;
         _plot_panel.reset();
     }
 
@@ -538,6 +545,8 @@ namespace gui
         // Tuning section: everything a config profile carries, ending in the save that writes it.
         if (ImGui::CollapsingHeader("Tuning", ImGuiTreeNodeFlags_DefaultOpen))
         {
+            this->_render_roi_control();
+
             // ----- Tag detection tuning (live; the worker rebuilds the detector on change) -----
             // Shown only while the tag tracker is the one running, since these knobs describe it.
             if (auto* tag_tracker = dynamic_cast<pose::apriltag_tracker*>(pipe.tracker()))
@@ -645,6 +654,62 @@ namespace gui
                                       "tuning in this section. Nothing under Session is written.");
             }
         }
+    }
+
+    void debugger_app::_render_roi_control()
+    {
+        net::exo_pose_pipeline& pipe = _server->pipeline();
+
+        ImGui::SeparatorText("ROI");
+
+        const Eigen::Vector2i full = pipe.source_full_resolution();
+        if (full.x() <= 0 || full.y() <= 0)
+        {
+            ImGui::TextDisabled("Open a source to place an ROI.");
+            return;
+        }
+
+        // Absent an edit the fields mirror what the source took, which lands a frame or more after
+        // an apply: they then show the increments it snapped to, or the old ROI if it refused.
+        const std::optional<hw::roi_t> effective = pipe.effective_roi();
+        if (!_ui.roi_edit_dirty)
+        {
+            _ui.roi_size[0] = effective ? effective->width : full.x();
+            _ui.roi_size[1] = effective ? effective->height : full.y();
+            _ui.roi_offset[0] = effective ? effective->x : 0;
+            _ui.roi_offset[1] = effective ? effective->y : 0;
+        }
+
+        const int extent = std::max(full.x(), full.y());
+        if (ImGui::DragInt2("size##roi", _ui.roi_size, 8.0f, 1, extent)) { _ui.roi_edit_dirty = true; }
+        if (ImGui::DragInt2("offset##roi", _ui.roi_offset, 8.0f, 0, extent)) { _ui.roi_edit_dirty = true; }
+        ImGui::SetItemTooltip("Top-left corner of the ROI within the full frame.");
+
+        // A recording declares one frame size for the whole file, so the pipeline refuses a move
+        // while one is being written.
+        ImGui::BeginDisabled(pipe.is_recording());
+        if (ImGui::Button("Apply ROI"))
+        {
+            pipe.set_roi(hw::roi_t{ _ui.roi_offset[0], _ui.roi_offset[1], _ui.roi_size[0], _ui.roi_size[1] });
+            _ui.roi_edit_dirty = false;
+        }
+        ImGui::SetItemTooltip("Narrow delivered frames to this region. A camera reads out and sends\n"
+                              "less of the sensor, and detection has less to search.\n"
+                              "A sagittal run loses its captured rest pose with it.");
+        ImGui::SameLine();
+        if (ImGui::Button("Full Frame"))
+        {
+            pipe.set_roi(std::nullopt);
+            _ui.roi_edit_dirty = false;
+        }
+        ImGui::EndDisabled();
+
+        ImGui::Text("In force: %dx%d+%d+%d"
+            , effective ? effective->width : full.x()
+            , effective ? effective->height : full.y()
+            , effective ? effective->x : 0
+            , effective ? effective->y : 0
+        );
     }
 
     void debugger_app::_render_frontal_estimator_control(pose::frontal_pose_estimator::options_t& opt)

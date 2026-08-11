@@ -15,13 +15,13 @@ namespace hw
     {
     public:
         sensor_frame(
-            cv::Mat color_image,
-            frame_format_t color_format,
+            cv::Mat image,
+            frame_format_t format,
             timestamp_t timestamp)
             : _timestamp{ timestamp }
             // NOTE: `isSubmatrix()` is true for a view, false for a full matrix. The latter can be moved out; the former must be copied.
-            , _color_image{ color_image.isSubmatrix() ? color_image.clone() : std::move(color_image) }
-            , _color_format{ color_format }
+            , _image{ image.isSubmatrix() ? image.clone() : std::move(image) }
+            , _format{ format }
         { }
 
         sensor_frame(const sensor_frame&) = delete;
@@ -33,16 +33,16 @@ namespace hw
         // The instant the source captured this frame.
         timestamp_t timestamp() const noexcept { return _timestamp; }
 
-        const cv::Mat& color_image() const noexcept { return _color_image; }
-        frame_format_t color_format() const noexcept { return _color_format; }
+        const cv::Mat& image() const noexcept { return _image; }
+        frame_format_t format() const noexcept { return _format; }
         
     private:
         inline static std::atomic<uint64_t> s_next_id{ 1 };
 
         const uint64_t _id{ s_next_id.fetch_add(1, std::memory_order_relaxed) };
         const timestamp_t _timestamp;
-        const cv::Mat _color_image; // narrowed to the ROI when one is in force
-        const frame_format_t _color_format;
+        const cv::Mat _image; // narrowed to the ROI when one is in force
+        const frame_format_t _format;
     };
 
 } // namespace hw

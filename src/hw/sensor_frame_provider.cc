@@ -55,7 +55,7 @@ namespace hw
         std::unique_ptr<sensor_frame_source> source = std::visit(overloaded{
             [](const k4a_device_config_t& c) -> std::unique_ptr<sensor_frame_source> {
                 auto s = std::make_unique<k4a_device_capturer>();
-                if (!s->open(c.device_index, { c.exposure_us, c.gain }, c.color_format)) {
+                if (!s->open(c.device_index, { c.exposure_us, c.gain }, c.frame_format)) {
                     return nullptr;
                 }
                 return s;
@@ -79,9 +79,9 @@ namespace hw
 
         if (!source) { return false; }
 
-        // Every config kind carries a `color_roi`, so this stays generic.
+        // Every config kind carries a `roi`, so this stays generic.
         const std::optional<roi_t> requested_roi = std::visit(
-            [](const auto& c) { return c.color_roi; }, 
+            [](const auto& c) { return c.roi; }, 
             config
         );
 
@@ -91,11 +91,13 @@ namespace hw
             describe(config),
             requested_roi
         );
+
+        const std::optional<roi_t> roi = this->get_effective_roi();
         spdlog::info("provider opened: {} ({}, {})"
             , _source_name
-            , frame_format_to_str(_color_format)
-            , _color_roi.has_value()
-                ? std::format("roi {}x{}+{}+{}", _color_roi->width, _color_roi->height, _color_roi->x, _color_roi->y)
+            , frame_format_to_str(_frame_format)
+            , roi.has_value()
+                ? std::format("roi {}x{}+{}+{}", roi->width, roi->height, roi->x, roi->y)
                 : std::string{ "whole frame" }
         );
         return true;
@@ -112,31 +114,9 @@ namespace hw
         std::string source_name,
         const std::optional<roi_t>& requested_roi)
     {
-        // Cache metadata once; it stays constant while streaming.
-        _calib = source->get_calibration();
-        _color_format = source->get_color_format();
-        _color_roi.reset();
+        this->_install_frame_geometry(*source, requested_roi);
 
-        if (requested_roi.has_value())
-        {
-            if (const std::optional<roi_t> granted = source->try_set_color_roi(*requested_roi);
-                granted.has_value())
-            {
-                _color_roi = granted;
-                apply_roi(_calib, *granted); // the delivered images are what the calibration describes
-            }
-            else
-            {
-                spdlog::warn("provider: ROI {}x{}+{}+{} was not applied to {}'s {}x{} frame"
-                    , requested_roi->width, requested_roi->height, requested_roi->x, requested_roi->y
-                    , source_name
-                    , _calib.frame_resolution.x(), _calib.frame_resolution.y()
-                );
-            }
-        }
-
-        // Copied from `_calib`, which the ROI above already adjusted, so it cannot disagree with it.
-        _color_frame_resolution = _calib.frame_resolution;
+        _frame_format = source->get_frame_format();
         _source_backend = source_backend;
         _source_name = std::move(source_name);
 
@@ -145,9 +125,10 @@ namespace hw
         _paused.store(false);
         _need_repace.store(true);
         {
-            // A seek posted for the source being replaced has nowhere to land.
+            // Posts aimed at the source being replaced have nowhere to land.
             std::scoped_lock lk{ _wake_cv_mtx };
             _pending_seek_req.reset();
+            _pending_roi_req.reset();
         }
 
         {
@@ -159,6 +140,105 @@ namespace hw
 
         _notify_sensor_stream_reset();
         _start_thread();
+    }
+
+    void sensor_frame_provider::_install_frame_geometry(
+        sensor_frame_source& source,
+        const std::optional<roi_t>& requested_roi)
+    {
+        // Read whole each time, so a window is placed in the full frame and the principal point
+        // is shifted exactly once.
+        calibration_t calib = source.get_calibration();
+        const Eigen::Vector2i full = calib.frame_resolution;
+        std::optional<roi_t> granted;
+
+        if (requested_roi.has_value())
+        {
+            granted = source.try_set_roi(*requested_roi);
+            if (granted.has_value()) {
+                apply_roi(calib, *granted); // the delivered images are what the calibration describes
+            }
+            else {
+                spdlog::warn("provider: ROI {}x{}+{}+{} was not applied to the {}x{} frame"
+                    , requested_roi->width, requested_roi->height, requested_roi->x, requested_roi->y
+                    , full.x(), full.y()
+                );
+            }
+        }
+
+        // Published as one, so a reader never pairs a resolution from this window with an ROI from
+        // the last. Writing the camera stops and restarts its stream, so it stays outside the lock.
+        std::scoped_lock lk{ _geometry_mtx };
+        _calib = std::move(calib);
+        _full_frame_resolution = full;
+        _roi = granted;
+        _frame_resolution = _calib.frame_resolution; // the ROI above already adjusted it
+    }
+
+    calibration_t sensor_frame_provider::get_calibration() const
+    {
+        std::scoped_lock lk{ _geometry_mtx };
+        return _calib;
+    }
+
+    Eigen::Vector2i sensor_frame_provider::get_frame_resolution() const
+    {
+        std::scoped_lock lk{ _geometry_mtx };
+        return _frame_resolution;
+    }
+
+    Eigen::Vector2i sensor_frame_provider::get_full_frame_resolution() const
+    {
+        std::scoped_lock lk{ _geometry_mtx };
+        return _full_frame_resolution;
+    }
+
+    std::optional<roi_t> sensor_frame_provider::get_effective_roi() const
+    {
+        std::scoped_lock lk{ _geometry_mtx };
+        return _roi;
+    }
+
+    void sensor_frame_provider::set_roi(const std::optional<roi_t>& roi)
+    {
+        {
+            std::scoped_lock lk{ _wake_cv_mtx };
+            _pending_roi_req = roi_request_t{ .window = roi };
+        }
+        _wake_cv.notify_all();
+    }
+
+    bool sensor_frame_provider::_apply_pending_roi()
+    {
+        std::optional<roi_request_t> request;
+        {
+            std::scoped_lock lk{ _wake_cv_mtx };
+            request = std::exchange(_pending_roi_req, std::nullopt);
+        }
+        if (!request.has_value()) { return false; }
+
+        std::scoped_lock lk{ _source_mtx };
+        if (!_source) { return false; }
+
+        // A source holds its ROI until something says otherwise, so restoring whole frames means
+        // writing the full extent.
+        const Eigen::Vector2i full = this->get_full_frame_resolution();
+        const roi_t want = request->window.value_or(roi_t{ 0, 0, full.x(), full.y() });
+
+        const std::optional<roi_t> old_roi = this->get_effective_roi();
+        this->_install_frame_geometry(*_source, want);
+        const std::optional<roi_t> new_roi = this->get_effective_roi();
+
+        // A request the source snapped onto what was already in force, or refused outright, leaves
+        // the pixel frame where it was, and nothing downstream has anything to drop.
+        if (new_roi == old_roi) { return false; }
+
+        spdlog::info("provider: ROI is now {}x{}+{}+{}"
+            , new_roi ? new_roi->width : full.x()
+            , new_roi ? new_roi->height : full.y()
+            , new_roi ? new_roi->x : 0, new_roi ? new_roi->y : 0
+        );
+        return true;
     }
 
     void sensor_frame_provider::close()
@@ -226,7 +306,8 @@ namespace hw
         {
             std::unique_lock lk{ _wake_cv_mtx };
             _wake_cv.wait_until(lk, until, [&] {
-                return !_running.load() || _pending_seek_req.has_value() || _paused.load() != paused_now;
+                return !_running.load() || _pending_seek_req.has_value()
+                    || _pending_roi_req.has_value() || _paused.load() != paused_now;
             });
         };
 
@@ -253,9 +334,16 @@ namespace hw
                 this->_notify_sensor_stream_reset();
             }
 
-            // Paused with nothing asking for a frame. A seek does ask, which is what shows where
-            // it landed; one frame later the loop idles here again.
-            if (_paused.load() && !seeked)
+            // Likewise the ROI: announced ahead of the first frame that comes out of it.
+            const bool roi_changed = this->_apply_pending_roi();
+            if (roi_changed)
+            {
+                this->_notify_sensor_frame_geometry_changed();
+            }
+
+            // Paused with nothing asking for a frame. A seek and an ROI both do ask, which is what
+            // shows where one landed and what the other framed; one frame later the loop idles here again.
+            if (_paused.load() && !seeked && !roi_changed)
             {
                 _need_repace.store(true);
                 sleep_until(std::chrono::steady_clock::now() + kIdlePollSleep, true);
@@ -295,7 +383,7 @@ namespace hw
                 continue;
             }
 
-            const std::shared_ptr<sensor_frame>& new_frame = fs->color_frame();
+            const std::shared_ptr<sensor_frame>& new_frame = fs->frame();
             if (!new_frame)
             {
                 spdlog::warn("provider: capture has no color image, dropping");
@@ -358,6 +446,14 @@ namespace hw
     void sensor_frame_provider::_notify_sensor_stream_reset()
     {
         for (const auto& obs : _snapshot_observers()) { obs->on_sensor_stream_reset(); }
+    }
+
+    void sensor_frame_provider::_notify_sensor_frame_geometry_changed()
+    {
+        // A new pixel frame also breaks what is carried between frames, 
+        // so the reset event goes out first and this adds only what it does not say.
+        this->_notify_sensor_stream_reset();
+        for (const auto& obs : _snapshot_observers()) { obs->on_sensor_frame_geometry_changed(); }
     }
 
     void sensor_frame_provider::_notify_sensor_stream_end()

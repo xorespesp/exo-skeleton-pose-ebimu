@@ -29,6 +29,11 @@ namespace hw
         // NOTE: This method may be called from a worker thread.
         virtual void on_sensor_stream_reset() = 0;
 
+        // Called when the delivered images start covering a different part of the sensor, so pixel
+        // coordinates stop meaning what they meant. `on_sensor_stream_reset()` goes out with it.
+        // NOTE: This method may be called from a worker thread.
+        virtual void on_sensor_frame_geometry_changed() {}
+
         // Called when the stream terminates (e.g., at the end of playback).
         // NOTE: This method may be called from a worker thread.
         virtual void on_sensor_stream_end() = 0;

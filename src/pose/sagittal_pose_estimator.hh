@@ -103,6 +103,8 @@ namespace pose
         // held against the previous one's stale state.
         void reset_tracking() override;
 
+        void on_frame_geometry_changed() override;
+
         const joint_state_t& get_joint_state(joint_id_t j) const override;
         std::span<const joint_state_t> get_joint_states() const override;
 

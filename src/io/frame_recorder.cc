@@ -85,7 +85,7 @@ namespace io
             // Encoded outside the lock, or the observer callback would block behind it on push.
             [[maybe_unused]] const bool succeeded = _writer.write_frame(
                 _stream_id,
-                frame->color_image(),
+                frame->image(),
                 frame->timestamp()
             );
         }
@@ -94,7 +94,7 @@ namespace io
     void frame_recorder::on_sensor_frame_update(const std::shared_ptr<hw::sensor_frame>& new_sensor_frame)
     {
         if (!_is_started.load(std::memory_order_relaxed)) { return; }
-        if (!new_sensor_frame || new_sensor_frame->color_image().empty()) { return; }
+        if (!new_sensor_frame || new_sensor_frame->image().empty()) { return; }
 
         {
             std::scoped_lock lk{ _mtx };
@@ -111,6 +111,16 @@ namespace io
     void frame_recorder::on_sensor_stream_reset()
     {
         // A seek or a new source does not end a recording; the owner decides when to stop.
+    }
+
+    void frame_recorder::on_sensor_frame_geometry_changed()
+    {
+        // The stream was declared with one calibration, frame size included, so frames of another
+        // cannot join it. Finalizing keeps what was captured readable.
+        if (!_is_started.load(std::memory_order_relaxed)) { return; }
+
+        spdlog::warn("recorder: the frame geometry changed; finalizing '{}'", _writer.path().string());
+        this->stop();
     }
 
     void frame_recorder::on_sensor_stream_end()

@@ -369,4 +369,12 @@ namespace pose
         _ctx->tracked_side.reset();
     }
 
+    void sagittal_pose_estimator::on_frame_geometry_changed()
+    {
+        // Both the rest reference and the position track are held in image-plane points, 
+        // so a moved ROI leaves them describing pixels that are no longer there.
+        this->clear_rest_pose();
+        this->reset_tracking();
+    }
+
 } // namespace pose

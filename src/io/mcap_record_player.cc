@@ -29,13 +29,13 @@ namespace io
 
         _stream_id = streams.front().stream_id;
         _calib = streams.front().calibration;
-        _color_format = streams.front().color_format;
+        _frame_format = streams.front().color_format;
         _first_timestamp = _reader.first_timestamp();
         _last_timestamp = _reader.last_timestamp();
         _opened = true;
 
         spdlog::info("recording playback ready ({}, length: {} ms)"
-            , hw::frame_format_to_str(_color_format)
+            , hw::frame_format_to_str(_frame_format)
             , std::chrono::duration_cast<std::chrono::milliseconds>(_last_timestamp - _first_timestamp).count()
         );
         return true;
@@ -71,18 +71,18 @@ namespace io
         if (!frame.has_value()) { return std::nullopt; } // EOF; what follows is the provider's to decide
 
         cv::Mat image = std::move(frame->image);
-        if (_color_roi.has_value()) {
-            image = image(cv::Rect{ _color_roi->x, _color_roi->y, _color_roi->width, _color_roi->height });
+        if (_roi.has_value()) {
+            image = image(cv::Rect{ _roi->x, _roi->y, _roi->width, _roi->height });
         }
 
         return hw::sensor_frameset{ std::make_shared<hw::sensor_frame>(
             std::move(image),
-            _color_format,
+            _frame_format,
             frame->timestamp
         ) };
     }
 
-    std::optional<hw::roi_t> mcap_record_player::try_set_color_roi(const hw::roi_t& roi)
+    std::optional<hw::roi_t> mcap_record_player::try_set_roi(const hw::roi_t& roi)
     {
         std::scoped_lock lk{ _mtx };
 
@@ -93,8 +93,8 @@ namespace io
 
         if (clipped.is_empty()) { return std::nullopt; }
 
-        _color_roi = clipped;
-        return _color_roi;
+        _roi = clipped;
+        return _roi;
     }
 
     void mcap_record_player::seek_begin()

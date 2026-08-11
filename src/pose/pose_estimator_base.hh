@@ -86,6 +86,11 @@ namespace pose
         // or held against the previous one's stale state.
         virtual void reset_tracking() = 0;
 
+        // The delivered images now cover a different part of the sensor, so pixel coordinates no
+        // longer mean what they meant. An estimator drops everything it holds in them. What it
+        // holds in rig space is unaffected, which is why doing nothing is the default.
+        virtual void on_frame_geometry_changed() {}
+
         virtual const joint_state_t& get_joint_state(joint_id_t j) const = 0;
         virtual std::span<const joint_state_t> get_joint_states() const = 0;
 

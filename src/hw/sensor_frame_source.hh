@@ -20,7 +20,7 @@ namespace hw
         virtual void close() = 0;
 
         virtual const calibration_t& get_calibration() const = 0;
-        virtual frame_format_t get_color_format() const = 0;
+        virtual frame_format_t get_frame_format() const = 0;
 
         // Narrow delivered images to `roi`, given in full-frame pixels. The source is the
         // authority on its own frame, so it clips `roi` to that frame, and a sensor's readout
@@ -30,7 +30,7 @@ namespace hw
         // at all or because `roi` left nothing of the frame. Nothing narrows on a source's
         // behalf, so an empty answer means the request is dropped. Implement this wherever the
         // backend can, be it in the sensor's readout window or ahead of the colour conversion.
-        virtual std::optional<roi_t> try_set_color_roi(const roi_t& /*roi*/) { return std::nullopt; }
+        virtual std::optional<roi_t> try_set_roi(const roi_t& /*roi*/) { return std::nullopt; }
 
         // Blocking. Returns the frames of one capture, already converted and narrowed.
         // Empty on EOF / timeout / disconnect.

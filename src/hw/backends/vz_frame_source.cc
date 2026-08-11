@@ -151,13 +151,13 @@ namespace hw
         const std::string& serial = found[config.device_index].serial;
         if (!_device.open(serial)) { return false; }
 
-        _color_format = config.color_format;
-        _device.set_frame_format(to_vz_format(_color_format));
+        _frame_format = config.frame_format;
+        _device.set_frame_format(to_vz_format(_frame_format));
 
         // Colour classification needs the sensor to deliver colour. A monochrome format debayers to
         // R=G=B, which reads as a valid three-channel frame the whole way to the detector and
         // measures nothing, so the stream is refused here where the cause is still legible.
-        if (_color_format != frame_format_t::gray8)
+        if (_frame_format != frame_format_t::gray8)
         {
             if (const std::optional<vz::enum_feature_t> pf = _device.read_enum("PixelFormat");
                 pf.has_value() && !pixel_format_carries_color(pf->value))
@@ -185,7 +185,7 @@ namespace hw
         const int height = static_cast<int>(*sensor_h);
 
         // A readout window survives across opens, so one left from an earlier run would
-        // silently narrow this one. Start whole and let `try_set_color_roi()` narrow it.
+        // silently narrow this one. Start whole and let `try_set_roi()` narrow it.
         if (!_device.set_roi(vz::roi_t{ .width = *sensor_w, .height = *sensor_h })) {
             spdlog::warn("vz: could not reset the readout window: {}", _device.last_err_msg());
         }
@@ -235,7 +235,7 @@ namespace hw
             , serial
             , width
             , height
-            , frame_format_to_str(_color_format)
+            , frame_format_to_str(_frame_format)
             , _calib.intrinsic.fx > 0.0f ? "supplied" : "absent"
         );
         return true;
@@ -258,7 +258,7 @@ namespace hw
         _device.close();
     }
 
-    std::optional<roi_t> vz_frame_source::try_set_color_roi(const roi_t& roi)
+    std::optional<roi_t> vz_frame_source::try_set_roi(const roi_t& roi)
     {
         std::scoped_lock lk{ _mtx };
         if (!_device.is_open()) { return std::nullopt; }
@@ -321,7 +321,7 @@ namespace hw
 
         return sensor_frameset{ std::make_shared<sensor_frame>(
             std::move(captured->image),
-            _color_format,
+            _frame_format,
             timestamp
         ) };
     }

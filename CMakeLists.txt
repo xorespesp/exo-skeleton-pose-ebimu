@@ -94,6 +94,10 @@ target_sources(${TARGET_NAME} PRIVATE
     "src/gui/pose_trace_recorder.hh"
     "src/gui/pose_trace_recorder.cc"
     "src/gui/plot_buffer.hh"
+    "src/gui/pose_plot_panel.hh"
+    "src/gui/pose_plot_panel.cc"
+    "src/gui/open_source_dialog.hh"
+    "src/gui/open_source_dialog.cc"
     "src/gui/debugger_app.hh"
     "src/gui/debugger_app.cc"
 

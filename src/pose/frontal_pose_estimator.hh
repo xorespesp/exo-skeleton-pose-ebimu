@@ -99,6 +99,10 @@ namespace pose
 
         bool uses_smoothed_positions() const override { return _opt.enable_position_smoothing; }
 
+        // The leg hinge the IK swings every joint about, whether or not the 1-DOF constraint that
+        // names it is in force.
+        Eigen::Vector3d hinge_axis() const override { return _opt.hinge_axis_world; }
+
     private:
         struct context_t;
 

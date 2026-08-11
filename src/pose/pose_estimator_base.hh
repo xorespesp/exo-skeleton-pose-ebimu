@@ -82,6 +82,11 @@ namespace pose
         // draw without reaching into implementation-specific options.
         virtual bool uses_smoothed_positions() const = 0;
 
+        // The rig axis `local_anim_rot` turns about, which is the axis a flexion read back out of
+        // it has to be taken about. Only the estimator that built the rotation knows it, so a
+        // reader asks here rather than guessing from implementation-specific options.
+        virtual Eigen::Vector3d hinge_axis() const = 0;
+
     protected:
         pose_estimator_base() = default;
     };

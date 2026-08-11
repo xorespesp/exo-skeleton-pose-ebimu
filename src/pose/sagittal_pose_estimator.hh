@@ -123,6 +123,9 @@ namespace pose
 
         bool uses_smoothed_positions() const override { return _opt.enable_position_smoothing; }
 
+        // Angles are measured in the image plane, which the rig meets at its lateral axis.
+        Eigen::Vector3d hinge_axis() const override { return Eigen::Vector3d::UnitX(); }
+
         // --- sagittal specifics -----------------------------------------------------------
 
         // Knee joint of the leg the measurements came from; 

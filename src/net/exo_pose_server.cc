@@ -1,4 +1,4 @@
-#include "exo_pose_server.hh"
+﻿#include "exo_pose_server.hh"
 
 #include "exo_pose_pipeline.hh"
 
@@ -204,20 +204,23 @@ namespace net
                 .open = [this](auto* ws) {
                     const std::string peer{ ws->getRemoteAddressAsText() };
                     if (_imp->client_count >= 1) {
-                        spdlog::warn("rejecting client {}: another client already holds the single slot", peer);
+                        spdlog::warn("server: rejecting client {}: another client already holds the single slot", peer);
                         ws->end(kCloseTryAgainLater, "another client is already connected");
                         return;
                     }
                     ws->getUserData()->accepted = true;
                     ++_imp->client_count;
-                    spdlog::info("client {} connected, waiting handshake..", peer);
+                    spdlog::info("server: client {} connected, waiting handshake..", peer);
                 },
                 .message = [this](auto* ws, std::string_view msg, uWS::OpCode /*op*/) {
-                    if (!ws->getUserData()->accepted) { return; } // ignore a rejected socket still closing
+                    if (!ws->getUserData()->accepted) {
+                        spdlog::debug("server: rx {} bytes on a rejected socket, ignored", msg.size());
+                        return;
+                    }
 
                     // Drop the client: log the reason and put it on the websocket close frame
                     const auto reject_client = [ws](int close_code, std::string_view reason) {
-                        spdlog::warn("rejecting client: {}", reason);
+                        spdlog::warn("server: rejecting client {}: {}", ws->getRemoteAddressAsText(), reason);
                         ws->end(close_code, reason);
                     };
 
@@ -225,14 +228,14 @@ namespace net
                     fb::Verifier verifier{ data, msg.size() };
                     if (!fb_proto::VerifyMessageBuffer(verifier))
                     {
-                        reject_client(kCloseProtocolError, "malformed message");
+                        reject_client(kCloseProtocolError, std::format("malformed message ({} bytes)", msg.size()));
                         return;
                     }
 
                     const fb_proto::Message* m = get_fb_proto_root_msg(data);
                     const req_id_t req = m->request_id(); // echoed back on the reply for correlation
 
-                    spdlog::debug("rx {} (request id {}, {} bytes)",
+                    spdlog::debug("server: rx {} (request id {}, {} bytes)",
                         fb_proto::EnumNamePayload(m->payload_type()), req, msg.size());
 
                     if (const bool is_valid_req_id = req != kServerNotifyReqId;
@@ -255,13 +258,14 @@ namespace net
                         }
 
                         ws->getUserData()->handshaked = true;
-                        spdlog::info("client handshake ok (proto version: {})", server_ver);
+                        spdlog::info("server: client handshake ok (proto version: {})", server_ver);
 
                         // Both peers now agree on the schema, so payloads are safe to send:
                         // subscribe to the broadcast topics and hand over the current status.
                         ws->subscribe("pose");
                         ws->subscribe("status");
                         ws->send(this->_serialize_ack(true, "handshake ok", req), uWS::OpCode::BINARY);
+                        spdlog::debug("server: tx ServerStatus (post-handshake)");
                         ws->send(this->_serialize_server_status(), uWS::OpCode::BINARY);
                         return;
                     }
@@ -284,6 +288,7 @@ namespace net
                         // reply with the current status to this client only.
                         if (m->payload_type() == fb_proto::Payload_GetServerStatus)
                         {
+                            spdlog::debug("server: tx ServerStatus (reply to request id {})", req);
                             ws->send(this->_serialize_server_status(req), uWS::OpCode::BINARY);
                             return;
                         }
@@ -325,7 +330,7 @@ namespace net
                                 ack = this->_serialize_ack(true, "rest pose cleared", req);
                                 break;
                             default:
-                                spdlog::warn("unsupported message: {}", fb_proto::EnumNamePayload(m->payload_type()));
+                                spdlog::warn("server: unsupported message: {}", fb_proto::EnumNamePayload(m->payload_type()));
                                 ack = this->_serialize_ack(false, "unsupported message", req);
                                 break;
                         }
@@ -334,21 +339,21 @@ namespace net
                     }
                     catch (const std::exception& e)
                     {
-                        spdlog::error("command handler error: {}", e.what());
+                        spdlog::error("server: command handler error: {}", e.what());
                         ws->send(this->_serialize_ack(false, "internal error", req), uWS::OpCode::BINARY);
                     }
                 },
                 .close = [this](auto* ws, int code, std::string_view message) {
                     if (!ws->getUserData()->accepted) { return; } // rejected socket was never counted
                     --_imp->client_count;
-                    spdlog::info("client disconnected (code {}{}{})",
+                    spdlog::info("server: client disconnected (code {}{}{})",
                         code, message.empty() ? "" : ": ", message);
                     // Release the source once the last client leaves so a monitor GUI reflects
                     // it and a live device is freed.
                     if (_imp->client_count == 0)
                     {
                         _imp->pipeline.close_source();
-                        spdlog::info("last client disconnected; source released");
+                        spdlog::info("server: last client disconnected; source released");
                     }
                 }
             });
@@ -369,10 +374,10 @@ namespace net
         );
 
         if (ok) {
-            spdlog::info("pose server listening on ws://localhost:{} (protocol version {})",
+            spdlog::info("server: listening on ws://localhost:{} (protocol version {})",
                 _imp->config.server.port, static_cast<uint32_t>(fb_proto::ProtocolVersion_Current));
         } else {
-            spdlog::error("failed to listen on port {} (already in use?)", _imp->config.server.port);
+            spdlog::error("server: failed to listen on port {} (already in use?)", _imp->config.server.port);
         }
         return ok;
     }
@@ -381,7 +386,7 @@ namespace net
     {
         if (_imp->uws_loop.is_listening())
         {
-            spdlog::info("pose server stopping ({} client(s) will be dropped)", _imp->client_count);
+            spdlog::info("server: stopping ({} client(s) will be dropped)", _imp->client_count);
         }
         _imp->uws_loop.stop_listening();
         _imp->client_count = 0;
@@ -407,11 +412,11 @@ namespace net
 
         // The configured source comes up with the server, device or recording alike.
         if (_imp->config.camera.source.has_value()) {
-            spdlog::info("auto-opening the configured source");
+            spdlog::info("server: auto-opening the configured source");
             _imp->pipeline.open_source(_imp->config);
         } else {
             // Said now rather than left for the first client to discover as a failed open.
-            spdlog::warn("no source is configured; pose data cannot flow until one is");
+            spdlog::warn("server: no source is configured; pose data cannot flow until one is");
         }
 
         // Blocks while the listen socket + timer keep the loop alive.
@@ -434,18 +439,18 @@ namespace net
             if (r.new_pose)
             {
                 const std::string frame = this->_serialize_pose_frame();
-                spdlog::trace("tx PoseFrame #{} ({} bytes) to {} client(s)",
+                spdlog::trace("server: tx PoseFrame #{} ({} bytes) to {} client(s)",
                     _imp->pipeline.current_frame_seq(), frame.size(), _imp->client_count);
                 _imp->uws_loop.publish("pose", frame);
             }
             if (r.stream_ended)
             {
-                spdlog::debug("tx SourceStreamEnded");
+                spdlog::debug("server: tx SourceStreamEnded");
                 _imp->uws_loop.publish("status", this->_serialize_source_stream_ended());
             }
             if (r.status_changed)
             {
-                spdlog::debug("tx ServerStatus (source open: {}, rest pose: {})",
+                spdlog::debug("server: tx ServerStatus (source open: {}, rest pose: {})",
                     _imp->pipeline.is_source_open(), _imp->pipeline.has_rest_pose());
                 _imp->uws_loop.publish("status", this->_serialize_server_status());
             }
@@ -546,6 +551,12 @@ namespace net
         std::string_view msg,
         req_id_t req_id) const
     {
+        if (ok) {
+            spdlog::debug("server: tx Ack ok (request id {}): {}", req_id, msg);
+        } else {
+            spdlog::warn("server: tx Ack failed (request id {}): {}", req_id, msg);
+        }
+
         fb::FlatBufferBuilder b;
         const auto ack = fb_proto::CreateAck(b, ok, b.CreateString(msg.data(), msg.size()));
         b.Finish(fb_proto::CreateMessage(b, fb_proto::Payload_Ack, ack.Union(), req_id));

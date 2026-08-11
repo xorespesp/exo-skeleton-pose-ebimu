@@ -20,7 +20,7 @@ namespace net
         // How often poll() summarizes throughput while a source streams.
         constexpr auto kStatsInterval = std::chrono::seconds{ 5 };
 
-        // The camera controls arrive as integers from the command line and the protocol alike;
+        // The camera controls arrive as integers; 
         // the VZ camera states its exposure and gain in fractional units.
         std::optional<double> to_optional_double(const std::optional<int32_t> value)
         {

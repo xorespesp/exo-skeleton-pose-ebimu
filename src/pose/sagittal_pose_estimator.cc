@@ -283,7 +283,7 @@ namespace pose
                         .ankle = wrap_pi(d_foot - d_shin),
                     };
 
-                    // Bone->joint map (matches the webview rig): knee joint drives the thigh, ankle
+                    // Bone->joint map (matches the rig it drives): knee joint drives the thigh, ankle
                     // the shin, foot the foot bone. Pelvis is the fixed base.
                     const double side = this->_side();
                     auto& states = _ctx->last_frame_joint_states;

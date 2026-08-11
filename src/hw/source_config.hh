@@ -54,7 +54,7 @@ namespace hw
     // Which backend this config selects.
     source_backend_t get_source_backend(const source_config_t& config);
 
-    // Short label for a log line or the GUI,
+    // Short human-facing label,
     // e.g. "k4a device #0", "recording 'walk.mcap'".
     std::string describe(const source_config_t& config);
 

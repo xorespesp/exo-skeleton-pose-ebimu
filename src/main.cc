@@ -41,6 +41,14 @@ int main(int argc, char** argv)
 
     const app::cli_options_t& parsed = serve->parsed() ? serve_cli : gui_cli;
 
+    // The terminal is the only sink standing here; the debugger's console attaches its own later.
+    if (parsed.verbosity > 0)
+    {
+        const auto level = parsed.verbosity >= 2 ? spdlog::level::trace : spdlog::level::debug;
+        for (auto& sink : spdlog::default_logger()->sinks()) { sink->set_level(level); }
+        spdlog::flush_on(level);
+    }
+
     app::app_config_t config;
     std::filesystem::path config_file; // empty on the built-in defaults
     if (std::string err; !app::resolve_config(parsed, config, config_file, err)) {

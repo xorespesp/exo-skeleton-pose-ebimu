@@ -175,7 +175,7 @@ namespace pose
                     hinge
                 );
 
-                // Bone->joint map (matches the webview rig): knee joint drives the thigh, ankle the
+                // Bone->joint map (matches the rig it drives): knee joint drives the thigh, ankle the
                 // shin, foot the foot bone.
                 _ctx->last_frame_joint_states[index_of(knee)].local_anim_rot = r.hip;
                 _ctx->last_frame_joint_states[index_of(ankle.value())].local_anim_rot = r.knee;

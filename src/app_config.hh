@@ -54,8 +54,7 @@ namespace app
         return (k == marker_kind_t::color_marker) ? "color_marker" : "apriltag";
     }
 
-    // nullopt if `name` is neither kind. The names round-trip through `marker_kind_name()`,
-    // which is what the config file spells.
+    // nullopt if `name` is neither kind. The names round-trip through `marker_kind_name()`.
     constexpr std::optional<marker_kind_t> marker_kind_from_name(std::string_view name) {
         if (name == marker_kind_name(marker_kind_t::apriltag))     { return marker_kind_t::apriltag; }
         if (name == marker_kind_name(marker_kind_t::color_marker)) { return marker_kind_t::color_marker; }

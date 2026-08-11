@@ -22,7 +22,7 @@ namespace app
         static source_address vz_device(uint32_t index);
         static source_address recording(std::filesystem::path file);
 
-        // Text form shared by the CLI and the wire protocol:
+        // Text form:
         //
         //   "k4a:<index>"   a K4A camera, by device index
         //   "vz:<index>"    a VZ camera, by device index

@@ -20,8 +20,10 @@ namespace net
         // How often poll() summarizes throughput while a source streams.
         constexpr auto kStatsInterval = std::chrono::seconds{ 5 };
 
-        // The camera controls arrive as integers; 
+        // The camera controls arrive as integers;
         // the VZ camera states its exposure and gain in fractional units.
+        // NOTE: a VZ gain therefore lands on whole dB where the camera steps in 0.1. Widening the
+        //       config's type reaches K4A too, which takes integers, so it is a decision first.
         std::optional<double> to_optional_double(const std::optional<int32_t> value)
         {
             if (!value.has_value()) { return std::nullopt; }
@@ -571,6 +573,17 @@ namespace net
             {
                 spdlog::debug("pipeline: the ROI changed; dropping what described the last one");
                 if (_active) { _active->on_frame_geometry_changed(); }
+
+                // The principal point moved with the window, and a tag pose is solved against it.
+                // Handing the retargeted one over is what keeps a solve in the same metric frame
+                // it was in before, which is why an estimator working in metres loses nothing.
+                if (auto* tag_tracker = dynamic_cast<pose::apriltag_tracker*>(_tracker.get())) {
+                    tag_tracker->set_intrinsics(this->intrinsics());
+                }
+
+                // The reported frame size moved with it, and a client has no other way to hear
+                // that: the images it would notice on are not on the wire.
+                _status_changed = true;
             }
 
             if (took_3d)

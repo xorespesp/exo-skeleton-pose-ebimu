@@ -138,8 +138,23 @@ namespace hw
             _source = std::move(source);
         }
 
-        _notify_sensor_stream_reset();
-        _start_thread();
+        this->_notify_sensor_stream_reset();
+
+        try
+        {
+            this->_start_thread();
+        }
+        catch (...)
+        {
+            _running.store(false);
+            {
+                std::scoped_lock lk{ _source_mtx };
+                if (_source) { _source->close(); }
+                _source.reset();
+                _player = nullptr;
+            }
+            throw;
+        }
     }
 
     void sensor_frame_provider::_install_frame_geometry(
@@ -155,14 +170,24 @@ namespace hw
         if (requested_roi.has_value())
         {
             granted = source.try_set_roi(*requested_roi);
-            if (granted.has_value()) {
-                apply_roi(calib, *granted); // the delivered images are what the calibration describes
-            }
-            else {
+
+            if (!granted.has_value())
+            {
                 spdlog::warn("provider: ROI {}x{}+{}+{} was not applied to the {}x{} frame"
                     , requested_roi->width, requested_roi->height, requested_roi->x, requested_roi->y
                     , full.x(), full.y()
                 );
+            }
+            else if (*granted == roi_t{ 0, 0, full.x(), full.y() })
+            {
+                // Whole frames are one state, so they get one value. A source handed the full
+                // extent answers with it, and leaving that in `_roi` would make asking for whole
+                // frames from a source already delivering them read as a moved pixel frame.
+                granted.reset();
+            }
+            else
+            {
+                apply_roi(calib, *granted); // the delivered images are what the calibration describes
             }
         }
 
@@ -277,6 +302,7 @@ namespace hw
     }
 
     void sensor_frame_provider::_polling_thread_proc()
+    try
     {
         // Carries out a posted seek, if one is waiting. True when the position moved.
         const auto apply_pending_seek = [this] {
@@ -323,6 +349,20 @@ namespace hw
         // The stream has been sent back to its start and has yet to yield a frame.
         bool restarted = false;
 
+        // Whether the last fetch left this pass without a frame.
+        bool device_idle = false;
+
+        // A fetch that yields no frame steps aside, so a device failing before it blocks cannot
+        // spin the loop. Said once, since the condition holds until frames come back; what it was
+        // comes from the call site.
+        const auto idle_on_no_frame = [&](const std::string_view reason)
+        {
+            if (!std::exchange(device_idle, true)) {
+                spdlog::warn("provider: {}, retrying", reason);
+            }
+            sleep_until(std::chrono::steady_clock::now() + kIdlePollSleep, _paused.load());
+        };
+
         while (_running.load())
         {
             // Only this thread moves the source, so the fetch below can only return the position
@@ -363,7 +403,7 @@ namespace hw
             {
                 if (!_player)
                 {
-                    spdlog::warn("provider: no frame from device (timeout), retrying");
+                    idle_on_no_frame("no frame from device");
                     continue;
                 }
 
@@ -386,8 +426,12 @@ namespace hw
             const std::shared_ptr<sensor_frame>& new_frame = fs->frame();
             if (!new_frame)
             {
-                spdlog::warn("provider: capture has no color image, dropping");
+                idle_on_no_frame("capture has no color image");
                 continue;
+            }
+
+            if (std::exchange(device_idle, false)) {
+                spdlog::info("provider: frames from the device resumed");
             }
 
             restarted = false; // the stream is delivering, so the next end is one to go around
@@ -430,6 +474,23 @@ namespace hw
                 }
             }
         }
+    }
+    catch (const std::exception& e)
+    {
+        this->_end_stream_on_error(e.what());
+    }
+    catch (...)
+    {
+        this->_end_stream_on_error("unknown exception");
+    }
+
+    void sensor_frame_provider::_end_stream_on_error(const std::string_view reason)
+    {
+        spdlog::error("provider: the polling thread stopped on {}", reason);
+        _running.store(false);
+
+        // An observer of its own is no reason to take the process with it.
+        try { this->_notify_sensor_stream_end(); } catch (...) {}
     }
 
     std::vector<std::shared_ptr<sensor_frame_observer>> sensor_frame_provider::_snapshot_observers() const

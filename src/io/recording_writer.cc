@@ -182,6 +182,16 @@ namespace io
 
         camera_stream_t& s = _streams[stream_id];
 
+        // The stream declares one calibration for the whole file, frame size included, so a frame
+        // of another size cannot join it: the file would say one thing and hold another.
+        if (const Eigen::Vector2i& declared = s.calibration.frame_resolution;
+            image.cols != declared.x() || image.rows != declared.y())
+        {
+            spdlog::error("recording_writer: '{}' declares {}x{} frames; {}x{} turned away"
+                , s.stream_name, declared.x(), declared.y(), image.cols, image.rows);
+            return false;
+        }
+
         // Encoded on the first frame so it carries that frame's time,
         // which keeps the recording's time range exactly the range of its frames.
         if (!s.calibration_written) {

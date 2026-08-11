@@ -14,6 +14,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -122,6 +123,7 @@ namespace hw
         void _start_thread();
         void _stop_thread();
         void _polling_thread_proc();
+        void _end_stream_on_error(std::string_view reason); // the polling thread's last act
 
         // Leaves a seek for the polling thread, which is what carries it out. 
         // Callable from anywhere, including that thread. 

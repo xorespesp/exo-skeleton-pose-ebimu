@@ -78,6 +78,13 @@ namespace pose
         return _tag_size_m;
     }
 
+    void apriltag_tracker::set_intrinsics(const std::optional<hw::intrinsic_t>& intrinsics)
+    {
+        std::scoped_lock lk{ _mtx };
+        _intrinsics = intrinsics;
+        _dirty = true;
+    }
+
     std::vector<tag_detection_t> apriltag_tracker::last_detections() const
     {
         return _latch.read([](const std::vector<tag_detection_t>& tags) { return tags; });
@@ -98,11 +105,13 @@ namespace pose
         // is refused here.
         tag_detector::options_t opt;
         double tag_size_m{};
+        std::optional<hw::intrinsic_t> intrinsics;
         bool rebuild;
         {
             std::scoped_lock lk{ _mtx };
             opt = _opt;
             tag_size_m = _tag_size_m;
+            intrinsics = _intrinsics;
             rebuild = !_detector.has_value() || _dirty;
             _dirty = false;
         }
@@ -111,12 +120,12 @@ namespace pose
         {
             // The detector is built and used on this thread alone; the other one only ever stages a
             // request under the lock above.
-            _detector.emplace(opt, tag_size_m, _intrinsics);
+            _detector.emplace(opt, tag_size_m, intrinsics);
             spdlog::debug("tracker: tag detector built (tag {:.3f} m, decimate {:.2f}, sigma {:.2f}, "
                           "refine {}, iters {}, threads {}, pose {})",
                 tag_size_m, opt.quad_decimate, opt.quad_sigma, opt.refine_edges,
                 opt.num_iters, opt.num_threads,
-                !_intrinsics.has_value()
+                !intrinsics.has_value()
                     ? "off"
                     : (opt.pose_method == tag_detector::pose_method_t::homography ? "homography" : "OI"));
         }

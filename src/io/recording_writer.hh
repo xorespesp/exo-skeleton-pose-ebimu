@@ -38,6 +38,9 @@ namespace io
 
     struct recording_options_t
     {
+        // TODO: per-stream codecs, for when a recording carries more than one camera. Two things
+        //       follow this one file-wide and both have to give: the image schema `open()`
+        //       registers, and the chunk compression the codec's `chunk_compress` decides.
         image_codec_t codec{ image_codec_t::jpeg };
         encode_options_t encode{};
     };

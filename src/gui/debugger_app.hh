@@ -32,9 +32,9 @@ namespace net { class exo_pose_server; }
 
 namespace gui
 {
-    // What the camera window is open for. One canvas and one mouse, so one at a time: each tool
-    // takes the whole frame, and two of them live would fight over every drag. The window renders
-    // only the tool it was opened with, so this is what it dispatches on and never a mode to pick.
+    // What the camera window is open for, and what it dispatches on. One canvas and one mouse, so
+    // one at a time: each tool takes the whole frame, and two of them live would fight over every
+    // drag.
     enum class view_tool_t
     {
         none,         // the window is closed
@@ -75,22 +75,23 @@ namespace gui
         void _render_menu_bar();
         void _render_control_panel();
 
-        // Estimator tuning, one function per viewing plane.
+        // The ROI in force, and the button that opens the camera window to place a new one.
         void _render_roi_control();
+
+        // Estimator tuning, one function per viewing plane.
         void _render_frontal_estimator_control(pose::frontal_pose_estimator::options_t& opt);
         void _render_sagittal_estimator_control(pose::sagittal_pose_estimator::options_t& opt);
 
-        // Blob filters, joint assignment, and what the last frame found, plus the sampling that
-        // measures this installation's colour.
+        // Blob filters, joint assignment, and what the last frame found.
         void _render_color_marker_control(pose::color_marker_tracker& tracker);
 
-        // Sampling and fitting the colour itself, which is what the rest of that panel is tuned
-        // against. Nothing here saves: the fit lands on the running tracker and reaches the file
-        // through the config profile, like every other control on this panel.
+        // The colour in force, and the button that opens the camera window to measure a new one.
+        // Nothing here saves: a fit lands on the running tracker and reaches the file through the
+        // config profile, like every other control on this panel.
         void _render_color_model_section(pose::color_marker_tracker& tracker);
 
         // The one place a drag lands on the frame: the panel's preview and the fullscreen view
-        // only display. Renders whichever tool it was opened with, never a choice between them.
+        // only display. Renders whichever tool it was opened with.
         void _render_camera_window();
         void _render_color_sample_tools(pose::color_marker_tracker& tracker);
         bool _render_roi_tools(); // false once there is no source left to place an ROI in
@@ -99,9 +100,9 @@ namespace gui
         // between `img_min` and `img_max`.
         void _handle_color_sample_click(const ImVec2& img_min, const ImVec2& img_max);
 
-        // The pending ROI over that same view: dragging the interior moves it, the corner grips
-        // resize it, and the overlay dims what it would cut away. The view shows the ROI in force
-        // while the pending one is in full-frame pixels, so `_shown_window()` rebases between them.
+        // The pending ROI over that same view: the interior moves it, an edge or a corner resizes
+        // it, and the overlay dims what it would cut away. The view shows the ROI in force while
+        // the pending one is in full-frame pixels, so `_shown_window()` rebases between them.
         void _handle_roi_interaction(const ImVec2& img_min, const ImVec2& img_max);
         void _draw_roi_overlay(const ImVec2& img_min, const ImVec2& img_max);
         hw::roi_t _shown_window() const; // the part of the full frame the camera view covers
@@ -130,7 +131,7 @@ namespace gui
             // What the camera window is open for; `none` is what closed means.
             view_tool_t view_tool{ view_tool_t::none };
 
-            // colour sampling (the panel that measures this installation's colour)
+            // colour sampling, driven from the camera window's sampler tool
             int color_sample_radius{ 6 }; // pixels collected around each click [px]
             double color_max_distance{ 3.0 }; // how far into the fitted ellipse still counts
             int color_backdrop{ 0 };      // 0 camera, 1 mask, 2 membership score
@@ -172,6 +173,10 @@ namespace gui
         pose::color_sampler _color_sampler;
 
         pose_trace_recorder _trace; // rolling per-frame diagnostic trace (dumped to JSON on demand)
+
+        // The frame geometry the trace ring and the plot buffers were filled under. Both are read
+        // in image coordinates one way or another, so a move invalidates what they already hold.
+        std::optional<hw::roi_t> _history_roi;
 
         pose_plot_panel _plot_panel; // left pane: the joint-state views and their own controls
         open_source_dialog _open_dialog;

@@ -351,21 +351,25 @@ namespace gui
         // nothing to do until a new frame arrives.
         net::exo_pose_pipeline& pipe = _server->pipeline();
 
+        // The backdrop is what sampling is judged against, and the sampler is the only place that
+        // picks it, so it holds for exactly as long as that tool is up.
+        const int backdrop = (_ui.view_tool == view_tool_t::color_sample) ? _ui.color_backdrop : 0;
+
         // The classifier's per-pixel images are copied on the frame thread, so the tracker is told
         // each step whether anything is looking at them.
         auto* color_tracker = dynamic_cast<pose::color_marker_tracker*>(pipe.tracker());
-        if (color_tracker != nullptr) { color_tracker->set_publish_debug_images(_ui.color_backdrop != 0); }
+        if (color_tracker != nullptr) { color_tracker->set_publish_debug_images(backdrop != 0); }
 
         if (!pipe.try_get_annotated_frame(_last_frame, _last_source_frame, _last_seq)) { return; }
 
         // What the camera view shows. The classifier's own two images answer "is this colour being
-        // accepted, and how surely", which is what sampling is judged against; the drawn frame
-        // answers "is the marker being found", which is what everything else wants.
+        // accepted, and how surely"; the drawn frame answers "is the marker being found", which is
+        // what everything else wants.
         cv::Mat view = _last_frame;
-        if (color_tracker != nullptr && _ui.color_backdrop != 0)
+        if (color_tracker != nullptr && backdrop != 0)
         {
-            const cv::Mat decisions = (_ui.color_backdrop == 1) ? color_tracker->mask()
-                                                                : color_tracker->score_image();
+            const cv::Mat decisions = (backdrop == 1) ? color_tracker->mask()
+                                                      : color_tracker->score_image();
             if (!decisions.empty()) { cv::cvtColor(decisions, view, cv::COLOR_GRAY2BGR); }
         }
         _frame_texture.value().update(view);
@@ -380,6 +384,17 @@ namespace gui
         // The plot buffers rebase against their first sample, so an absolute value is fine here.
         const hw::timestamp_t ts = pipe.last_timestamp();
         const double t_now = std::chrono::duration<double>{ ts.time_since_epoch() }.count();
+
+        // Both histories below hold samples a moved frame reinterprets: the trace's tag detections
+        // are image coordinates under a header that names one geometry, and a sagittal run's
+        // positions are image points scaled into metres. A moved origin steps every one of them
+        // without the exo having moved, so what described the old frame goes.
+        if (const std::optional<hw::roi_t> roi = pipe.effective_roi(); roi != _history_roi)
+        {
+            _trace.clear();
+            _plot_panel.reset();
+            _history_roi = roi;
+        }
 
         // Capture the full per-frame trace into the rolling ring so a glitch can be dumped with its
         // lead-up right after it is seen on screen.
@@ -847,6 +862,10 @@ namespace gui
         ImGui::DragInt2("offset", _ui.roi_offset, 8.0f, 0, extent);
         ImGui::SetItemTooltip("Top-left corner of the ROI within the full frame.");
 
+        // A recording can be started from the menu bar while this is up, and the file declares one
+        // frame size, so what commits is held back while one is being written. Cancel stays live.
+        const bool recording = pipe.is_recording();
+        ImGui::BeginDisabled(recording);
         if (ImGui::Button("Apply"))
         {
             pipe.set_roi(hw::roi_t{ _ui.roi_offset[0], _ui.roi_offset[1], _ui.roi_size[0], _ui.roi_size[1] });
@@ -856,23 +875,32 @@ namespace gui
                               "less of the sensor, and detection has less to search.\n"
                               "A sagittal run loses its captured rest pose with it.");
         ImGui::SameLine();
-        if (ImGui::Button("Cancel")) { _ui.view_tool = view_tool_t::none; }
-        ImGui::SameLine();
         if (ImGui::Button("Full Frame"))
         {
             pipe.set_roi(std::nullopt);
             _ui.view_tool = view_tool_t::none;
         }
+        ImGui::EndDisabled();
 
-        // The reference the rect above is being composed against.
-        const std::optional<hw::roi_t> effective = pipe.effective_roi();
         ImGui::SameLine();
-        ImGui::TextDisabled("in force: %dx%d+%d+%d"
-            , effective ? effective->width : full.x()
-            , effective ? effective->height : full.y()
-            , effective ? effective->x : 0
-            , effective ? effective->y : 0
-        );
+        if (ImGui::Button("Cancel")) { _ui.view_tool = view_tool_t::none; }
+
+        ImGui::SameLine();
+        if (recording)
+        {
+            ImGui::TextDisabled("a recording is being written");
+        }
+        else
+        {
+            // The reference the rect above is being composed against.
+            const std::optional<hw::roi_t> effective = pipe.effective_roi();
+            ImGui::TextDisabled("in force: %dx%d+%d+%d"
+                , effective ? effective->width : full.x()
+                , effective ? effective->height : full.y()
+                , effective ? effective->x : 0
+                , effective ? effective->y : 0
+            );
+        }
         return true;
     }
 
@@ -1000,9 +1028,8 @@ namespace gui
             return ImGui::IsItemActive();
         };
 
-        // ImGui gives an overlap to whichever item claimed the hover first, so the move region is
-        // held short of the border band rather than submitted under it: covering the band would
-        // take every grip below with it.
+        // ImGui gives an overlap to whichever item claimed the hover first, so the move region
+        // stops short of the border band: reaching into it would take every grip below with it.
         constexpr float h = kRoiGrip * 0.5f;
         bool moved = false;
         if (submit("##roi_move", ImVec2{ p0.x + h, p0.y + h }, ImVec2{ p1.x - h, p1.y - h },
@@ -1046,8 +1073,8 @@ namespace gui
 
         if (moved)
         {
-            // A move keeps the size, so the frame edge stops the rect rather than eating into it:
-            // the offset is what gets clamped and the extents ride along.
+            // A move keeps the size: the offset is what the frame edge stops, and the extents
+            // ride along with it.
             const float w = x1 - x0, hgt = y1 - y0;
             x0 = std::clamp(x0, 0.0f, std::max(0.0f, max_w - w));
             y0 = std::clamp(y0, 0.0f, std::max(0.0f, max_h - hgt));

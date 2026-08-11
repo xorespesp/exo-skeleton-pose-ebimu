@@ -159,6 +159,10 @@ namespace pose
         void set_tag_size_m(double v);
         double tag_size_m() const;
 
+        // The delivered images cover a different part of the sensor, so the principal point the
+        // pose solve reads has moved with them. Empty leaves tag centers, with no pose solved.
+        void set_intrinsics(const std::optional<hw::intrinsic_t>& intrinsics);
+
         // Estimator thread. The last published frame's tags, for a diagnostic trace.
         std::vector<tag_detection_t> last_detections() const;
 
@@ -175,12 +179,11 @@ namespace pose
         std::size_t last_detection_count() const override;
 
     private:
-        const std::optional<hw::intrinsic_t> _intrinsics;
-
         std::optional<tag_detector> _detector; // frame thread; rebuilt when `_dirty`
         std::uint64_t _seen_tag_mask{ 0 };     // frame thread; bit t = id t was in the previous frame
 
         mutable std::mutex _mtx; // guards the tuning below, which both threads reach
+        std::optional<hw::intrinsic_t> _intrinsics;
         tag_detector::options_t _opt;
         double _tag_size_m;
         bool _dirty{ true }; // forces a build on the first frame, then after each stage

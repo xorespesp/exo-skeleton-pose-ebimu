@@ -94,6 +94,9 @@ namespace pose
         {
             // Per-joint image-plane point at capture; empty for a joint that was not measured then.
             std::array<std::optional<Eigen::Vector2d>, kNumJoints> joint_px{};
+
+            // The leg those points name, so a rest travels with the leg it describes.
+            std::optional<joint_side_t> side{};
         };
         std::optional<rest_pose_info_t> rest_pose; // empty until calibrated
 
@@ -130,14 +133,21 @@ namespace pose
 
     bool sagittal_pose_estimator::has_rest_pose() const
     {
-        return _ctx->rest_pose.has_value();
+        if (!_ctx->rest_pose.has_value()) { return false; }
+
+        // The points name one leg's joints, so a rest taken on the other measures nothing here.
+        // An undecided side on either end is not a disagreement.
+        const std::optional<joint_side_t>& captured = _ctx->rest_pose->side;
+        return !captured.has_value()
+            || !_ctx->tracked_side.has_value()
+            || captured == _ctx->tracked_side;
     }
 
     // Converted with the current frame's factor rather than the one at capture, so a rest skeleton
     // drawn next to the measured one shares its size and only their angles can differ.
     std::optional<Eigen::Vector3d> sagittal_pose_estimator::get_rest_position(joint_id_t j) const
     {
-        if (!_ctx->rest_pose.has_value()) { return std::nullopt; }
+        if (!this->has_rest_pose()) { return std::nullopt; }
         const auto& px = _ctx->rest_pose->joint_px[index_of(j)];
         if (!px.has_value()) { return std::nullopt; }
         return to_rig_space(px.value(), _ctx->meters_per_pixel, this->_side());
@@ -251,7 +261,7 @@ namespace pose
         // change since rest, minus its parent bone's, is that joint's flexion. Measured on pixels,
         // so the metric scale never enters the result.
         const std::optional<joint_id_t> tracked_knee = knee_of_side(_ctx->tracked_side);
-        if (_ctx->rest_pose.has_value() && tracked_knee.has_value())
+        if (this->has_rest_pose() && tracked_knee.has_value())
         {
             const joint_id_t root = get_root_joint();
             const joint_id_t knee = tracked_knee.value();
@@ -342,6 +352,9 @@ namespace pose
             }
             any = any || new_rest.joint_px[i].has_value();
         }
+
+        // Stamped with the leg this frame was seen on, which is what the points below belong to.
+        new_rest.side = _ctx->tracked_side;
 
         if (any) { _ctx->rest_pose = new_rest; }
         else { _ctx->rest_pose.reset(); }

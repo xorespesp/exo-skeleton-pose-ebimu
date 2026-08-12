@@ -254,7 +254,8 @@ namespace gui
 
         _last_seq = 0;
         _ui.view_tool = view_tool_t::none; // a live tool describes the source being replaced
-        _plot_panel.reset(); // the new source does not continue the plotted samples
+        _plot_panel.reset();
+        _trace.clear();
     }
 
     void debugger_app::_do_load_config(const std::filesystem::path& path)
@@ -343,6 +344,7 @@ namespace gui
         _last_seq = 0;
         _ui.view_tool = view_tool_t::none;
         _plot_panel.reset();
+        _trace.clear();
     }
 
     void debugger_app::_update_pose_frame()
@@ -451,7 +453,7 @@ namespace gui
             net::exo_pose_pipeline& pipe = _server->pipeline();
             const bool recording = pipe.is_recording();
             // Only a live camera can be recorded; a playback source is already a recording.
-            const bool can_record = pipe.is_source_open() && !pipe.is_source_recording() && !recording;
+            const bool can_record = pipe.is_source_open() && !pipe.is_playback_source() && !recording;
 
             if (ImGui::MenuItem("Start Recording...", nullptr, false, can_record))
             {
@@ -500,7 +502,7 @@ namespace gui
                 ImGui::TextUnformatted(std::format("Resolution : {}x{}", res.x(), res.y()).c_str());
                 ImGui::TextUnformatted(std::format("FPS : {:.1f}", pipe.source_fps()).c_str());
 
-                if (pipe.is_source_recording())
+                if (pipe.is_playback_source())
                 {
                     if (ImGui::Button(pipe.is_source_paused() ? " >" : "||")) {
                         pipe.set_source_paused(!pipe.is_source_paused());

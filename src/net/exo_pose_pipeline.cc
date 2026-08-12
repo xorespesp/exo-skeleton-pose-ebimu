@@ -30,6 +30,18 @@ namespace net
             return static_cast<double>(*value);
         }
 
+        // The intrinsics a tag pose solve may run on. Only a frontal run consumes the poses, and a
+        // zero focal length solves to plausible nonsense rather than failing, so either case answers
+        // nothing and leaves the detection at tag centers.
+        std::optional<hw::intrinsic_t> pose_solve_intrinsics(
+            const pose::view_plane_t view_plane,
+            const hw::calibration_t& calib)
+        {
+            if (view_plane != pose::view_plane_t::frontal) { return std::nullopt; }
+            if (calib.intrinsic.fx <= 0.0f || calib.intrinsic.fy <= 0.0f) { return std::nullopt; }
+            return calib.intrinsic;
+        }
+
     } // namespace
 
     // --- observer (worker thread) ------------------------------------------------
@@ -266,24 +278,16 @@ namespace net
             return false;
         }
 
-        // Intrinsics are what turn the per-tag pose solve on, and with it the 3D measurements a
-        // frontal estimator consumes. They are read now because only an opened source reports them,
-        // and only a frontal run has any use for them: the 2D path works off marker centers.
-        //
-        // A source that carries none reports them zeroed, and a zero focal length solves to nonsense
-        // instead of failing. Withholding them is the honest answer, since the joints then read as
-        // untracked rather than as plausible wrong positions.
-        std::optional<hw::intrinsic_t> intrinsics;
-        if (view_plane == pose::view_plane_t::frontal)
+        // Read now because only an opened source reports them.
+        std::optional<hw::intrinsic_t> intrinsics = pose_solve_intrinsics(
+            view_plane, new_provider->get_calibration()
+        );
+
+        if (view_plane == pose::view_plane_t::frontal && !intrinsics.has_value())
         {
-            if (const hw::intrinsic_t intr = new_provider->get_calibration().intrinsic;
-                intr.fx > 0.0f && intr.fy > 0.0f) {
-                intrinsics = intr;
-            } else {
-                spdlog::warn("pipeline: '{}' reports no intrinsics, so marker poses cannot be "
-                             "solved and the frontal estimator will track nothing",
-                    new_provider->get_source_name());
-            }
+            spdlog::warn("pipeline: '{}' reports no intrinsics, so marker poses cannot be "
+                         "solved and the frontal estimator will track nothing",
+                new_provider->get_source_name());
         }
 
         // The one place that names a concrete tracker. Unlike the estimator, it is rebuilt on every
@@ -330,7 +334,7 @@ namespace net
 
         _provider = std::move(new_provider); // old provider closes/joins here
         _observer = std::move(new_observer);
-        _is_recording = source_addr.is_recording();
+        _is_playback_source = source_addr.is_recording();
         _exposure_us = exposure_us;
         _gain = gain;
         _has_pose = false; // whatever the previous source produced does not describe this one
@@ -370,14 +374,14 @@ namespace net
 
         _provider.reset(); // stops/joins the worker thread
         _observer.reset();
-        _is_recording = false;
+        _is_playback_source = false;
         _exposure_us.reset();
         _gain.reset();
         _frame_log.reset();
     }
 
     bool exo_pose_pipeline::is_source_open() const { return static_cast<bool>(_provider); }
-    bool exo_pose_pipeline::is_source_recording() const { return _is_recording; }
+    bool exo_pose_pipeline::is_playback_source() const { return _is_playback_source; }
 
     bool exo_pose_pipeline::start_recording(
         const std::filesystem::path& path,
@@ -385,7 +389,7 @@ namespace net
     {
         _status_changed = true;
 
-        if (_is_recording) {
+        if (_is_playback_source) {
             spdlog::error("pipeline: cannot record a playback source");
             return false;
         }
@@ -578,7 +582,9 @@ namespace net
                 // Handing the retargeted one over is what keeps a solve in the same metric frame
                 // it was in before, which is why an estimator working in metres loses nothing.
                 if (auto* tag_tracker = dynamic_cast<pose::apriltag_tracker*>(_tracker.get())) {
-                    tag_tracker->set_intrinsics(this->intrinsics());
+                    tag_tracker->set_intrinsics(
+                        _provider ? pose_solve_intrinsics(_view_plane, _provider->get_calibration())
+                                  : std::nullopt);
                 }
 
                 // The reported frame size moved with it, and a client has no other way to hear
@@ -619,7 +625,7 @@ namespace net
         if (r.stream_ended)
         {
             // A recording hitting EOF is expected; a live device going quiet is a loss.
-            if (_is_recording) { spdlog::info("pipeline: recording '{}' reached the end of its stream", this->source_name()); }
+            if (_is_playback_source) { spdlog::info("pipeline: recording '{}' reached the end of its stream", this->source_name()); }
             else { spdlog::warn("pipeline: device '{}' stopped streaming", this->source_name()); }
         }
 

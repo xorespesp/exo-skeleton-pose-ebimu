@@ -50,7 +50,7 @@ namespace net
         void close_source();
 
         bool is_source_open() const;
-        bool is_source_recording() const;
+        bool is_playback_source() const; // the open source is a recording file, not a live camera
 
         // --- recording ----------------------------------------------------------------
         // Captures the live source's frames to a recording file.
@@ -223,7 +223,7 @@ namespace net
         pose::pose_estimator_base* _active{ nullptr };
         hw::timestamp_t _last_timestamp{}; // capture time of the frame the estimator last stepped on
         bool _has_pose{ false };           // that frame exists; cleared when a new source is opened
-        bool _is_recording{ false }; // the open source is a recording file (vs a live camera)
+        bool _is_playback_source{ false }; // the open source is a recording file (vs a live camera)
         bool _status_changed{ false }; // a source/rest command changed the reported status; consumed by poll()
 
         // Capture settings of the open source, recorded alongside its frames.

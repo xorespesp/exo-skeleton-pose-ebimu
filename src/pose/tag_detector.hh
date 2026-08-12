@@ -43,8 +43,10 @@ namespace pose
     // Pose-candidate selector
     // ---------------------------------------------------------------------------
     //
-    // Orthogonal iteration can yield two poses (planar ambiguity). The detector applies a selector
-    // once while building each detection and keeps only the chosen pose in tag_detection_t::pose.
+    // Orthogonal iteration can yield two poses (planar ambiguity), each converged on its own
+    // translation as well as its own rotation, so the choice moves the position a detection
+    // reports. The detector applies a selector once while building each detection and keeps only
+    // the chosen pose in `tag_detection_t::pose`.
     // Any callable works (no registration) and may be stateful (keyed on tag id), but must depend
     // only on past detections, as it runs at detection time.
     using tag_pose_candidate_selector_fn = std::function<const tag_pose_t*(int tag_id, std::span<const tag_pose_t> candidates)>;
@@ -153,8 +155,8 @@ namespace pose
     }
 
     // Camera-space position of a detected tag: the chosen pose's translation, falling back to the
-    // first candidate. A tag's pose candidates share one translation, so the choice does not reach
-    // the position. Empty without intrinsics, since no pose was solved then.
+    // first candidate, which is the lowest object-space error of the two. Empty without intrinsics,
+    // since no pose was solved then.
     [[nodiscard]] inline std::optional<Eigen::Vector3d> detection_position(const tag_detection_t& det)
     {
         if (det.pose.has_value()) { return det.pose->transform.translation(); }

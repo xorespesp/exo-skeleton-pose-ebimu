@@ -538,9 +538,9 @@ namespace net
     {
         fb::FlatBufferBuilder b;
         // Recording EOF is graceful; a live device stopping on its own is a loss.
-        const bool is_recording = _imp->pipeline.is_source_recording();
-        const bool is_error = !is_recording;
-        const char* msg = is_recording ? "recording reached end" : "device stream ended";
+        const bool is_playback = _imp->pipeline.is_playback_source();
+        const bool is_error = !is_playback;
+        const char* msg = is_playback ? "recording reached end" : "device stream ended";
         const auto ended = fb_proto::CreateSourceStreamEnded(b, is_error, b.CreateString(msg));
         b.Finish(fb_proto::CreateMessage(b, fb_proto::Payload_SourceStreamEnded, ended.Union(), kServerNotifyReqId));
         return std::string(std::bit_cast<const char*>(b.GetBufferPointer()), b.GetSize());

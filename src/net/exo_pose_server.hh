@@ -68,7 +68,7 @@ namespace net
         // NOTE: 0 is reserved for messages the server sends on its own.
         std::string _serialize_pose_frame() const;
         std::string _serialize_server_status(req_id_t req_id = kServerNotifyReqId) const;
-        std::string _serialize_source_stream_ended() const;
+        std::string _serialize_source_stream_ended(bool is_error) const;
         std::string _serialize_ack(
             bool ok,
             std::string_view msg,

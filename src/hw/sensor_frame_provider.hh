@@ -134,7 +134,7 @@ namespace hw
         void _notify_sensor_frame_update(const std::shared_ptr<sensor_frame>& frame);
         void _notify_sensor_stream_reset();
         void _notify_sensor_frame_geometry_changed();
-        void _notify_sensor_stream_end();
+        void _notify_sensor_stream_end(stream_end_reason_t reason);
 
     private:
         std::unique_ptr<sensor_frame_source> _source;

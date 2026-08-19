@@ -29,6 +29,12 @@ namespace pose
     // to a 1-DOF hinge (every exo leg joint is a forward/back hinge). local_anim_rot drives the
     // skeleton and is the value broadcast to clients.
     //
+    // Angles follow the model laid out at the top of sagittal_pose_estimator.cc: geometry is
+    // measured in the rig's hinge sign off the same position track, and `joint_state_t` receives
+    // it in the biomechanics conventions of docs/joint_angle_convention.md (Segment / Clinical /
+    // Included Angle, no rest pose involved) beside the rest-relative motion (`local_anim_rot`
+    // and the delta angles).
+    //
     // TODO: lens distortion is not corrected. Undistort the marker points before the pose solve (or
     // remap the frame) once markers sit near the image border or the lens gets wider.
     class frontal_pose_estimator final : public pose_estimator_base
@@ -50,8 +56,9 @@ namespace pose
             // Constrain every leg joint (hip/knee/ankle) to a single forward/back hinge about
             // `kRigLateralAxis`, dropping off-hinge components as tag-position error. When off,
             // each joint gets the free minimal-swing rotation.
-            // NOTE: off, `local_anim_rot` keeps components the reported flexion angles cannot see,
-            //       so a rig driven by the rotation and one driven by the angles differ.
+            // NOTE: off, `local_anim_rot` keeps components the sagittal delta angles cannot see,
+            //       and reading the bend back out of the rotation returns less than the deltas
+            //       state.
             bool enable_hinge_constraint{ false };
 
             DECLARE_SERIALIZABLE_FIELDS(

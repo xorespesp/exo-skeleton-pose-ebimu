@@ -1,16 +1,24 @@
-// Entry point: build the scene, load the rig, and wire a lil-gui panel for the
-// connection and camera/rest-pose commands.
+// Entry point: build the scene, load the rig, and wire a lil-gui panel for the connection,
+// the pose stream, and the rest-pose commands.
 
 import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
 import { createScene, loadCharacter } from './scene.js';
-import { captureBindPose, applyPoseFrame, quatToEulerDeg, quatHingeAngleDeg, BONE_BY_JOINT_ID } from './skeleton.js';
+import {
+    captureBindPose, applyPoseFrame, resetToBindPose, resolveDriveSource,
+    dumpPoseFrame, formatPoseFrameDump, DRIVE_SOURCE,
+} from './skeleton.js';
 import { PoseClient } from './pose-client.js';
 
 const { scene, startRenderLoop } = createScene(document.getElementById('container'));
 
 const { model, bones } = await loadCharacter(scene);
 const bindPose = captureBindPose(bones);
+
+const DRIVE_MODE_AUTO = 'auto';
+let lastDriveSource = null; // the source the rig currently stands on
 startRenderLoop();
+
+const debugOverlayEl = document.getElementById('debug-overlay');
 
 // --- ui state -----------------------------------------------------------------
 const ui = {
@@ -20,12 +28,15 @@ const ui = {
     source_name: '(none)',
     rest_pose: 'none',
     frame_seq: 0,
-    euler_order: 'XYZ',
-    joints: Object.fromEntries(BONE_BY_JOINT_ID.map((n) => [n, '-'])),
-    // Which form of the incoming motion drives the rig, and the per-joint flexion readout
-    // ("local_sagittal_angle / absolute_sagittal_angle / the turn read back out of local_anim_rot", all in degrees).
-    drive_from_angle: false,
-    flexion: Object.fromEntries(BONE_BY_JOINT_ID.map((n) => [n, '-'])),
+    // Which wire field drives the rig. 'auto' follows the frame's rest-pose flag, so the rig runs
+    // off the clinical angles until a rest is captured and off the rotations after; the other two
+    // pin it, which is what lets the same instant be seen both ways.
+    drive_mode: DRIVE_MODE_AUTO,
+    drive_source: '-', // the source actually in use on the last frame
+    // Give a joint the frame left empty its twin's value, which puts a whole character on screen
+    // from the one leg a side view sees.
+    mirror_unmeasured: false,
+    show_frame_dump: false,
 };
 
 // Transient control flags (not shown in the panel).
@@ -81,29 +92,20 @@ client.onStatus = (st) => {
     refresh();
 };
 client.onPoseFrame = (frame) => {
-    applyPoseFrame(bones, bindPose, frame, ui.drive_from_angle);
-    ui.frame_seq = frame.frameSeq();
-    for (let i = 0; i < frame.jointsLength(); i++) {
-        const jp = frame.joints(i);
-        const name = BONE_BY_JOINT_ID[jp.id()];
-        const q = jp.localAnimRot(); // null when the joint is lost this frame
-        if (q) {
-            const e = quatToEulerDeg(q, ui.euler_order); // convert on the client
-            ui.joints[name] = `${e.x.toFixed(0)}, ${e.y.toFixed(0)}, ${e.z.toFixed(0)}`;
-        } else {
-            ui.joints[name] = '-';
-        }
-
-        // The server's two flexions beside the one this client can recover from the rotation. The
-        // last parts company with the first by however far the rotation's axis sits off the lateral
-        // axis; the middle one is the same turn taken in the exo's frame.
-        const rel = jp.localSagittalAngle(); // null when the joint is lost this frame
-        const abs = jp.absoluteSagittalAngle();
-        const deg = (rad) => (rad * 180 / Math.PI).toFixed(1);
-        ui.flexion[name] = (rel !== null && abs !== null && q)
-            ? `${deg(rel)} / ${deg(abs)} / ${quatHingeAngleDeg(q).toFixed(1)}`
-            : '-';
+    // A change of source changes the reference pose the rig stands on, and the two do not reach
+    // the same bones, so the rig goes back to its bind pose before the new source takes over.
+    const driveSource = resolveDriveSource(ui.drive_mode, frame);
+    if (driveSource !== lastDriveSource) {
+        resetToBindPose(bones, bindPose);
+        lastDriveSource = driveSource;
     }
+    ui.drive_source = driveSource;
+
+    applyPoseFrame(bones, bindPose, frame, driveSource, ui.mirror_unmeasured);
+    if (ui.show_frame_dump) {
+        debugOverlayEl.textContent = formatPoseFrameDump(dumpPoseFrame(frame));
+    }
+    ui.frame_seq = frame.frameSeq();
 };
 
 // --- actions ------------------------------------------------------------------
@@ -150,27 +152,25 @@ const src = gui.addFolder('Pose Stream');
 const cOpen = src.add(acts, 'open').name('Start');
 const cClose = src.add(acts, 'close').name('Stop');
 src.add(ui, 'source_name').name('source').listen().disable();
+src.add(ui, 'frame_seq').name('frame seq').listen().disable();
 
 const rest = gui.addFolder('Rest Pose');
 const cCalibrate = rest.add(acts, 'calibrate').name('Calibrate');
 const cClear = rest.add(acts, 'clearRest').name('Clear');
 rest.add(ui, 'rest_pose').name('state').listen().disable();
 
-const rig = gui.addFolder('Rig Drive');
-rig.add(ui, 'drive_from_angle').name('from local_sagittal_angle');
+const drive = gui.addFolder('Drive');
+drive.add(ui, 'drive_mode', [DRIVE_MODE_AUTO, DRIVE_SOURCE.localAnimRot, DRIVE_SOURCE.clinicalAngle])
+    .name('source');
+drive.add(ui, 'drive_source').name('in use').listen().disable();
+drive.add(ui, 'mirror_unmeasured')
+    .name('mirror unmeasured leg')
+    .onChange(() => resetToBindPose(bones, bindPose));
 
-const joints = gui.addFolder('Joints (euler deg)').close();
-joints.add(ui, 'frame_seq').name('frame seq').listen().disable();
-joints.add(ui, 'euler_order', ['XYZ', 'XZY', 'YXZ', 'YZX', 'ZXY', 'ZYX']).name('euler order');
-for (const name of BONE_BY_JOINT_ID) {
-    joints.add(ui.joints, name).listen().disable();
-}
-
-// Per joint: the server's two flexion angles beside the one recovered from `local_anim_rot` [deg].
-const flexion = gui.addFolder('Flexion, rel / abs / quat (deg)').close();
-for (const name of BONE_BY_JOINT_ID) {
-    flexion.add(ui.flexion, name).listen().disable();
-}
+const debug = gui.addFolder('Debug');
+debug.add(ui, 'show_frame_dump')
+    .name('Dump PoseFrame')
+    .onChange((on) => { debugOverlayEl.style.display = on ? 'block' : 'none'; });
 
 // Enable/disable controls to match the current connection + source state.
 function refresh() {

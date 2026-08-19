@@ -442,6 +442,37 @@ namespace app
                 err = "'pose.detector.color_marker.assigner.bone_length_tolerance' must be within (0, 1)";
                 return false;
             }
+
+            // The frame interval is clamped into [dt_min, dt_max] and a One Euro step divides by
+            // it and by the cutoffs, so a zero or inverted value here yields NaN angles rather
+            // than worse ones. Both estimators carry the same fields, so one check reads either.
+            const auto validate_estimator = [&err](const char* path, const auto& opt) {
+                if (opt.position_filter.min_cutoff_hz <= 0.0 || opt.position_filter.dcutoff_hz <= 0.0) {
+                    err = std::format("'{0}.position_filter.min_cutoff_hz' and "
+                                      "'{0}.position_filter.dcutoff_hz' must be greater than zero", path);
+                    return false;
+                }
+                if (opt.position_filter.beta < 0.0) {
+                    err = std::format("'{}.position_filter.beta' must not be negative", path);
+                    return false;
+                }
+                if (opt.dt_min.count() <= 0.0) {
+                    err = std::format("'{}.dt_min_s' must be greater than zero", path);
+                    return false;
+                }
+                if (opt.dt_max < opt.dt_min) {
+                    err = std::format("'{0}.dt_max_s' must be at least '{0}.dt_min_s'", path);
+                    return false;
+                }
+                if (opt.max_hold.count() < 0.0 || opt.reset_gap.count() < 0.0) {
+                    err = std::format("'{0}.max_hold_ms' and '{0}.reset_gap_ms' must not be negative", path);
+                    return false;
+                }
+                return true;
+            };
+            if (!validate_estimator("pose.estimator.frontal", cfg.pose.estimator.frontal)) { return false; }
+            if (!validate_estimator("pose.estimator.sagittal", cfg.pose.estimator.sagittal)) { return false; }
+
             return true;
         }
 

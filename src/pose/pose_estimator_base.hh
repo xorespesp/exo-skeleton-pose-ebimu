@@ -13,31 +13,63 @@ namespace pose
     using seconds_f64 = std::chrono::duration<double>;
 
     // Per-joint result of one estimation step. Positions are in rig space (see joints_def.hh).
+    // A joint's state describes the articulation at it: the rotation and every angle turn the
+    // bone that leaves it toward its child, so a marker end site (the feet) carries a position
+    // and nothing else.
     //
-    // The rotation and both angles express motion measured from the captured rest pose: they read
-    // identity and zero while the exo holds the pose that was captured, and grow as it leaves it.
-    // The two angles are flexion in the exo's sagittal plane [rad], signed by the right-hand rule
-    // about the rig's lateral axis. (`kRigLateralAxis`)
+    // The three measured angles follow the sagittal-plane biomechanics conventions of
+    // docs/joint_angle_convention.md, in radians, and involve no captured rest pose. The
+    // estimators measure in the rig's own hinge sign and convert through the per-joint table in
+    // joints_def.hh at exactly this boundary, so these fields are the complete published set and
+    // the only angle convention a reader of this state ever sees; the wire and the plots read
+    // them as they are.
     //
-    // NOTE: the rotation and the angles can disagree. The angles are measured in the hinge plane,
-    //       while the rotation is whatever the estimator solved: a solve left free of a 1-DOF hinge
-    //       constraint carries off-hinge components, and `quat_hinge_angle()` over it then returns
-    //       less than the angles state. A reader picks one form rather than mixing them.
+    // The rotation and the two delta angles express motion measured from the captured rest pose:
+    // identity and zero while the exo holds that pose, growing as it leaves it. The rotation is
+    // what drives a rig from its bind pose.
+    //
+    // NOTE: the rotation and the delta angles can disagree. The deltas are measured in the hinge
+    //       plane, while the rotation is whatever the estimator solved: a solve left free of a
+    //       1-DOF hinge constraint carries off-hinge components, and `quat_hinge_angle()` over
+    //       it then returns less than the deltas state. A reader picks one form rather than
+    //       mixing them.
     struct joint_state_t
     {
         std::optional<Eigen::Vector3d> raw_position;      // raw position this frame (fresh detection)
         std::optional<Eigen::Vector3d> position;          // smoothed + held position (drives the skeleton)
-        std::optional<Eigen::Quaterniond> local_anim_rot; // parent-relative rotation vs rest (drives the rig)
+        std::optional<Eigen::Quaterniond> local_anim_rot; // parent-relative rotation vs rest (drives the rig), about `kRigLateralAxis`
 
-        // This joint's turn relative to its parent bone: 
-        // the angle form of `local_anim_rot`, taken in the hinge plane (see hinge_angle.hh).
-        std::optional<double> local_sagittal_angle;
+        // Segment Angle: the attitude of this joint's bone, measured from vertically down
+        // (`kRigDownAxis`), positive tilted toward the exo's front. 0 for a bone hanging
+        // straight down; the root reads 0 by definition, its bone being the torso standing on
+        // the reference axis. A mount tilt about the rig's lateral axis (a side camera's roll)
+        // enters this reading directly, which is part of what the level, square mount
+        // requirement covers.
+        std::optional<double> sagittal_segment_angle;
 
-        // This joint's own bone's turn in the rig frame. 
-        // The running total of `local_sagittal_angle` down the chain, 
-        // which the leg's joints sharing one hinge axis makes a plain sum, 
-        // so it states a bone's attitude without walking its ancestors.
-        std::optional<double> absolute_sagittal_angle;
+        // Clinical Joint Angle (Neutral Zero Method): the bend at this joint versus its parent
+        // bone, 0 at the neutral stance, positive in flexion (hip, knee) and dorsiflexion
+        // (ankle). The ankle's neutral holds the foot MARKER line perpendicular to the shank;
+        // its offset to the robot's own foot axis is a fixed constant of the tag placement. A
+        // mount tilt about the rig's lateral axis shifts both adjacent segment angles equally
+        // and cancels out of this reading, except at the hip, whose reference is the virtual
+        // torso.
+        std::optional<double> sagittal_clinical_angle;
+
+        // Included Angle: the angle between the two bones meeting at this joint, as a signed
+        // continuous quantity: pi when the bones are collinear, shrinking with flexion and
+        // growing past pi in extension; the ankle's neutral reads pi/2. Filled from
+        // `sagittal_clinical_angle` in the same statement block, through the one formula in
+        // joints_def.hh, so the pair always states one bend.
+        std::optional<double> sagittal_included_angle;
+
+        // Changes since the captured rest pose, in the same conventions as the measured angles
+        // above: the angle forms of `local_anim_rot`, 0 while the exo holds the captured pose.
+        //
+        // NOTE: diagnostic-only fields; nothing downstream requires them. They feed the angle
+        //       plots' vs-rest views, which compare the rotation against the hinge-plane reading.
+        std::optional<double> sagittal_clinical_angle_delta;
+        std::optional<double> sagittal_segment_angle_delta;
     };
 
     // ---------------------------------------------------------------------------
@@ -67,6 +99,14 @@ namespace pose
         // the rig frame outright, which is why that mount is installed level and square; a side view
         // looks along it, and the estimator working from one carries its measurements over itself.
         static inline const Eigen::Vector3d kRigLateralAxis{ Eigen::Vector3d::UnitX() };
+
+        // The rig frame's down axis (see joints_def.hh): the reference direction segment angles
+        // are measured from, so a bone hanging straight down reads 0. It doubles as the torso
+        // segment's own direction (the exo stands upright on its fixed frame), which is what
+        // makes a thigh's segment angle the hip joint's angle outright and starts the chain sums
+        // at a pelvis of 0. The decomposition built on it is laid out at the top of
+        // sagittal_pose_estimator.cc.
+        static inline const Eigen::Vector3d kRigDownAxis{ Eigen::Vector3d::UnitY() };
 
     public:
         virtual ~pose_estimator_base() = default;

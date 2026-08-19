@@ -16,7 +16,7 @@ namespace gui
         raw_skeleton,     // measured 3D positions + bones, with the forward-kinematics overlay
         rig_skeleton,     // fixed-length T-pose leg rig driven by the per-joint `local_anim_rot`
         positions,        // per-joint position channels over time (2D subplot grid)
-        sagittal_angles,  // per-joint flexion over time (2D subplot grid)
+        sagittal_angles,  // per-joint sagittal angles over time (2D subplot grid)
     };
 
     // One grid mode's whole state, so adding a knob reaches both grid modes by one line.
@@ -82,11 +82,32 @@ namespace gui
     private:
         static constexpr int kAutofitFrames = 30; // frames the 3D box is fitted for, then the range is the mouse's
 
+        // Which angle the grid draws, one quantity per view (conventions per
+        // docs/joint_angle_convention.md). The first three are the wire's three angle fields, so
+        // what the protocol broadcasts can be checked here by eye. Every channel is recorded
+        // regardless, so switching changes the view and keeps each history.
+        enum class angle_view_t {
+            clinical,         // Clinical Joint Angle: bend vs the parent bone, flexion +
+            segment,          // Segment Angle: bone attitude from vertical, anterior +
+            included,         // Included Angle: signed inter-bone angle, pi when collinear
+            // NOTE: the two vs-rest views are diagnostic only, drawn from `joint_state_t`'s delta fields.
+            clinical_vs_rest, // clinical change since rest, beside the same turn read from `local_anim_rot`
+            segment_vs_rest,  // segment change since rest, beside the rotations' chain total
+        };
+
+        // One angle-grid sample [deg]. Channels: 0 = sagittal_clinical_angle, 1 = sagittal_segment_angle,
+        // 2 = sagittal_clinical_angle_delta, 3 = the delta recovered from `local_anim_rot` (carried into
+        // the clinical sign), 4 = sagittal_segment_angle_delta, 5 = the segment delta recovered from the
+        // rotations' chain total, 6 = sagittal_included_angle. A channel the estimator left empty
+        // holds NaN, which plots as a gap, so one sample carries whichever quantities this frame
+        // produced.
+        using angle_sample_t = Eigen::Matrix<float, 7, 1>;
+
         plot_type_t _plot_type{ plot_type_t::raw_skeleton };
 
         grid_plot_ui_t _pos_plot_grid{};   // positions
         grid_plot_ui_t _angle_plot_grid{}; // sagittal_angles
-        bool _angle_plot_relative{ true }; // draw each joint's turn from its parent bone, else its turn in the rig frame
+        angle_view_t _angle_view{ angle_view_t::clinical };
 
         skeleton_plot_ui_t _raw_skel{};
         skeleton_plot_ui_t _rig_skel{};
@@ -94,12 +115,10 @@ namespace gui
 
         std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints> _raw_skel_positions{};
         plot_buffer<Eigen::Vector3f, pose::kNumJoints> _pos_plot_buffers; // display-space positions
-        // Flexion [deg], the pair (estimator's measured angle, the angle read back out of
-        // `local_anim_rot`) twice over: channels 0-1 from the parent bone, 2-3 in the rig frame.
-        plot_buffer<Eigen::Vector4f, pose::kNumJoints> _angle_plot_buffers;
-        // Newest sample of each, for the subplot titles: 
+        plot_buffer<angle_sample_t, pose::kNumJoints> _angle_plot_buffers;
+        // Newest sample of each, for the subplot titles:
         // the buffer's view is strided for plotting and does not hand a single value back.
-        std::array<std::optional<Eigen::Vector4f>, pose::kNumJoints> _latest_angles{};
+        std::array<std::optional<angle_sample_t>, pose::kNumJoints> _latest_angles{};
 
         int _autofit_frames{ kAutofitFrames };
     };

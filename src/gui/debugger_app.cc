@@ -56,8 +56,6 @@ namespace gui
             return std::format("pose_trace_{}.json", local_stamp());
         }
 
-        constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
-
         // Small double-DragScalar helper (estimator options are double; avoids float temporaries).
         bool option_drag(const char* label, double& v, double lo, double hi, double step, const char* fmt)
         {
@@ -1344,9 +1342,10 @@ namespace gui
 
     void debugger_app::_render_sagittal_estimator_control(pose::sagittal_pose_estimator::options_t& opt)
     {
-        // ----- Readout: which leg is being tracked and what it currently measures -----
+        // ----- Readout: which leg is being tracked -----
         // The side is inferred from the detected tag ids, so showing it is the only way to catch a
         // camera placed on the wrong side (or a leg whose tags are not being seen at all).
+        // What that leg measures is the plot pane's Sagittal Angles view.
         ImGui::SeparatorText("Tracked Leg");
         {
             const pose::sagittal_pose_estimator* est = _server->pipeline().sagittal_estimator();

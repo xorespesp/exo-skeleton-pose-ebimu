@@ -1,5 +1,4 @@
 ﻿#include "pose_plot_panel.hh"
-
 #include "pose/hinge_angle.hh"
 
 #include <imgui.h>
@@ -8,8 +7,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <format>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -18,7 +19,7 @@ namespace gui
     namespace
     {
         constexpr float kGridPlotWindowSec = 6.0f; // subplot-grid x-axis scroll span [s]
-        constexpr float kViewComboWidth = 160.0f;  // toolbar view picker width [px]
+        constexpr float kViewComboWidth = 210.0f;  // toolbar picker width [px]
 
         constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
 
@@ -41,26 +42,36 @@ namespace gui
         }
 
         // Fixed-length T-pose lower limb in rig space, what the rig view drives by `local_anim_rot`.
-        // The robot faces the camera, so its right leg sits on camera-left (-X).
+        // The robot faces the camera, so its right leg sits on camera-left (-X). The display rig
+        // gives each hip its lateral offset, so a thigh hangs straight down from its own hip and a
+        // hip rotation reads as a clean swing about that point.
         std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints> canonical_rest_layout()
         {
-            constexpr double hip = 0.10, thigh = 0.45, shin = 0.42, foot = 0.16; // bone lengths [m]
+            constexpr double hip = 0.18, thigh = 0.45, shin = 0.42, foot = 0.16; // bone lengths [m]
+            const auto ankle_def = pose::get_joint_def(pose::joint_id_t::r_ankle);
+            const double ankle_rad = ankle_def ? ankle_def->sagittal_clinical_neutral_offset_rad : 0.0;
+            const double foot_y = foot * std::cos(ankle_rad);
+            const double foot_z = -foot * std::sin(ankle_rad);
+
             const auto at = [](pose::joint_id_t j) { return static_cast<std::size_t>(j); };
             std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints> r{};
             r[at(pose::joint_id_t::pelvis)]  = Eigen::Vector3d{ 0.0, 0.0, 0.0 };
+            r[at(pose::joint_id_t::r_hip)]   = Eigen::Vector3d{ -hip, 0.0, 0.0 };
+            r[at(pose::joint_id_t::l_hip)]   = Eigen::Vector3d{ +hip, 0.0, 0.0 };
             r[at(pose::joint_id_t::r_knee)]  = Eigen::Vector3d{ -hip, thigh, 0.0 };
             r[at(pose::joint_id_t::l_knee)]  = Eigen::Vector3d{ +hip, thigh, 0.0 };
             r[at(pose::joint_id_t::r_ankle)] = Eigen::Vector3d{ -hip, thigh + shin, 0.0 };
             r[at(pose::joint_id_t::l_ankle)] = Eigen::Vector3d{ +hip, thigh + shin, 0.0 };
-            // Foot points down and forward from the ankle (-Z), matching the ankle->foot marker bone.
-            r[at(pose::joint_id_t::r_foot)]  = Eigen::Vector3d{ -hip, thigh + shin + 0.75 * foot, -0.66 * foot };
-            r[at(pose::joint_id_t::l_foot)]  = Eigen::Vector3d{ +hip, thigh + shin + 0.75 * foot, -0.66 * foot };
+            r[at(pose::joint_id_t::r_foot)]  = Eigen::Vector3d{ -hip, thigh + shin + foot_y, foot_z };
+            r[at(pose::joint_id_t::l_foot)]  = Eigen::Vector3d{ +hip, thigh + shin + foot_y, foot_z };
             return r;
         }
 
         // Forward-kinematics the rig, walking `get_joint_defs()` (parent precedes child):
         //   world_rot = parent_world_rot * anim
-        //   world_pos = parent_world_pos + world_rot * (rest[joint] - rest[parent])
+        //   world_pos = parent_world_pos + parent_world_rot * (rest[joint] - rest[parent])
+        // A joint's rotation turns the bones leaving it, so the offset up to a joint is turned by
+        // its parent's world rotation, which already carries the parent's own anim.
         // Missing anim keeps the rest orientation; missing rest (joint or ancestor) yields no position.
         std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints> rig_fk(
             const std::array<std::optional<Eigen::Vector3d>, pose::kNumJoints>& rest,
@@ -82,7 +93,7 @@ namespace gui
                 const std::size_t p = static_cast<std::size_t>(def.parent);
                 if (!pos[p].has_value() || !rest[j].has_value() || !rest[p].has_value()) { continue; }
                 world_rot[j] = (world_rot[p] * a).normalized();
-                pos[j] = pos[p].value() + world_rot[j] * (rest[j].value() - rest[p].value());
+                pos[j] = pos[p].value() + world_rot[p] * (rest[j].value() - rest[p].value());
             }
             return pos;
         }
@@ -224,21 +235,44 @@ namespace gui
             _raw_skel_positions[ji] = p;
             if (p.has_value()) { _pos_plot_buffers.push(ji, rig_to_display(p.value())); }
 
-            const double quat_angle = st.local_anim_rot.has_value()
-                ? pose::quat_hinge_angle(st.local_anim_rot.value(), pose::pose_estimator_base::kRigLateralAxis) 
+            const bool has_rot = st.local_anim_rot.has_value();
+            const double quat_angle = has_rot
+                ? pose::quat_hinge_angle(st.local_anim_rot.value(), pose::pose_estimator_base::kRigLateralAxis)
                 : 0.0;
             quat_angle_sum[ji] = pose::is_root_joint(def.joint_id)
                 ? quat_angle : quat_angle_sum[static_cast<std::size_t>(def.parent)] + quat_angle;
 
-            // Every trace comes from the same solved joint, so they are plotted only together.
-            if (st.local_sagittal_angle.has_value() && st.absolute_sagittal_angle.has_value() && st.local_anim_rot.has_value())
+            // The measured angles and the rest-relative motion fill and empty independently (the
+            // measurements need no rest pose), so a sample is taken whenever anything was
+            // produced, and a channel the estimator left empty holds NaN, which the plot draws
+            // as a gap.
+            const bool has_any = st.sagittal_clinical_angle.has_value() || st.sagittal_segment_angle.has_value()
+                || st.sagittal_clinical_angle_delta.has_value() || st.sagittal_segment_angle_delta.has_value()
+                || has_rot;
+            if (has_any)
             {
-                const Eigen::Vector4f v{
-                    static_cast<float>(st.local_sagittal_angle.value() * kRadToDeg),
-                    static_cast<float>(quat_angle * kRadToDeg),
-                    static_cast<float>(st.absolute_sagittal_angle.value() * kRadToDeg),
-                    static_cast<float>(quat_angle_sum[ji] * kRadToDeg),
+                constexpr float no_value = std::numeric_limits<float>::quiet_NaN();
+                const auto deg_or_nan = [](const std::optional<double>& a) {
+                    return a.has_value() ? static_cast<float>(a.value() * kRadToDeg) : no_value;
                 };
+
+                // The rest-relative bend read back out of the rotation, carried into the
+                // clinical sign so the two lines overlay; joints without a clinical angle have
+                // nothing to overlay. The chain total plays the same role for the segment delta.
+                const std::optional<double> quat_clinical_delta = has_rot
+                    ? pose::sagittal_clinical_angle_delta_from_rig_bend_delta(def.joint_id, quat_angle)
+                    : std::nullopt;
+
+                angle_sample_t v;
+                v[0] = deg_or_nan(st.sagittal_clinical_angle);
+                v[1] = deg_or_nan(st.sagittal_segment_angle);
+                v[2] = deg_or_nan(st.sagittal_clinical_angle_delta);
+                v[3] = deg_or_nan(quat_clinical_delta);
+                v[4] = deg_or_nan(st.sagittal_segment_angle_delta);
+                v[5] = has_rot
+                    ? static_cast<float>(pose::sagittal_segment_angle_from_rig(quat_angle_sum[ji]) * kRadToDeg)
+                    : no_value;
+                v[6] = deg_or_nan(st.sagittal_included_angle);
                 _angle_plot_buffers.push(ji, v);
                 _latest_angles[ji] = v;
             }
@@ -288,8 +322,8 @@ namespace gui
         ImGui::SetItemTooltip("Raw Skeleton: Measured raw skeleton (+ FK reconstruction overlay).\n"
                               "Rig Skeleton: Fixed-length T-pose leg rig driven by local_anim_rot.\n"
                               "Positions: Per-joint XYZ position channels as 2D line plots.\n"
-                              "Sagittal Angles: Per-joint flexion [deg], measured against what\n"
-                              "                 local_anim_rot carries, as 2D line plots.");
+                              "Sagittal Angles: Per-joint angles [deg] as 2D line plots, in the\n"
+                              "                 conventions of docs/joint_angle_convention.md.");
 
         switch (_plot_type) {
         case plot_type_t::raw_skeleton:
@@ -306,16 +340,45 @@ namespace gui
             break;
 
         case plot_type_t::sagittal_angles:
+        {
+            constexpr std::array<const char*, 5> angle_views{
+                "Clinical", "Segment", "Included", "Clinical vs rest", "Segment vs rest"
+            };
             ImGui::SameLine();
-            ImGui::Checkbox("Relative", &_angle_plot_relative);
-            ImGui::SetItemTooltip("Which flexion the traces draw. Both are recorded, so toggling\n"
-                                  "switches the view and keeps either history.\n"
-                                  "On: each joint's turn from its parent bone (local_sagittal_angle).\n"
-                                  "Off: the joint's own bone turn in the exo's frame\n"
-                                  "     (absolute_sagittal_angle), the running total down the leg.");
+            ImGui::SetNextItemWidth(kViewComboWidth);
+            if (ImGui::BeginCombo("##angle_view", angle_views[static_cast<int>(_angle_view)])) {
+                for (std::size_t i = 0; i < angle_views.size(); ++i) {
+                    const auto view = static_cast<angle_view_t>(i);
+                    const bool selected = (view == _angle_view);
+                    if (ImGui::Selectable(angle_views[i], selected) && !selected) {
+                        _angle_view = view;
+                        _angle_plot_grid.reset = true; // reframe Y: the views sit in different bands
+                    }
+                    if (selected) { ImGui::SetItemDefaultFocus(); }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SetItemTooltip("Which angle the traces draw, in the conventions of\n"
+                                  "docs/joint_angle_convention.md. The first three are the protocol's\n"
+                                  "three angle fields, shown so what goes on the wire can be checked\n"
+                                  "by eye. Every channel is recorded, so switching changes the view\n"
+                                  "and keeps each history.\n"
+                                  "Clinical: the bend at the joint vs its parent bone\n"
+                                  "    (sagittal_clinical_angle), 0 at neutral, flexion/dorsiflexion\n"
+                                  "    positive; what a joint encoder reads. No rest pose involved.\n"
+                                  "Segment: the bone's attitude from vertically down\n"
+                                  "    (sagittal_segment_angle), anterior positive. No rest pose involved.\n"
+                                  "Included: the inter-bone angle (sagittal_included_angle), 180 deg\n"
+                                  "    when collinear, ankle neutral at 90 deg. No rest pose involved.\n"
+                                  "Clinical vs rest: the bend's change since the captured rest, beside\n"
+                                  "    the same turn read back out of local_anim_rot; the two split by\n"
+                                  "    however far a free solve left the hinge plane.\n"
+                                  "Segment vs rest: the attitude's change since the captured rest,\n"
+                                  "    beside the chain total of the rotations.");
             ImGui::SameLine();
             draw_grid_range_controls(_angle_plot_grid);
             break;
+        }
 
         default: throw std::runtime_error{ "unknown plot type" };
         }
@@ -387,8 +450,17 @@ namespace gui
             if (anchor.has_value())
             {
                 const auto fk = rig_fk(rest, anim, anchor.value());
-                for (std::size_t i = 0; i < pose::kNumJoints; ++i) {
-                    if (fk[i].has_value() && anim[i].has_value()) { overlay[i] = to_display(fk[i].value()); has_overlay = true; }
+                for (const auto& def : pose::get_joint_defs()) {
+                    const std::size_t i = static_cast<std::size_t>(def.joint_id);
+                    // A joint's overlay point is placed by its parent's rotation (a rotation turns
+                    // the bones leaving its joint), so that is the anim whose presence says the
+                    // point was solved this frame; the root answers for itself.
+                    const std::size_t solver = pose::is_root_joint(def.joint_id)
+                        ? i : static_cast<std::size_t>(def.parent);
+                    if (fk[i].has_value() && anim[solver].has_value()) {
+                        overlay[i] = to_display(fk[i].value());
+                        has_overlay = true;
+                    }
                 }
             }
         }
@@ -427,6 +499,20 @@ namespace gui
             if (world[i].has_value()) { disp[i] = to_display(world[i].value()); }
         }
 
+        // An undriven joint holds the canonical layout, which the hint names.
+        // End sites never carry a rotation, so they sit out the count.
+        bool any_driven = false, any_still = false;
+        for (const auto& def : pose::get_joint_defs()) {
+            if (pose::is_root_joint(def.joint_id)) { continue; }
+            if (!pose::get_child_joint(def.joint_id).has_value()) { continue; }
+            if (anim[static_cast<std::size_t>(def.joint_id)].has_value()) { any_driven = true; }
+            else { any_still = true; }
+        }
+
+        const char* hint = nullptr;
+        if (!est || !est->has_rest_pose()) { hint = "calibrate a rest pose to animate"; }
+        else if (any_driven && any_still) { hint = "only the measured leg is driven"; }
+
         const ImVec4 bone_col(_rig_skel.bone_color[0], _rig_skel.bone_color[1], _rig_skel.bone_color[2], _rig_skel.bone_color[3]);
         const ImVec4 point_col(_rig_skel.point_color[0], _rig_skel.point_color[1], _rig_skel.point_color[2], _rig_skel.point_color[3]);
         this->_render_skeleton_3d(
@@ -435,7 +521,7 @@ namespace gui
             _rig_skel.point_size,
             /*overlay*/nullptr,
             /*overlay_color*/ImVec4{},
-            (est && est->has_rest_pose()) ? nullptr : "calibrate a rest pose to animate"
+            hint
         );
     }
 
@@ -461,40 +547,55 @@ namespace gui
 
     void pose_plot_panel::_render_sagittal_angles_plot(float dpi_scale)
     {
-        constexpr float kYLo = -90.0f, kYHi = 90.0f; // default flexion range [deg], frames a walk without clipping
         const ImPlotCond y_cond = (_angle_plot_grid.lock || _angle_plot_grid.reset) ? ImPlotCond_Always : ImPlotCond_Once;
 
-        // "angle" is the estimator's, measured on the bone directions in the hinge plane, and is what
-        // the protocol carries. "quat" is the turn a client recovers from `local_anim_rot` about the
-        // lateral axis. The two separate by however far the joint's rotation axis sits off that axis.
-        const ImVec4 ch_col[4]{
+        // On the vs-rest views, "delta" is the estimator's rest-relative reading and "quat" the
+        // same motion recovered from `local_anim_rot` (carried into the same convention); the
+        // two separate by however far the joint's solved rotation axis sits off the hinge axis.
+        // The measured views hold one channel each, being quantities of their own.
+        const ImVec4 ch_col[7]{
+            { 0.95f, 0.65f, 0.25f, 1 }, { 0.55f, 0.85f, 0.45f, 1 },
             { 0.95f, 0.65f, 0.25f, 1 }, { 0.35f, 0.75f, 0.90f, 1 },
-            { 0.95f, 0.65f, 0.25f, 1 }, { 0.35f, 0.75f, 0.90f, 1 },
+            { 0.55f, 0.85f, 0.45f, 1 }, { 0.35f, 0.75f, 0.90f, 1 },
+            { 0.75f, 0.55f, 0.95f, 1 },
         };
-        const char* const ch_nm[4]{ "angle", "quat", "angle", "quat" };
-        const std::size_t first_channel = _angle_plot_relative ? 0u : 2u;
+        const char* const ch_nm[7]{ "clinical", "segment", "delta", "quat", "delta", "quat", "included" };
 
-        // A joint's flexion turns the bone that ends at it, so each subplot names that bone rather
-        // than the joint alone, and carries the estimator's newest reading for it. The second line
-        // is always present so every cell keeps the same plot height.
+        std::size_t first_channel = 0;
+        std::size_t channel_count = 1;
+        switch (_angle_view) {
+        case angle_view_t::clinical:         first_channel = 0; channel_count = 1; break;
+        case angle_view_t::segment:          first_channel = 1; channel_count = 1; break;
+        case angle_view_t::included:         first_channel = 6; channel_count = 1; break;
+        case angle_view_t::clinical_vs_rest: first_channel = 2; channel_count = 2; break;
+        case angle_view_t::segment_vs_rest:  first_channel = 4; channel_count = 2; break;
+        }
+
+        // Default Y range [deg]. The flexion-style readings swing about 0 and a walk stays
+        // within +/-90; the Included Angle rides around its neutral instead (180 at hip/knee,
+        // 90 at the ankle), so that view frames its own band.
+        const bool included_view = (_angle_view == angle_view_t::included);
+        const float y_lo = included_view ? 0.0f : -90.0f;
+        const float y_hi = included_view ? 225.0f : 90.0f;
+
+        // Each subplot is one joint's articulation, which the joint's own name states (a joint's
+        // angles describe the bend at it), so the title is the name plus the newest reading. A
+        // NaN channel is one the estimator left empty this frame, which the title reads out as
+        // n/a; the feet, being marker end sites, stay that way.
         const auto label = [this, first_channel](std::size_t i) {
-            const auto jid = static_cast<pose::joint_id_t>(i);
-            const auto name = pose::get_joint_name(jid);
-            const auto def = pose::get_joint_def(jid);
+            std::string s{ pose::get_joint_name(static_cast<pose::joint_id_t>(i)) };
 
-            std::string s = (def.has_value() && !pose::is_root_joint(jid))
-                ? std::format("{} -- {}", name, pose::get_joint_name(def->parent))
-                : std::string{ name };
-
-            s += _latest_angles[i].has_value()
+            const bool has_value = _latest_angles[i].has_value()
+                && !std::isnan((*_latest_angles[i])[first_channel]);
+            s += has_value
                 ? std::format("\n{:+.1f} deg", (*_latest_angles[i])[first_channel])
                 : std::string{ "\nn/a" };
             return s;
         };
 
         draw_joint_plot_grid(
-            _angle_plot_grid, dpi_scale, kYLo, kYHi, y_cond,
-            ch_col, ch_nm, first_channel, /*channel_count*/2,
+            _angle_plot_grid, dpi_scale, y_lo, y_hi, y_cond,
+            ch_col, ch_nm, first_channel, channel_count,
             label,
             [this](std::size_t i) { return _angle_plot_buffers.view(i); }
         );
@@ -570,10 +671,19 @@ namespace gui
 
         std::array<double, pose::kNumJoints> jx{}, jy{}, jz{};
         int jn = 0;
-        for (std::size_t i = 0; i < pose::kNumJoints; ++i) {
+        for (const auto& def : pose::get_joint_defs()) {
+            const std::size_t i = static_cast<std::size_t>(def.joint_id);
             if (!disp[i].has_value()) { continue; }
             jx[jn] = disp[i]->x(); jy[jn] = disp[i]->y(); jz[jn] = disp[i]->z(); ++jn;
-            ImPlot3D::PlotText(pose::get_joint_name(static_cast<pose::joint_id_t>(i)).data(),
+
+            // A joint sitting on its parent's point (the hips ride the pelvis marker) skips its
+            // label, which would print over the parent's.
+            const std::size_t p = static_cast<std::size_t>(def.parent);
+            const bool co_sited = !pose::is_root_joint(def.joint_id)
+                && disp[p].has_value()
+                && (disp[i].value() - disp[p].value()).squaredNorm() < 1e-10;
+            if (co_sited) { continue; }
+            ImPlot3D::PlotText(pose::get_joint_name(def.joint_id).data(),
                 disp[i]->x(), disp[i]->y(), disp[i]->z());
         }
         ImPlot3DSpec pt_spec;

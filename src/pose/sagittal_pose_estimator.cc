@@ -4,32 +4,74 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <unordered_set>
 
 namespace pose
 {
+    // ---------------------------------------------------------------------------
+    // Angle model: rig-sign geometry, published in the document conventions
+    // ---------------------------------------------------------------------------
+    //
+    // All geometry in this file is measured in ONE sign system, the rig hinge sign:
+    //
+    //   rig segment angle   A bone's signed turn from the rig's down axis (`kRigDownAxis`) to
+    //                       its direction, about the rig's lateral axis (`kRigLateralAxis`).
+    //                       A bone hanging straight down reads 0; its far end swung toward the
+    //                       exo's back (rig +Z) reads positive, toward its front negative.
+    //
+    //   rig bend            The bend at a joint: the turn of the bone leaving it away from the
+    //                       bone entering it, 0 when the two are collinear. Within one plane the
+    //                       angle between two directions is the difference of the angles each
+    //                       makes with any common reference, so a bend is a difference of
+    //                       adjacent rig segment angles:
+    //
+    //                         (down -> shin) - (down -> thigh) = (thigh -> shin)
+    //
+    // With the bones of one leg (thigh = hip->knee, shin = knee->ankle, foot bone = ankle->foot;
+    // the hip is co-sited on the pelvis marker):
+    //
+    //   bend at the hip   = seg(thigh)
+    //   bend at the knee  = seg(shin) - seg(thigh)
+    //   bend at the ankle = seg(foot) - seg(shin)
+    //   foot              = marker end site; no bone leaves it, so no bend
+    //
+    // The hip's parent bone is the torso, which carries no marker. The exo stands upright on its
+    // fixed frame, so the torso runs along the rig's down axis: the reference direction IS the
+    // torso segment at 0, and the thigh's segment angle is the hip's bend outright.
+    //
+    // One sign system for all geometry keeps this file free of per-joint sign choices: every
+    // bend is the same subtraction, and `local_anim_rot` is a rest-relative bend put straight
+    // onto `kRigLateralAxis` with no sign work at all. The outputs are then produced at the
+    // `joint_state_t` boundary:
+    //
+    //   sagittal_segment_angle / sagittal_clinical_angle / sagittal_included_angle
+    //     The biomechanics conventions of docs/joint_angle_convention.md, carried over from the
+    //     rig-sign values by the conversion functions beside the rig table (joints_def.hh),
+    //     which own every per-joint sign and neutral offset; the included angle is filled from
+    //     the clinical one in the same statement block. No captured rest enters: these state the
+    //     leg's geometry itself, which is what an external validation compares with the exo's
+    //     own joint encoders.
+    //
+    //   local_anim_rot / sagittal_clinical_angle_delta / sagittal_segment_angle_delta
+    //     The change since the captured rest pose,
+    //
+    //       delta(bone) = wrap_pi(rig_segment_now(bone) - rig_segment_rest(bone))
+    //
+    //     with the same subtraction cascade on the deltas for the per-joint bends. Zero while
+    //     the exo holds the captured pose, which is what drives a rig from its bind pose. The
+    //     reference axis cancels in every delta, and so do the conventions' neutral offsets,
+    //     leaving only the clinical sign between the delta fields and the rotation.
+    //
+    // Every angle difference goes through `wrap_pi()`, so no reading jumps by 2*pi.
+
     namespace
     {
         size_t index_of(joint_id_t jid) { return static_cast<size_t>(jid); }
 
-        // Entry point of the tracked leg's chain, once a side has been settled on.
-        std::optional<joint_id_t> knee_of_side(std::optional<joint_side_t> side) {
+        // Entry point of the tracked leg's chain (its hip), once a side has been settled on.
+        std::optional<joint_id_t> hip_of_side(std::optional<joint_side_t> side) {
             if (!side.has_value()) { return std::nullopt; }
             return get_leg_root_joint(side.value());
-        }
-
-        // One frame's flexion of the tracked leg, as measured in the image plane. A step on the way
-        // to the per-joint state: the sign that carries these into the rig frame is applied after.
-        struct leg_angles_t
-        {
-            double hip{ 0.0 };   // thigh swing [rad]
-            double knee{ 0.0 };  // shin vs thigh [rad]
-            double ankle{ 0.0 }; // foot vs shin [rad]
-        };
-
-        // Direction of the bone from `start` to `end` in the image plane.
-        double bone_angle(const Eigen::Vector2d& start, const Eigen::Vector2d& end) {
-            const Eigen::Vector2d d = end - start;
-            return std::atan2(d.y(), d.x());
         }
 
         // A side view's camera frame is not the rig frame: the camera looks along the rig's lateral
@@ -50,16 +92,34 @@ namespace pose
             return Eigen::Vector3d{ 0.0, px.y() * meters_per_pixel, side * px.x() * meters_per_pixel };
         }
 
-        // Measured in-plane angle as a rotation about the rig's lateral axis. The camera's optical
-        // axis runs along rig -X on a left-side view, so a positive in-plane angle is a negative
-        // rotation about rig X.
-        //
-        // NOTE: `side` ties this sign to the one in to_rig_space(). Mirroring the view flips both
-        // together, and getting them out of step shows up as legs swinging opposite to the footage.
-        Eigen::Quaterniond flexion_rotation(double angle, double side) {
-            return Eigen::Quaterniond{
-                Eigen::AngleAxisd{ -side * angle, pose_estimator_base::kRigLateralAxis } 
-            };
+        // Direction of the bone from `start` to `end`, lifted from the image plane into rig
+        // space: the axis mapping of `to_rig_space()` with the metric scale left out, since a
+        // direction has no length to convert. This is what keeps every angle below scale free.
+        // Positions and directions sharing one mapping puts the camera-side handedness in a
+        // single seam, so the two cannot fall out of step.
+        Eigen::Vector3d lift_image_direction(const Eigen::Vector2d& start, const Eigen::Vector2d& end, double side) {
+            const Eigen::Vector2d d = end - start;
+            return Eigen::Vector3d{ 0.0, d.y(), side * d.x() };
+        }
+
+        // Rig-sign segment angle of the bone from `start` to `end`, read off image-plane points
+        // (see the angle model atop this file): the signed turn from the rig's down axis to the
+        // bone's direction, about the rig's lateral axis, backward swing positive. Empty when an
+        // endpoint is missing, and when the two coincide, since a zero-length bone has no
+        // direction to measure. Conversion into the published conventions happens where
+        // `joint_state_t` is filled.
+        std::optional<double> rig_sagittal_segment_angle_from_px(
+            const std::optional<Eigen::Vector2d>& start,
+            const std::optional<Eigen::Vector2d>& end,
+            double side)
+        {
+            constexpr double kMinBoneLengthSq_px = 1e-6; // coincident-endpoint gate [px^2]
+
+            if (!start.has_value() || !end.has_value()) { return std::nullopt; }
+            const Eigen::Vector3d dir = lift_image_direction(start.value(), end.value(), side);
+            if (dir.squaredNorm() < kMinBoneLengthSq_px) { return std::nullopt; }
+            return hinge_plane_angle(
+                pose_estimator_base::kRigDownAxis, dir, pose_estimator_base::kRigLateralAxis);
         }
 
     } // namespace
@@ -112,8 +172,9 @@ namespace pose
     { }
 
     // Which side the camera views from follows from the marked leg, since the far leg is hidden
-    // behind the near one. Before any joint has been measured the left-hand mapping is assumed;
-    // nothing downstream depends on it yet, because rotations need a rest pose that cannot exist by then.
+    // behind the near one. Before any leg joint has been measured the left-hand mapping is
+    // assumed; nothing downstream depends on it yet, because every angle needs the tracked leg's
+    // points, and any frame that supplies those (fresh or held) has settled the side in pass 1.
     double sagittal_pose_estimator::_side() const noexcept
     {
         return (_ctx->tracked_side == joint_side_t::right) ? -1.0 : 1.0;
@@ -155,7 +216,11 @@ namespace pose
 
     std::optional<joint_id_t> sagittal_pose_estimator::tracked_leg_knee() const
     {
-        return knee_of_side(_ctx->tracked_side);
+        // The knee rather than the hip: the hip sits on the shared pelvis tag, so the knee's tag
+        // is the first one that identifies the leg to an operator.
+        const std::optional<joint_id_t> hip = hip_of_side(_ctx->tracked_side);
+        if (!hip.has_value()) { return std::nullopt; }
+        return get_child_joint(hip.value());
     }
 
     void sagittal_pose_estimator::update(
@@ -172,8 +237,10 @@ namespace pose
 
         // ----- Pass 1: which leg is in view -----
         // Only one leg is marked, so counting the sides of this frame's joints answers it outright.
-        // A tie means nothing decisive was seen (nothing measured at all, or only midline joints),
-        // and the previous answer stands.
+        // The hips are co-sited on the shared pelvis tag and arrive as a left/right pair, adding
+        // one to each count, so only the leg's own tags decide. A tie means nothing decisive was
+        // seen (nothing measured at all, or only the shared and midline points), and the previous
+        // answer stands.
         {
             int right_seen = 0, left_seen = 0;
             for (const auto& m : measurements) {
@@ -189,18 +256,27 @@ namespace pose
         }
 
         // ----- Pass 2: take this frame's image-plane points and metric scale -----
-        // The scale is averaged over every measurement that supplied one: the rig sits at one
-        // distance from a side camera, so one factor describes it and the spread between markers is
-        // measurement noise rather than depth.
+        // The scale is averaged with one vote per physical marker: the rig sits at one distance
+        // from a side camera, so one factor describes it and the spread between markers is
+        // measurement noise rather than depth. Joints co-sited on one marker (the pelvis marker
+        // carries the pelvis and both hips) arrive as one measurement each, all repeating that
+        // marker's scale, so a vote is keyed by the tag the joint is bound to; the shared tag_id
+        // in the rig table is the very datum that makes joints co-sited, so the keying follows
+        // any change to the co-siting on its own.
         double scale_sum = 0.0;
         int scale_count = 0;
+        std::unordered_set<int> scale_voted_tags;
         for (const auto& m : measurements)
         {
             const size_t i = index_of(m.joint_id);
             _ctx->last_frame_raw_px[i] = m.center_px;
             _ctx->last_frame_detection_flags[i] = true;
 
-            if (m.meters_per_pixel.has_value()) {
+            const std::optional<joint_definition_t> def = get_joint_def(m.joint_id);
+            if (m.meters_per_pixel.has_value()
+                && def.has_value()
+                && scale_voted_tags.insert(def->tag_id).second)
+            {
                 scale_sum += m.meters_per_pixel.value();
                 ++scale_count;
             }
@@ -256,88 +332,129 @@ namespace pose
             }
         }
 
-        // ----- Pass 4: in-plane angles (image points -> per-joint local_anim_rot) -----
-        // Needs a captured rest pose (for the rest bone angles) and a leg to walk. Each bone's angle
-        // change since rest, minus its parent bone's, is that joint's flexion. Measured on pixels,
-        // so the metric scale never enters the result.
-        const std::optional<joint_id_t> tracked_knee = knee_of_side(_ctx->tracked_side);
-        if (this->has_rest_pose() && tracked_knee.has_value())
+        // ----- Pass 4: rig-sign segment angles -> published angles + rest-relative motion -----
+        // The model is laid out at the top of this file. Every angle is read off the smoothed +
+        // held image points (`last_frame_px`), so the occlusion policy above applies to the
+        // angles as well; a direction is scale free, so the metric approximation never enters
+        // any of them.
         {
+            auto& states = _ctx->last_frame_joint_states;
             const joint_id_t root = get_root_joint();
-            const joint_id_t knee = tracked_knee.value();
-            const std::optional<joint_id_t> ankle = get_child_joint(knee);
-            const std::optional<joint_id_t> foot = ankle.has_value() ? get_child_joint(ankle.value()) : std::nullopt;
+            const auto at = [](joint_id_t j) { return index_of(j); };
 
-            if (ankle.has_value() && foot.has_value())
+            // The root's bone is the torso, which stands along the reference axis, so its
+            // segment angle is 0 by definition, with no measurement involved. It has no parent
+            // bone, hence no clinical angle.
+            states[at(root)].sagittal_segment_angle = 0.0;
+
+            const std::optional<joint_id_t> hip = hip_of_side(_ctx->tracked_side);
+            const std::optional<joint_id_t> knee =
+                hip.has_value() ? get_child_joint(hip.value()) : std::nullopt;
+            const std::optional<joint_id_t> ankle =
+                knee.has_value() ? get_child_joint(knee.value()) : std::nullopt;
+            const std::optional<joint_id_t> foot =
+                ankle.has_value() ? get_child_joint(ankle.value()) : std::nullopt;
+
+            if (hip.has_value() && knee.has_value() && ankle.has_value() && foot.has_value())
             {
+                const double side = this->_side();
                 const auto& px = _ctx->last_frame_px;
-                const auto& rest_px = _ctx->rest_pose->joint_px;
-                const auto at = [](joint_id_t j) { return index_of(j); };
 
-                const bool have_all =
-                    px[at(root)] && px[at(knee)] && px[at(ankle.value())] && px[at(foot.value())] &&
-                    rest_px[at(root)] && rest_px[at(knee)] && rest_px[at(ankle.value())] && rest_px[at(foot.value())];
+                // --- this frame's rig-sign segment angles, one per bone of the tracked leg ---
+                // The hip point rides the shared pelvis tag, so the thigh runs from it. Each is
+                // empty where an endpoint is missing, and every output below asks for exactly
+                // the segments it is defined on, so one lost tag costs only the angles built on
+                // it. The foot joint is a marker end site: it lends the foot bone its far
+                // endpoint and carries no angles of its own.
+                const std::optional<double> rig_sagittal_segment_ang_thigh = rig_sagittal_segment_angle_from_px(px[at(hip.value())], px[at(knee.value())], side);
+                const std::optional<double> rig_sagittal_segment_ang_shin  = rig_sagittal_segment_angle_from_px(px[at(knee.value())], px[at(ankle.value())], side);
+                const std::optional<double> rig_sagittal_segment_ang_foot  = rig_sagittal_segment_angle_from_px(px[at(ankle.value())], px[at(foot.value())], side);
 
-                if (have_all)
+                // --- published measured angles (no rest pose involved) ---
+                // Carried into the document conventions at this boundary; every per-joint sign
+                // and neutral offset lives in the joints_def.hh table.
+                if (rig_sagittal_segment_ang_thigh.has_value()) {
+                    const std::optional<double> hip_clinical =
+                        sagittal_clinical_angle_from_rig_bend(hip.value(), rig_sagittal_segment_ang_thigh.value());
+                    states[at(hip.value())].sagittal_segment_angle = sagittal_segment_angle_from_rig(rig_sagittal_segment_ang_thigh.value());
+                    states[at(hip.value())].sagittal_clinical_angle = hip_clinical;
+                    states[at(hip.value())].sagittal_included_angle = hip_clinical.has_value()
+                        ? sagittal_included_angle_from_clinical(hip.value(), hip_clinical.value())
+                        : std::nullopt;
+                }
+                if (rig_sagittal_segment_ang_shin.has_value()) {
+                    states[at(knee.value())].sagittal_segment_angle = sagittal_segment_angle_from_rig(rig_sagittal_segment_ang_shin.value());
+                    if (rig_sagittal_segment_ang_thigh.has_value()) {
+                        const std::optional<double> knee_clinical = sagittal_clinical_angle_from_rig_bend(knee.value(),
+                            wrap_pi(rig_sagittal_segment_ang_shin.value() - rig_sagittal_segment_ang_thigh.value()));
+                        states[at(knee.value())].sagittal_clinical_angle = knee_clinical;
+                        states[at(knee.value())].sagittal_included_angle = knee_clinical.has_value()
+                            ? sagittal_included_angle_from_clinical(knee.value(), knee_clinical.value())
+                            : std::nullopt;
+                    }
+                }
+                if (rig_sagittal_segment_ang_foot.has_value()) {
+                    states[at(ankle.value())].sagittal_segment_angle = sagittal_segment_angle_from_rig(rig_sagittal_segment_ang_foot.value());
+                    if (rig_sagittal_segment_ang_shin.has_value()) {
+                        const std::optional<double> ankle_clinical = sagittal_clinical_angle_from_rig_bend(ankle.value(),
+                            wrap_pi(rig_sagittal_segment_ang_foot.value() - rig_sagittal_segment_ang_shin.value()));
+                        states[at(ankle.value())].sagittal_clinical_angle = ankle_clinical;
+                        states[at(ankle.value())].sagittal_included_angle = ankle_clinical.has_value()
+                            ? sagittal_included_angle_from_clinical(ankle.value(), ankle_clinical.value())
+                            : std::nullopt;
+                    }
+                }
+
+                // --- rest-relative motion ---
+                // The change of each rig-sign segment angle since the captured rest, then the
+                // same subtraction cascade on the changes for the per-joint bends; the reference
+                // axis cancels in each change. All three bones are required on both ends: a rig
+                // driven by these rotations needs the whole chain to describe one pose.
+                if (this->has_rest_pose())
                 {
-                    const double d_thigh = wrap_pi(
-                        bone_angle(px[at(root)].value(), px[at(knee)].value())
-                        - bone_angle(rest_px[at(root)].value(), rest_px[at(knee)].value()));
-                    const double d_shin = wrap_pi(
-                        bone_angle(px[at(knee)].value(), px[at(ankle.value())].value())
-                        - bone_angle(rest_px[at(knee)].value(), rest_px[at(ankle.value())].value()));
-                    const double d_foot = wrap_pi(
-                        bone_angle(px[at(ankle.value())].value(), px[at(foot.value())].value())
-                        - bone_angle(rest_px[at(ankle.value())].value(), rest_px[at(foot.value())].value()));
+                    const auto& rest_px = _ctx->rest_pose->joint_px;
+                    const std::optional<double> rest_rig_sagittal_segment_ang_thigh = rig_sagittal_segment_angle_from_px(rest_px[at(hip.value())], rest_px[at(knee.value())], side);
+                    const std::optional<double> rest_rig_sagittal_segment_ang_shin  = rig_sagittal_segment_angle_from_px(rest_px[at(knee.value())], rest_px[at(ankle.value())], side);
+                    const std::optional<double> rest_rig_sagittal_segment_ang_foot  = rig_sagittal_segment_angle_from_px(rest_px[at(ankle.value())], rest_px[at(foot.value())], side);
 
-                    const leg_angles_t a{
-                        .hip = d_thigh,
-                        .knee = wrap_pi(d_shin - d_thigh),
-                        .ankle = wrap_pi(d_foot - d_shin),
-                    };
+                    if (rig_sagittal_segment_ang_thigh.has_value() && rig_sagittal_segment_ang_shin.has_value() && rig_sagittal_segment_ang_foot.has_value()
+                        && rest_rig_sagittal_segment_ang_thigh.has_value() && rest_rig_sagittal_segment_ang_shin.has_value() && rest_rig_sagittal_segment_ang_foot.has_value())
+                    {
+                        const double rig_sagittal_segment_delta_thigh = wrap_pi(rig_sagittal_segment_ang_thigh.value() - rest_rig_sagittal_segment_ang_thigh.value());
+                        const double rig_sagittal_segment_delta_shin  = wrap_pi(rig_sagittal_segment_ang_shin.value()  - rest_rig_sagittal_segment_ang_shin.value());
+                        const double rig_sagittal_segment_delta_foot  = wrap_pi(rig_sagittal_segment_ang_foot.value()  - rest_rig_sagittal_segment_ang_foot.value());
 
-                    // Bone->joint map (matches the rig it drives): knee joint drives the thigh, ankle
-                    // the shin, foot the foot bone. Pelvis is the fixed base.
-                    const double side = this->_side();
-                    auto& states = _ctx->last_frame_joint_states;
-                    states[at(root)].local_anim_rot = Eigen::Quaterniond::Identity();
-                    states[at(knee)].local_anim_rot = flexion_rotation(a.hip, side);
-                    states[at(ankle.value())].local_anim_rot = flexion_rotation(a.knee, side);
-                    states[at(foot.value())].local_anim_rot = flexion_rotation(a.ankle, side);
+                        const double rig_sagittal_bend_delta_hip   = rig_sagittal_segment_delta_thigh;
+                        const double rig_sagittal_bend_delta_knee  = wrap_pi(rig_sagittal_segment_delta_shin - rig_sagittal_segment_delta_thigh);
+                        const double rig_sagittal_bend_delta_ankle = wrap_pi(rig_sagittal_segment_delta_foot - rig_sagittal_segment_delta_shin);
 
-                    // The same flexions as signed angles about the rig's lateral axis, 
-                    // the bone's own turn beside the joint's turn from its parent.
-                    // `-side` is the sign flexion_rotation() carries, so the angles agree with the rotations joint for joint.
-                    states[at(root)].local_sagittal_angle = 0.0;
-                    states[at(knee)].local_sagittal_angle = -side * a.hip;
-                    states[at(ankle.value())].local_sagittal_angle = -side * a.knee;
-                    states[at(foot.value())].local_sagittal_angle = -side * a.ankle;
+                        // The rotation is the rig-sign bend delta put straight onto the shared
+                        // hinge axis; the delta fields are the same motion in the document
+                        // conventions. Pelvis is the fixed base.
+                        states[at(root)].local_anim_rot = Eigen::Quaterniond::Identity();
+                        states[at(root)].sagittal_segment_angle_delta = 0.0;
+                        states[at(hip.value())].local_anim_rot = Eigen::Quaterniond{
+                            Eigen::AngleAxisd{ rig_sagittal_bend_delta_hip, pose_estimator_base::kRigLateralAxis } };
+                        states[at(knee.value())].local_anim_rot = Eigen::Quaterniond{
+                            Eigen::AngleAxisd{ rig_sagittal_bend_delta_knee, pose_estimator_base::kRigLateralAxis } };
+                        states[at(ankle.value())].local_anim_rot = Eigen::Quaterniond{
+                            Eigen::AngleAxisd{ rig_sagittal_bend_delta_ankle, pose_estimator_base::kRigLateralAxis } };
 
-                    states[at(root)].absolute_sagittal_angle = 0.0;
-                    states[at(knee)].absolute_sagittal_angle = -side * d_thigh;
-                    states[at(ankle.value())].absolute_sagittal_angle = -side * d_shin;
-                    states[at(foot.value())].absolute_sagittal_angle = -side * d_foot;
+                        states[at(hip.value())].sagittal_clinical_angle_delta =
+                            sagittal_clinical_angle_delta_from_rig_bend_delta(hip.value(), rig_sagittal_bend_delta_hip);
+                        states[at(knee.value())].sagittal_clinical_angle_delta =
+                            sagittal_clinical_angle_delta_from_rig_bend_delta(knee.value(), rig_sagittal_bend_delta_knee);
+                        states[at(ankle.value())].sagittal_clinical_angle_delta =
+                            sagittal_clinical_angle_delta_from_rig_bend_delta(ankle.value(), rig_sagittal_bend_delta_ankle);
 
+                        states[at(hip.value())].sagittal_segment_angle_delta = sagittal_segment_angle_from_rig(rig_sagittal_segment_delta_thigh);
+                        states[at(knee.value())].sagittal_segment_angle_delta = sagittal_segment_angle_from_rig(rig_sagittal_segment_delta_shin);
+                        states[at(ankle.value())].sagittal_segment_angle_delta = sagittal_segment_angle_from_rig(rig_sagittal_segment_delta_foot);
+                    }
                 }
             }
         }
 
-        // ----- Pass 5: complete the rig -----
-        // Every joint owes the consumer a rotation, so a joint left without one takes its mirror's.
-        // The flexion angles travel with it, the three being one joint's motion in three forms.
-        // Positions stay as measured: only the marked leg was observed, and the plots should say so.
-        auto& states = _ctx->last_frame_joint_states;
-        for (const auto& def : get_joint_defs())
-        {
-            if (!has_mirror_joint(def.joint_id)) { continue; }
-            const size_t src = index_of(def.joint_id);
-            const size_t dst = index_of(def.mirror);
-            if (states[src].local_anim_rot.has_value() && !states[dst].local_anim_rot.has_value()) {
-                states[dst].local_anim_rot = states[src].local_anim_rot;
-                states[dst].local_sagittal_angle = states[src].local_sagittal_angle;
-                states[dst].absolute_sagittal_angle = states[src].absolute_sagittal_angle;
-            }
-        }
     }
 
     bool sagittal_pose_estimator::calibrate_rest_pose()

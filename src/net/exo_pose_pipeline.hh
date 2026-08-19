@@ -5,6 +5,7 @@
 #include "hw/calibration.hh"
 #include "hw/frame_format.hh"
 #include "hw/roi.hh"
+#include "hw/sensor_frame_observer.hh"
 #include "hw/sensor_frame_provider.hh"
 #include "hw/source_backend.hh"
 #include "io/frame_recorder.hh"
@@ -111,9 +112,9 @@ namespace net
         // --- stepping -----------------------------------------------------------------
         // Advance one step: pull the newest latched detections and recompute joint states.
         // Each flag reports something that happened this step and is cleared once returned.
-        struct poll_result_t { 
-            bool new_pose{ false }; 
-            bool stream_ended{ false }; 
+        struct poll_result_t {
+            bool new_pose{ false };
+            std::optional<hw::stream_end_reason_t> stream_end_reason; // set when the stream ended
             bool status_changed{ false };
         };
         poll_result_t poll();

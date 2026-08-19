@@ -8,6 +8,12 @@
 
 namespace hw
 {
+    enum class stream_end_reason_t
+    {
+        completed, // the source ran out of frames, or was closed
+        failed,    // the source stopped on something it cannot go on from
+    };
+
     // Callbacks may be invoked from the provider's worker thread.
     class sensor_frame_observer
     {
@@ -36,7 +42,7 @@ namespace hw
 
         // Called when the stream terminates (e.g., at the end of playback).
         // NOTE: This method may be called from a worker thread.
-        virtual void on_sensor_stream_end() = 0;
+        virtual void on_sensor_stream_end(stream_end_reason_t reason) = 0;
     };
 
     // Latches only the latest frame for pull-style consumers.
@@ -74,7 +80,7 @@ namespace hw
             _termination_flag = false;
         }
 
-        void on_sensor_stream_end() override
+        void on_sensor_stream_end(stream_end_reason_t) override
         {
             _termination_flag = true;
         }

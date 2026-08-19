@@ -123,7 +123,7 @@ namespace io
         this->stop();
     }
 
-    void frame_recorder::on_sensor_stream_end()
+    void frame_recorder::on_sensor_stream_end(const hw::stream_end_reason_t)
     {
         this->stop();
     }

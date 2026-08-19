@@ -25,10 +25,12 @@ namespace pose
         Eigen::Vector2d center_px{ Eigen::Vector2d::Zero() };
 
         // Metric scale this one measurement supplies:
-        // the marker's printed size over its apparent size in pixels. 
-        // An estimator averages what a frame supplies and reports positions in approximate meters. 
-        // Empty when the marker's apparent size was not measurable, which
-        // leaves the center usable and only withholds a vote on the scale.
+        // the marker's printed size over its apparent size in pixels.
+        // An estimator averages one vote per physical marker and reports positions in
+        // approximate meters; joints co-sited on one marker each carry that marker's value, and
+        // the vote is keyed by the tag the joint is bound to, so the shared marker still counts
+        // once. Empty when the marker's apparent size was not measurable, which leaves the
+        // center usable and only withholds a vote on the scale.
         std::optional<double> meters_per_pixel{};
     };
 

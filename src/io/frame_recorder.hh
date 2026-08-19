@@ -42,7 +42,7 @@ namespace io
         void on_sensor_frame_update(const std::shared_ptr<hw::sensor_frame>& new_sensor_frame) override;
         void on_sensor_stream_reset() override;
         void on_sensor_frame_geometry_changed() override;
-        void on_sensor_stream_end() override;
+        void on_sensor_stream_end(hw::stream_end_reason_t reason) override;
 
     private:
         void _worker(std::stop_token stop);

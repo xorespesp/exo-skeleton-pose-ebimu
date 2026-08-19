@@ -252,7 +252,7 @@ namespace pose
             // 따라 이동하면서 무게중심까지 흔들린다.
             // 올리면 큰 구멍도 메우지만 가까이 붙은 덩어리끼리 합쳐진다.
             //
-            // 둘 다 0 이면 해당 단계를 건너뛴다.
+            // 1 이하면 해당 단계를 건너뛴다. 1x1 커널은 마스크를 바꾸지 않는다.
             int close_kernel_px{ 5 };
 
             DECLARE_SERIALIZABLE_FIELDS(
@@ -408,7 +408,9 @@ namespace pose
 
         const stats_t& stats() const noexcept { return _stats; }
 
-        // 이 배정기가 채우는 관절 사슬 (골반 -> 무릎 -> 발목 -> 발).
+        // 이 배정기가 따라가는 마커 사이트 사슬 (골반 -> 무릎 -> 발목 -> 발). 슬롯 하나가 원반
+        // 하나다. 한 사이트에 겹쳐 있는 관절들(골반 마커 위의 hip 분절)은 별도 슬롯 없이 그
+        // 사이트의 측정을 함께 받는다.
         std::span<const joint_id_t> chain() const noexcept { return _chain; }
 
     private:

@@ -26,10 +26,15 @@ namespace pose
 
         cv::Point2f project(const hw::intrinsic_t& k, const Eigen::Isometry3d& pose, const Eigen::Vector3d& p_tag)
         {
+            // Depth floor: a point at or behind the pinhole (or a NaN depth, which fails the
+            // comparison) would otherwise reach the drawing as an infinity.
+            constexpr double kMinDepth_m = 1e-6;
+
             const Eigen::Vector3d p_cam = pose * p_tag;
+            const double z = (p_cam.z() > kMinDepth_m) ? p_cam.z() : kMinDepth_m;
             return {
-                static_cast<float>(k.fx * p_cam.x() / p_cam.z() + k.cx),
-                static_cast<float>(k.fy * p_cam.y() / p_cam.z() + k.cy)
+                static_cast<float>(k.fx * p_cam.x() / z + k.cx),
+                static_cast<float>(k.fy * p_cam.y() / z + k.cy)
             };
         }
 
@@ -118,7 +123,12 @@ namespace pose
                 };
             };
 
-            std::array<tag_pose_t, 2> pose_cands_buff;
+            // Both entries start readable: the whole array is handed out beside the count, and an
+            // Eigen transform's default constructor leaves its linear block unset.
+            std::array<tag_pose_t, 2> pose_cands_buff{
+                tag_pose_t{ Eigen::Isometry3d::Identity(), 0.0, {} },
+                tag_pose_t{ Eigen::Isometry3d::Identity(), 0.0, {} },
+            };
             size_t num_pose_cands{};
 
             if (_opt.pose_method == pose_method_t::homography)

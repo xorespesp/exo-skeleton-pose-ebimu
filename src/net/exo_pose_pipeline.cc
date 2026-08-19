@@ -78,9 +78,11 @@ namespace net
             return true;
         }
 
-        // True once per stream-end signal (consumes the latched flag).
-        bool consume_stream_ended_signal() noexcept {
-            return _stream_ended.exchange(false);
+        // Why the stream ended, once per stream-end signal (consumes the latched flag).
+        // Empty when none has been raised since the last call.
+        std::optional<hw::stream_end_reason_t> consume_stream_end_signal() noexcept {
+            if (!_stream_ended.exchange(false)) { return std::nullopt; }
+            return _stream_end_reason.load();
         }
 
         // True once per stream-jump signal (consumes the latched flag).
@@ -130,9 +132,10 @@ namespace net
             _frame_geometry_changed = true;
         }
 
-        void on_sensor_stream_end() override {
+        void on_sensor_stream_end(const hw::stream_end_reason_t reason) override {
             spdlog::debug("pipeline: worker signalled end of stream");
-            _stream_ended = true;
+            _stream_end_reason = reason;
+            _stream_ended = true; // set last, so a reader that sees it finds the reason in place
         }
 
     private:
@@ -144,6 +147,7 @@ namespace net
         cv::Mat _source; // the same capture undrawn, for anything reading original pixels
         uint64_t _seq{ 0 };
         std::atomic<bool> _stream_ended{ false }; // set by the worker thread on stream end
+        std::atomic<hw::stream_end_reason_t> _stream_end_reason{ hw::stream_end_reason_t::completed };
         std::atomic<bool> _stream_reset{ false }; // set by the worker thread when the position jumps
         std::atomic<bool> _frame_geometry_changed{ false }; // ... and when the ROI changes
     };
@@ -464,12 +468,12 @@ namespace net
 
     bool exo_pose_pipeline::calibrate_rest_pose()
     {
-        _status_changed = true;
-
-        if (!_active) {
+        if (!_active || !this->is_source_open()) {
             spdlog::warn("pipeline: cannot calibrate a rest pose without an open source");
             return false;
         }
+
+        _status_changed = true;
 
         const bool ok = _active->calibrate_rest_pose();
         if (!ok) {
@@ -621,12 +625,16 @@ namespace net
         }
 
         // Stream end: consume the one-shot signal the worker thread raises at end of stream.
-        r.stream_ended = _observer && _observer->consume_stream_ended_signal();
-        if (r.stream_ended)
+        r.stream_end_reason = _observer ? _observer->consume_stream_end_signal() : std::nullopt;
+        if (r.stream_end_reason.has_value())
         {
             // A recording hitting EOF is expected; a live device going quiet is a loss.
             if (_is_playback_source) { spdlog::info("pipeline: recording '{}' reached the end of its stream", this->source_name()); }
             else { spdlog::warn("pipeline: device '{}' stopped streaming", this->source_name()); }
+
+            // A failed source has nothing left to give, so it is released and the reported status follows.
+            // One that ran out stays open, where a seek starts it going again.
+            if (r.stream_end_reason == hw::stream_end_reason_t::failed) { this->close_source(); }
         }
 
         // Status: consume the flag set by the last source/rest command.

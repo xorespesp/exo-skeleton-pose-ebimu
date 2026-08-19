@@ -281,7 +281,7 @@ namespace hw
 
         if (had_source)
         {
-            _notify_sensor_stream_end();
+            _notify_sensor_stream_end(stream_end_reason_t::completed);
         }
     }
 
@@ -418,7 +418,7 @@ namespace hw
                 }
 
                 spdlog::info("provider: end of recording stream");
-                this->_notify_sensor_stream_end();
+                this->_notify_sensor_stream_end(stream_end_reason_t::completed);
                 this->pause(); // idle until close / seek / play
                 continue;
             }
@@ -490,7 +490,7 @@ namespace hw
         _running.store(false);
 
         // An observer of its own is no reason to take the process with it.
-        try { this->_notify_sensor_stream_end(); } catch (...) {}
+        try { this->_notify_sensor_stream_end(stream_end_reason_t::failed); } catch (...) {}
     }
 
     std::vector<std::shared_ptr<sensor_frame_observer>> sensor_frame_provider::_snapshot_observers() const
@@ -517,9 +517,9 @@ namespace hw
         for (const auto& obs : _snapshot_observers()) { obs->on_sensor_frame_geometry_changed(); }
     }
 
-    void sensor_frame_provider::_notify_sensor_stream_end()
+    void sensor_frame_provider::_notify_sensor_stream_end(const stream_end_reason_t reason)
     {
-        for (const auto& obs : _snapshot_observers()) { obs->on_sensor_stream_end(); }
+        for (const auto& obs : _snapshot_observers()) { obs->on_sensor_stream_end(reason); }
     }
 
     void sensor_frame_provider::play()

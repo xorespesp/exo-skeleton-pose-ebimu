@@ -25,22 +25,21 @@ namespace pose
     // points alone: no marker->camera pose, no depth, no camera intrinsics. That makes this the cheap
     // path and immune to depth noise.
     //
-    // Every rig joint comes out with a rotation, so a consumer always sees a whole skeleton and
-    // never has to know how many legs the camera could actually see. Positions are a separate
-    // matter: only measured joints get one, which keeps the raw-position views honest.
+    // Only the marked leg carries a position, an angle or a rotation. 
+    // Which leg that is follows from the joints this frame measured, and with it which side the camera stands on.
     //
-    // Reaching that from one side is an internal concern. The marked leg follows from the joints
-    // this frame measured, and the far leg (occluded by the near one) takes its rotations from its
-    // mirror joints.
+    // Angles follow the model laid out at the top of the implementation file: geometry is
+    // measured in the rig's hinge sign, and `joint_state_t` receives it in the biomechanics
+    // conventions of docs/joint_angle_convention.md (Segment / Clinical / Included Angle, no
+    // rest pose involved) beside the rest-relative motion (`local_anim_rot` and the delta
+    // angles). Directions are measured on pixel deltas, which is scale free, so the metric
+    // approximation below cannot leak in.
     //
-    // A bone's angle is atan2 over its two endpoints; each joint's rotation is that angle's change
-    // since the captured rest, taken relative to its parent bone's change. Angles are computed on
-    // pixel coordinates, which is scale free, so the metric approximation below cannot leak in.
-    //
-    // Output is expressed in the rig frame, not the camera's. A side view looks along the rig's
-    // lateral axis, so the image plane holds the rig's sagittal plane: flexion becomes a rotation
-    // about the rig's lateral axis and measured points land on the mid-sagittal plane (X = 0).
-    // Which side the camera views from decides the sign of both, and the tagged leg gives it away.
+    // Positions and rotations are expressed in the rig frame, not the camera's. A side view looks
+    // along the rig's lateral axis, so the image plane holds the rig's sagittal plane: flexion
+    // becomes a rotation about the rig's lateral axis and measured points land on the
+    // mid-sagittal plane (X = 0). Which side the camera views from decides the sign of both, and
+    // the tagged leg gives it away.
     //
     // `joint_state_t::position` is reported in approximate meters: the scales the measurements
     // supply are averaged into one meters-per-pixel factor for the whole rig. This keeps one unit
@@ -90,8 +89,9 @@ namespace pose
             hw::timestamp_t sensor_timestamp // when the source captured the frame
         );
 
-        // Latch the current per-joint image-plane points as the rest (bind) reference. Bone angles
-        // are measured against it, so no rotation is produced until it is captured.
+        // Latch the current per-joint image-plane points as the rest (bind) reference. The
+        // rest-relative motion is measured against it, so no rotation is produced until it is
+        // captured; the measured angles flow regardless.
         // Returns false if no joint had a point this frame.
         bool calibrate_rest_pose() override;
         void clear_rest_pose() override;

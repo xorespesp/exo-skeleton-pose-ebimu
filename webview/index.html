@@ -7,16 +7,18 @@
         <style>
             body { margin: 0; overflow: hidden; font-family: system-ui, sans-serif; }
             #container { position: fixed; inset: 0; }
-            #info {
-                position: fixed; top: 8px; left: 8px; padding: 6px 10px;
-                background: rgba(0, 0, 0, 0.55); color: #eee; border-radius: 6px;
-                font-size: 13px; pointer-events: none;
+            /* Diagnostic text over the scene. (transparent & click-through) */
+            #debug-overlay {
+                position: fixed; top: 8px; left: 8px; margin: 0;
+                color: #fff; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+                font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                white-space: pre; pointer-events: none; display: none;
             }
         </style>
     </head>
     <body>
         <div id="container"></div>
-        <div id="info">exo-skeleton-pose WebGL demo</div>
+        <pre id="debug-overlay"></pre>
         <script type="module" src="/src/main.js"></script>
     </body>
 </html>

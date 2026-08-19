@@ -10,7 +10,7 @@
 //
 // The measurement runs on the bone directions, projected into that plane. The projection is what
 // makes the reading a pure hinge quantity: a bone tilted along the axis (the thigh runs from the
-// midline pelvis out to the knee) contributes only its in-plane part.
+// hip on the midline pelvis marker out to the knee) contributes only its in-plane part.
 namespace pose
 {
     // Fold an angle into [-pi, pi] so a difference of two angles does not jump by 2pi.

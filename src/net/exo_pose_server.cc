@@ -443,10 +443,11 @@ namespace net
                     _imp->pipeline.current_frame_seq(), frame.size(), _imp->client_count);
                 _imp->uws_loop.publish("pose", frame);
             }
-            if (r.stream_ended)
+            if (r.stream_end_reason.has_value())
             {
-                spdlog::debug("server: tx SourceStreamEnded");
-                _imp->uws_loop.publish("status", this->_serialize_source_stream_ended());
+                const bool is_error = (r.stream_end_reason == hw::stream_end_reason_t::failed);
+                spdlog::debug("server: tx SourceStreamEnded (error: {})", is_error);
+                _imp->uws_loop.publish("status", this->_serialize_source_stream_ended(is_error));
             }
             if (r.status_changed)
             {
@@ -479,7 +480,8 @@ namespace net
             fb_proto::Quat fb_local_anim_rot;
             if (st.local_anim_rot.has_value()) { fb_local_anim_rot = to_fb_quat(st.local_anim_rot.value()); }
 
-            // The same joint's flexion as signed angles, which a client can log or plot directly.
+            // The measured angles ride beside the rotation, each field in the convention its
+            // schema comment states, read straight off the joint state.
             const auto to_fb_angle = [](const std::optional<double>& a) {
                 return a.has_value() ? fb::Optional<double>{ a.value() } : fb::nullopt;
             };
@@ -487,8 +489,9 @@ namespace net
             joints.push_back(fb_proto::CreateJointPose(
                 b, static_cast<fb_proto::JointId>(def.joint_id),
                 st.local_anim_rot.has_value() ? &fb_local_anim_rot : nullptr,
-                to_fb_angle(st.local_sagittal_angle),
-                to_fb_angle(st.absolute_sagittal_angle)
+                to_fb_angle(st.sagittal_segment_angle),
+                to_fb_angle(st.sagittal_clinical_angle),
+                to_fb_angle(st.sagittal_included_angle)
             ));
         }
 
@@ -507,14 +510,16 @@ namespace net
         fb::FlatBufferBuilder b;
 
         const bool is_streaming = _imp->pipeline.is_source_open();
-        const auto source_name_str = b.CreateString(is_streaming ? _imp->pipeline.source_name() : std::string{});
 
-        const std::string_view source_backend_sv = is_streaming
+        const auto to_fb_string = [&b](std::string_view s) {
+            return s.empty() ? b.CreateString("") : b.CreateString(s.data(), s.size());
+        };
+
+        const auto source_name_str = to_fb_string(
+            is_streaming ? _imp->pipeline.source_name() : std::string{});
+        const auto source_backend_str = to_fb_string(is_streaming
             ? hw::source_backend_to_str(_imp->pipeline.source_backend())
-            : std::string_view{};
-
-        const auto source_backend_str = b.CreateString(
-            source_backend_sv.data(), source_backend_sv.size());
+            : std::string_view{});
 
         int32_t w = 0, h = 0;
         if (is_streaming) {
@@ -534,13 +539,10 @@ namespace net
         return std::string(std::bit_cast<const char*>(b.GetBufferPointer()), b.GetSize());
     }
 
-    std::string exo_pose_server::_serialize_source_stream_ended() const
+    std::string exo_pose_server::_serialize_source_stream_ended(const bool is_error) const
     {
         fb::FlatBufferBuilder b;
-        // Recording EOF is graceful; a live device stopping on its own is a loss.
-        const bool is_playback = _imp->pipeline.is_playback_source();
-        const bool is_error = !is_playback;
-        const char* msg = is_playback ? "recording reached end" : "device stream ended";
+        const char* msg = is_error ? "the source stream failed" : "the source reached its end";
         const auto ended = fb_proto::CreateSourceStreamEnded(b, is_error, b.CreateString(msg));
         b.Finish(fb_proto::CreateMessage(b, fb_proto::Payload_SourceStreamEnded, ended.Union(), kServerNotifyReqId));
         return std::string(std::bit_cast<const char*>(b.GetBufferPointer()), b.GetSize());

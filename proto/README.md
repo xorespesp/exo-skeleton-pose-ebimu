@@ -12,11 +12,10 @@ Network protocol between the `exo-skeleton-pose` server (`serve` subcommand) and
 
 | Direction | Messages |
 |-----------|----------|
-| Client -> Server | `OpenSource`, `CloseSource`, `CalibrateRestPose`, `ClearRestPose` |
-| Server -> Client | `PoseFrame` (per frame, broadcast), `SourceStatus` (on change), `Ack` (per command) |
+| Client -> Server | `Hello` (mandatory first message), `StartPoseStream`, `StopPoseStream`, `CalibrateRestPose`, `ClearRestPose`, `GetServerStatus` |
+| Server -> Client | `PoseFrame` (per frame, broadcast), `ServerStatus` (after handshake / on change / on request), `SourceStreamEnded`, `Ack` (per command) |
 
-`OpenSource.source` is a plain string parsed by the server: 
-an unsigned integer selects a live device index, anything else is a recording file path. 
+What `StartPoseStream` opens is the server config's choice, so the command carries no arguments. 
 Camera image data is intentionally not part of the protocol.
 
 ## Codegen

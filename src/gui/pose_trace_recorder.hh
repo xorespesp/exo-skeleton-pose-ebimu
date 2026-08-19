@@ -93,9 +93,12 @@ namespace gui
             bool lost{ false };     // no position available this frame
             std::optional<Eigen::Vector3d> raw_position;      // raw measured rig-space position [m]
             std::optional<Eigen::Vector3d> position;          // smoothed + held rig-space position [m]
-            std::optional<Eigen::Quaterniond> local_anim_rot; // parent-relative animation rotation
-            std::optional<double> local_sagittal_angle;    // flexion from the parent bone [rad]
-            std::optional<double> absolute_sagittal_angle; // this bone's own flexion in the rig frame [rad]
+            std::optional<Eigen::Quaterniond> local_anim_rot; // parent-relative animation rotation, vs the captured rest
+            std::optional<double> sagittal_segment_angle;        // bone attitude from vertical [rad], anterior +
+            std::optional<double> sagittal_clinical_angle;       // bend vs the parent bone [rad], flexion/dorsiflexion +
+            std::optional<double> sagittal_included_angle;       // inter-bone angle [rad], pi when collinear
+            std::optional<double> sagittal_clinical_angle_delta; // change of the clinical angle since the captured rest [rad]
+            std::optional<double> sagittal_segment_angle_delta;  // change of the segment angle since the captured rest [rad]
         };
 
         struct frame_rec_t

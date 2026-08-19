@@ -1,4 +1,4 @@
-// exo-skeleton-pose network protocol.
+﻿// exo-skeleton-pose network protocol.
 //
 // codegen:
 //   C++ : flatc --cpp    -o <out> exo_pose_proto.fbs
@@ -8,33 +8,30 @@
 namespace exo.proto;
 
 // Current version of this schema
-enum ProtocolVersion : uint { Current = 26080300 } // YYMMDDrr
+enum ProtocolVersion : uint { Current = 26081901 } // YYMMDDrr
 
-// Lower-limb joints id.
+// Lower-limb joint ids.
+// NOTE: A joint is an articulation point; its rotation and angles describe the
+//       bend AT it, so each leg joint drives the bone leaving it toward its child.
+//       Chain: Pelvis -> {R,L}Hip -> {R,L}Knee -> {R,L}Ankle -> {R,L}Foot.
 enum JointId : ubyte {
-    Pelvis = 0,
-    RKnee,
-    LKnee,
-    RAnkle,
-    LAnkle,
-    RFoot,
-    LFoot
+    Pelvis = 0, // root of both chains; its bone is the virtual torso on the reference axis
+    RHip,       // drives the right thigh
+    LHip,       // drives the left thigh
+    RKnee,      // drives the right shin
+    LKnee,      // drives the left shin
+    RAnkle,     // drives the right foot
+    LAnkle,     // drives the left foot
+    RFoot,      // marker end site: no bone leaves it, so its rotation and angles are always null
+    LFoot       // marker end site: rotation and angles always null
 }
-
-// Rig frame, which every rotation and angle below is expressed in. It is anchored to the exo
-// rather than to any camera, so it is the same whatever the camera sees the exo from:
-//
-//   +X  the exo's left       +Y  down       +Z  behind the exo
-//
-// Every leg joint is a forward/back hinge about +X, and both angles below are signed by the
-// right-hand rule about it. A client driving a rig from the angles turns each bone about +X.
-// The axis is fixed, so it is not carried in any message.
 
 // ---------------------------------------------------------------------------
 // Client -> Server commands
 // ---------------------------------------------------------------------------
 
 // Handshake. (client's mandatory first message)
+// The server holds one client at a time; a second connection is closed with 1013.
 // On success -> the server replies Ack(ok) followed by a ServerStatus.
 // On failure -> the server closes with WebSocket code 1002 and the reason.
 table Hello {
@@ -46,7 +43,7 @@ table Hello {
 table StartPoseStream {}
 table StopPoseStream {} // release the source; PoseFrames stop
 
-table CalibrateRestPose {} // latch the current pose as the rest (bind) reference
+table CalibrateRestPose {} // latch the current pose as the rest (bind) reference; needs a running stream
 table ClearRestPose {}     // drop the captured rest pose
 table GetServerStatus {}   // request the current ServerStatus (reply a ServerStatus, no Ack)
 
@@ -56,32 +53,58 @@ table GetServerStatus {}   // request the current ServerStatus (reply a ServerSt
 
 struct Quat { x: double; y: double; z: double; w: double; }
 
-// One joint's pose: the same motion in three forms.
-// All null when the joint is lost this frame.
+// One joint's articulation: the animation rotation, and the measured angles of the bend.
+// Every field is null on its own, present when this frame produced it.
 table JointPose {
     id: JointId;
 
     // Rotation from the captured rest pose, relative to the parent bone (identity at rest).
     // Apply to a rig bone as: bone.local = bind * local_anim_rot
+    // Null until CalibrateRestPose succeeds; the one rest-referenced field of this table.
+    // Identity on the Pelvis, the fixed base the chains hang from.
+    //
+    // Expressed in the rig frame, fixed to the exo and independent of where the camera stands:
+    //
+    //   +X  the exo's left       +Y  down       +Z  behind the exo
+    //
+    // Every leg joint is a forward/back hinge about +X, signed by the right-hand rule about that axis;
+    // a positive turn carries +Y onto +Z, swinging the bone's far end toward the exo's back.
     local_anim_rot: Quat;
 
-    // Flexion in the exo's sagittal plane from the captured rest pose [rad], 0 at rest.
-    // Positive bends the knee back, negative swings the leg forward.
+    // The three angles below are sagittal-plane measurements that flow with no rest pose
+    // involved, in the standard gait-analysis conventions (docs/joint_angle_convention.md).
     //
-    // NOTE: these and `local_anim_rot` can disagree. They are measured in the hinge plane, while
-    //       the rotation is whatever the estimator solved, and a solve left free of a 1-DOF hinge
-    //       constraint carries off-hinge components the angles do not see. Reading a flexion back
-    //       out of the rotation then returns less than these state. Drive a rig from one form.
-    local_sagittal_angle: double = null;    // relative to the parent bone: this joint's own bend
-    absolute_sagittal_angle: double = null; // relative to the exo: the sum of `local_sagittal_angle` down the chain
+    // NOTE: the angles and `local_anim_rot` describe one pose two ways and can disagree in
+    //       magnitude. They also run in opposite senses: a positive rotation swings the bone
+    //       posterior, a positive segment angle means anterior. Drive a rig from the rotation;
+    //       read the angles as measurements.
+
+    // Segment Angle: attitude of the bone this joint drives, from vertically down.
+    //   0 = hanging straight down, + = tilted anterior (the exo's front), - = posterior.
+    //   Pelvis: 0 by definition, its bone being the torso on the reference axis.
+    sagittal_segment_angle: double = null; // Unit: [rad]
+
+    // Clinical Joint Angle (Neutral Zero Method): the bend at this joint against its parent bone.
+    //   0 = neutral standing stance, + = flexion / dorsiflexion, - = extension / plantarflexion.
+    //   Ankle: neutral is the foot MARKER line perpendicular to the shank. That line sits a fixed
+    //          tag-placement constant off the exo's own foot axis, so 0 is not its mechanical neutral.
+    //   Null on the Pelvis and the end sites.
+    sagittal_clinical_angle: double = null; // Unit: [rad]
+
+    // Included Angle: the angle between the two bones meeting at this joint, signed and continuous.
+    //   pi = the bones are collinear; shrinks with flexion, grows past pi in extension.
+    //   Ankle: neutral reads pi/2.
+    //   Always (pi - offset) - sagittal_clinical_angle, offset = 0 for hip/knee, pi/2 for ankle.
+    //   Null wherever sagittal_clinical_angle is null.
+    sagittal_included_angle: double = null; // Unit: [rad]
 }
 
-// One estimation step, broadcast to subscribed clients per new frame.
+// One estimation step, sent per new frame.
 table PoseFrame {
     frame_seq: uint; // position of this frame in the open source's stream; restarts on every open
-    timestamp_us: long; // when the source captured the frame, in Unix microseconds
-    has_rest_pose: bool; // false until CalibrateRestPose succeeds; every joint stays null until then
-    joints: [JointPose];
+    timestamp_us: long; // when the source captured the frame on the Unix epoch (Unit: [us])
+    has_rest_pose: bool; // false until CalibrateRestPose succeeds; `local_anim_rot` stays null until then
+    joints: [JointPose]; // one entry per JointId, in enum order; index it by id
 }
 
 // Current server state, pushed after the handshake, on change, or on GetServerStatus request.
@@ -90,13 +113,13 @@ table ServerStatus {
     is_streaming: bool;
     source_name: string;    // NOTE: empty while not streaming
     source_backend: string; // NOTE: empty while not streaming
-    width: int;  // color frame width, in pixels
-    height: int; // color frame height, in pixels
+    width: int;  // color frame width (Unit: [px]); 0 while not streaming
+    height: int; // color frame height (Unit: [px]); 0 while not streaming
     has_rest_pose: bool;
 }
 
-// Sent when the source stream stops on its own.
-// The pose stream halts; the client decides whether to close/re-open.
+// Sent when the source stream stops on its own. A failed source is released;
+// one that ran out stays open, so restarting that one takes a StopPoseStream first.
 table SourceStreamEnded {
     is_error: bool; // whether the source terminated abnormally
     message: string;
@@ -110,9 +133,9 @@ union Payload {
     PoseFrame, ServerStatus, SourceStreamEnded, Ack                                            // server -> client
 }
 
-// request id lets a client match a reply to its command: 
-// send a non-zero id and the server echoes it on the Ack. (or GetServerStatus reply) 
-// request id 0 is reserved for the server's own notifications(pose/status/ended),
-// so a command carrying it is a protocol violation and closes the socket.
+// Request id matches a reply to its command.
+//   client -> server: MUST be non-zero, Hello included. 0 closes the socket with 1002.
+//   server -> client: echoed on the Ack and on a GetServerStatus reply; 0 on the server's own
+//                     pose/status/ended notifications, and on the ServerStatus after a Hello.
 table Message { payload: Payload; request_id: uint = 0; }
 root_type Message;

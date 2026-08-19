@@ -1,4 +1,4 @@
-#include "color_marker_detector.hh"
+﻿#include "color_marker_detector.hh"
 
 #include <opencv2/imgproc.hpp>
 
@@ -8,6 +8,7 @@
 #include <functional>
 #include <numbers>
 #include <string>
+#include <optional>
 
 namespace pose
 {
@@ -311,10 +312,21 @@ namespace pose
 
     void color_marker_assigner::_rebuild_chain()
     {
+        // One slot per physical marker: joints co-sited on the previous slot's tag (the hip on
+        // the pelvis marker) name the same disc, so they fold into that slot and receive its
+        // measurement through the fan-out when results are emitted.
         _chain.clear();
-        _chain.push_back(get_root_joint());
+        int last_tag = -1;
+        const auto add_site = [this, &last_tag](joint_id_t j) {
+            const auto def = get_joint_def(j);
+            if (!def.has_value()) { return; }
+            if (!_chain.empty() && def->tag_id == last_tag) { return; }
+            _chain.push_back(j);
+            last_tag = def->tag_id;
+        };
+        add_site(get_root_joint());
         for (auto j = get_leg_root_joint(_opt.leg); j.has_value(); j = get_child_joint(j.value())) {
-            _chain.push_back(j.value());
+            add_site(j.value());
         }
         _chain_side = _opt.leg;
 
@@ -475,12 +487,22 @@ namespace pose
             _last_px[i] = c;
 
             joint_2d_measurement_t m{};
-            m.joint_id = _chain[i];
             m.center_px = c;
             if (picked[i]->diameter_px > 1e-6f) {
                 m.meters_per_pixel = _opt.marker_diameter_m / picked[i]->diameter_px;
             }
-            out.push_back(m);
+
+            // 이 슬롯의 태그에 겹쳐 있는(co-sited) 관절 전부에 같은 측정을 완전한 사본으로
+            // 내보낸다. 골반 마커라면 pelvis 와 양쪽 hip 이 함께 받는다. 미터 스케일 투표의
+            // 마커당 1표 집계는 추정기가 태그 키로 수행하므로, 사본이 몇 개든 마커 하나는
+            // 한 표다.
+            const auto slot_def = get_joint_def(_chain[i]);
+            for (const auto& def : get_joint_defs())
+            {
+                if (!slot_def.has_value() || def.tag_id != slot_def->tag_id) { continue; }
+                m.joint_id = def.joint_id;
+                out.push_back(m);
+            }
             ++_stats.assigned;
         }
 

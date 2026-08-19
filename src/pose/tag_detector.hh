@@ -137,9 +137,12 @@ namespace pose
     // Tag detections -> estimator measurements
     // ---------------------------------------------------------------------------
     //
-    // A tag states its own identity, so binding it to the rig is a table lookup and needs no state
-    // across frames. These are free functions: the detector decodes tags and knows nothing of the
-    // rig, and that stays true with the binding sitting beside it rather than inside it.
+    // A tag states its own identity, so binding it to the rig is a table scan and needs no state
+    // across frames. A tag carrying several co-sited joints (the pelvis marker holds the pelvis
+    // root and both hips) yields one measurement per joint, all at the same point, so every
+    // articulation the rig places there is measured by the one detection. These are free
+    // functions: the detector decodes tags and knows nothing of the rig, and that stays true with
+    // the binding sitting beside it rather than inside it.
     //
     // Both drop what they cannot bind, so the returned span is exactly what an estimator can use.
 
@@ -175,18 +178,23 @@ namespace pose
         out.reserve(detections.size());
         for (const auto& det : detections)
         {
-            const auto joint = tag_id_to_joint_id(det.id);
-            if (!joint.has_value()) { continue; }
-
             joint_2d_measurement_t m{};
-            m.joint_id = joint.value();
             m.center_px = Eigen::Vector2d{ det.center.x, det.center.y };
 
             // A degenerate quad would divide into a wild scale, so it votes on the center alone.
             if (const double edge_px = mean_edge_px(det.corners); edge_px > 1e-6) {
                 m.meters_per_pixel = tag_size_m / edge_px;
             }
-            out.push_back(m);
+
+            // One measurement per joint bound to this tag, all full copies at the same point
+            // (co-sited). The estimator keys its metric-scale votes by the bound tag, so the
+            // shared marker counts once however many joints ride it.
+            for (const auto& def : get_joint_defs())
+            {
+                if (def.tag_id != det.id) { continue; }
+                m.joint_id = def.joint_id;
+                out.push_back(m);
+            }
         }
         return out;
     }
@@ -201,12 +209,15 @@ namespace pose
         out.reserve(detections.size());
         for (const auto& det : detections)
         {
-            const auto joint = tag_id_to_joint_id(det.id);
-            if (!joint.has_value()) { continue; }
             const auto p = detection_position(det);
             if (!p.has_value()) { continue; }
 
-            out.push_back(joint_3d_measurement_t{ .joint_id = joint.value(), .position = p.value() });
+            // One measurement per joint bound to this tag, all at the same point (co-sited).
+            for (const auto& def : get_joint_defs())
+            {
+                if (def.tag_id != det.id) { continue; }
+                out.push_back(joint_3d_measurement_t{ .joint_id = def.joint_id, .position = p.value() });
+            }
         }
         return out;
     }

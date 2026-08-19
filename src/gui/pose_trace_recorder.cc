@@ -57,10 +57,13 @@ namespace gui
             d.decision_margin = det.decision_margin;
             d.center = { det.center.x, det.center.y };
             for (std::size_t k = 0; k < 4; ++k) { d.corners[k] = { det.corners[k].x, det.corners[k].y }; }
-            d.joint_id = pose::tag_id_to_joint_id(det.id);
+            d.joint_id = pose::tag_id_to_joint_id(det.id); // the tag's primary joint
             d.position = pose::detection_position(det);
             if (d.joint_id.has_value() && d.position.has_value()) {
-                tag_present[static_cast<std::size_t>(d.joint_id.value())] = true;
+                // Every joint co-sited on this tag was measured by it, so each counts as present.
+                for (const auto& def : pose::get_joint_defs()) {
+                    if (def.tag_id == det.id) { tag_present[static_cast<std::size_t>(def.joint_id)] = true; }
+                }
             }
             f.detections.push_back(std::move(d));
         }
@@ -79,8 +82,11 @@ namespace gui
             jr.raw_position = st.raw_position;
             jr.position = st.position;
             jr.local_anim_rot = st.local_anim_rot;
-            jr.local_sagittal_angle = st.local_sagittal_angle;
-            jr.absolute_sagittal_angle = st.absolute_sagittal_angle;
+            jr.sagittal_segment_angle = st.sagittal_segment_angle;
+            jr.sagittal_clinical_angle = st.sagittal_clinical_angle;
+            jr.sagittal_included_angle = st.sagittal_included_angle;
+            jr.sagittal_clinical_angle_delta = st.sagittal_clinical_angle_delta;
+            jr.sagittal_segment_angle_delta = st.sagittal_segment_angle_delta;
             f.rest_position[ji] = estimator.get_rest_position(def.joint_id);
         }
 
@@ -97,17 +103,22 @@ namespace gui
         pose::view_plane_t view_plane) const
     {
         json root;
-        root["schema"] = "exo-pose-trace/v5";
+        root["schema"] = "exo-pose-trace/v9";
         root["notes"] = "Joint positions are [x,y,z] in meters, rig frame (X to the exo's left, Y down, "
                         "Z behind it; the frame of a camera facing it head-on). A sagittal run "
                         "approximates them from the image plane, so they lie on x = 0. "
                         "Detection positions are tag->camera translations and exist only when the "
-                        "detector solved a tag pose. Quaternions are [w,x,y,z]. local_anim_rot is the "
-                        "per-joint animation rotation (parent-relative, vs the captured rest). The "
-                        "two angles are the same joint's flexion about the lateral axis in radians, "
-                        "signed by the right-hand rule about rig +X and likewise vs the captured "
-                        "rest: local_sagittal_angle is the turn from the parent bone, "
-                        "absolute_sagittal_angle this bone's own turn in the rig frame.";
+                        "detector solved a tag pose. Quaternions are [w,x,y,z]. A joint's rotation "
+                        "and angles describe the articulation at it, turning the bone toward its "
+                        "child; the hips are co-sited on the pelvis marker, and the feet are marker "
+                        "end sites carrying a position only. local_anim_rot is the per-joint "
+                        "animation rotation (parent-relative, vs the captured rest, about rig +X). "
+                        "The angles are sagittal-plane radians in the conventions of "
+                        "docs/joint_angle_convention.md: sagittal_segment_angle is the bone's attitude from "
+                        "vertically down (anterior +), sagittal_clinical_angle the bend vs the parent bone "
+                        "(0 at neutral, flexion/dorsiflexion +), sagittal_included_angle the signed "
+                        "inter-bone angle derived from the clinical one (pi when collinear). The "
+                        "*_delta fields are those angles' changes since the captured rest.";
         root["view_plane"] = std::string{ pose::view_plane_name(view_plane) };
 
         root["source"] = {
@@ -135,7 +146,6 @@ namespace gui
                 { "joint", std::string{ def.name } },
                 { "tag_id", def.tag_id },
                 { "parent", std::string{ pose::get_joint_name(def.parent) } },
-                { "mirror", std::string{ pose::get_joint_name(def.mirror) } },
                 { "side", def.side == pose::joint_side_t::right ? "right"
                         : def.side == pose::joint_side_t::left  ? "left" : "midline" },
                 { "is_root", pose::is_root_joint(def.joint_id) },
@@ -193,8 +203,11 @@ namespace gui
                 jj["raw_position"] = opt_v3_json(jr.raw_position);
                 jj["position"] = opt_v3_json(jr.position);
                 jj["local_anim_rot"] = opt_q_json(jr.local_anim_rot);
-                jj["local_sagittal_angle"] = opt_num_json(jr.local_sagittal_angle);
-                jj["absolute_sagittal_angle"] = opt_num_json(jr.absolute_sagittal_angle);
+                jj["sagittal_segment_angle"] = opt_num_json(jr.sagittal_segment_angle);
+                jj["sagittal_clinical_angle"] = opt_num_json(jr.sagittal_clinical_angle);
+                jj["sagittal_included_angle"] = opt_num_json(jr.sagittal_included_angle);
+                jj["sagittal_clinical_angle_delta"] = opt_num_json(jr.sagittal_clinical_angle_delta);
+                jj["sagittal_segment_angle_delta"] = opt_num_json(jr.sagittal_segment_angle_delta);
                 joints[joint_name(i)] = std::move(jj);
             }
             jf["joints"] = std::move(joints);
